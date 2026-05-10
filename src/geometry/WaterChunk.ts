@@ -20,6 +20,8 @@ export interface WaterGeometryOptions {
 
 const SOLID_FACTOR   = 0.8;
 const INNER_TO_OUTER = 1 / 0.866025404;
+/** World-space UV scale for standing water — matches original world * 0.0625 shader. */
+const UV_WATER_SCALE = 0.0625;
 
 function neighborOffset(col: number, row: number, d: number): { col: number; row: number } {
   const q  = col - (row - (row & 1)) / 2;
@@ -29,19 +31,14 @@ function neighborOffset(col: number, row: number, d: number): { col: number; row
 }
 
 /**
- * Builds a water geometry for a chunk following the Part 6/8 tutorial approach:
+ * Builds a water geometry for a chunk following the Part 6/8 tutorial approach.
  *
- * - Standing water: full hex fan at `waterLevel` over every Water-terrain cell.
- * - River water: the between-cell connection quad is generated ONCE from the
- *   outgoing cell, using y1 = cell.RiverSurfaceY and y2 = neighbor.RiverSurfaceY
- *   (full slope, not averaged). Incoming edges produce no outer quad — the
- *   upstream cell's outgoing quad already covers the bridge. This matches the
- *   tutorial's TriangulateRiverQuad / TriangulateConnection pattern.
- * - Waterfalls into water: outer quad goes from ry down to waterLevel; suppressed
- *   when the cell's river surface is already at or below the water surface.
- *
- * All XZ perturbation uses sampleNoise with the same parameters as the terrain
- * builder, so water edges are seamless with the terrain they overlay.
+ * UV layout:
+ *   Standing water — world-space (worldX * 0.0625, worldZ * 0.0625) for omnidirectional ripple.
+ *   River water    — flow-space: U=0→1 across channel (left→right looking downstream),
+ *                    V=0→1 per cell half (0 at upstream boundary, 0.5 at inner control pts,
+ *                    1 at downstream boundary). Incoming edges use reversed U so the
+ *                    texture tiles seamlessly across hex boundaries.
  */
 export function buildWaterGeometry(
   map: HexMap,
@@ -60,47 +57,65 @@ export function buildWaterGeometry(
   const maxVerts = hexCount * 80;
 
   const positions = new Float32Array(maxVerts * 3);
-  let vi = 0;
+  const uvs       = new Float32Array(maxVerts * 2);
+  let vi = 0, uvi = 0;
 
   const perturb = (x: number, z: number): [number, number] => {
     const n = sampleNoise(x * noiseScale, z * noiseScale);
     return [(n[0] * 2 - 1) * perturbStr, (n[2] * 2 - 1) * perturbStr];
   };
 
-  const addVert = (x: number, y: number, z: number) => {
+  const addVert = (x: number, y: number, z: number, u: number, v: number) => {
     const [dx, dz] = perturb(x, z);
     positions[vi++] = x + dx;
     positions[vi++] = y;
     positions[vi++] = z + dz;
+    uvs[uvi++] = u;
+    uvs[uvi++] = v;
   };
 
-  const addTri = (
-    x0: number, y0: number, z0: number,
-    x1: number, y1: number, z1: number,
-    x2: number, y2: number, z2: number,
-  ) => { addVert(x0,y0,z0); addVert(x1,y1,z1); addVert(x2,y2,z2); };
+  /** Standing water vertex — world-space UV for omnidirectional ripple. */
+  const addVertW = (x: number, y: number, z: number) =>
+    addVert(x, y, z, x * UV_WATER_SCALE, z * UV_WATER_SCALE);
 
-  const addQuad = (
+  const addTriW = (
     x0: number, y0: number, z0: number,
     x1: number, y1: number, z1: number,
     x2: number, y2: number, z2: number,
-    x3: number, y3: number, z3: number,
+  ) => { addVertW(x0, y0, z0); addVertW(x1, y1, z1); addVertW(x2, y2, z2); };
+
+  /** River triangle — explicit UV per vertex. */
+  const addTri = (
+    x0: number, y0: number, z0: number, u0: number, v0: number,
+    x1: number, y1: number, z1: number, u1: number, v1: number,
+    x2: number, y2: number, z2: number, u2: number, v2: number,
   ) => {
-    addTri(x0,y0,z0, x1,y1,z1, x3,y3,z3);
-    addTri(x0,y0,z0, x3,y3,z3, x2,y2,z2);
+    addVert(x0, y0, z0, u0, v0);
+    addVert(x1, y1, z1, u1, v1);
+    addVert(x2, y2, z2, u2, v2);
+  };
+
+  /** River quad — two triangles, vertices ordered: near-left, near-right, far-left, far-right. */
+  const addQuad = (
+    x0: number, y0: number, z0: number, u0: number, v0: number,
+    x1: number, y1: number, z1: number, u1: number, v1: number,
+    x2: number, y2: number, z2: number, u2: number, v2: number,
+    x3: number, y3: number, z3: number, u3: number, v3: number,
+  ) => {
+    addTri(x0, y0, z0, u0, v0,  x1, y1, z1, u1, v1,  x3, y3, z3, u3, v3);
+    addTri(x0, y0, z0, u0, v0,  x3, y3, z3, u3, v3,  x2, y2, z2, u2, v2);
   };
 
   /**
    * Waterfall quad clipped to the water surface (Part 8 TriangulateWaterfallInWater).
-   * Top vertices stay at y1 (river surface); bottom vertices are pulled toward the
-   * top along XZ to sit at waterY, then the quad is added unperturbed (vertices were
-   * already perturbed before the lerp).
+   * Top vertices at y1 (cL/cR); bottom vertices lerped toward top to land at wY.
+   * UV: top (0/1, 0.5), bottom (0/1, 1.0) — outgoing outer quad range.
    */
   const addWaterfallQuad = (
-    x0: number, z0: number,  // top-left  XZ at y1
-    x1: number, z1: number,  // top-right XZ at y1
-    x2: number, z2: number,  // bot-left  XZ at y2
-    x3: number, z3: number,  // bot-right XZ at y2
+    x0: number, z0: number,   // top-left  (cL)
+    x1: number, z1: number,   // top-right (cR)
+    x2: number, z2: number,   // bot-left  (crns[i])
+    x3: number, z3: number,   // bot-right (crns[i1])
     y1: number, y2: number, wY: number,
   ) => {
     const [d0x, d0z] = perturb(x0, z0);
@@ -111,17 +126,17 @@ export function buildWaterGeometry(
     const p1x = x1 + d1x, p1z = z1 + d1z;
     let   p2x = x2 + d2x, p2z = z2 + d2z;
     let   p3x = x3 + d3x, p3z = z3 + d3z;
-    // Pull bottom vertices toward top so they land at wY
     const t = (wY - y2) / (y1 - y2);
     p2x += (p0x - p2x) * t;  p2z += (p0z - p2z) * t;
     p3x += (p1x - p3x) * t;  p3z += (p1z - p3z) * t;
-    // Add without further perturbation (already applied)
-    positions[vi++] = p0x; positions[vi++] = y1; positions[vi++] = p0z;
-    positions[vi++] = p1x; positions[vi++] = y1; positions[vi++] = p1z;
-    positions[vi++] = p3x; positions[vi++] = wY; positions[vi++] = p3z;
-    positions[vi++] = p0x; positions[vi++] = y1; positions[vi++] = p0z;
-    positions[vi++] = p3x; positions[vi++] = wY; positions[vi++] = p3z;
-    positions[vi++] = p2x; positions[vi++] = wY; positions[vi++] = p2z;
+    // Tri 1: [p0(top-left), p1(top-right), p3(bot-right)]
+    positions[vi++] = p0x; positions[vi++] = y1;  positions[vi++] = p0z; uvs[uvi++] = 0.0; uvs[uvi++] = 0.5;
+    positions[vi++] = p1x; positions[vi++] = y1;  positions[vi++] = p1z; uvs[uvi++] = 1.0; uvs[uvi++] = 0.5;
+    positions[vi++] = p3x; positions[vi++] = wY;  positions[vi++] = p3z; uvs[uvi++] = 1.0; uvs[uvi++] = 1.0;
+    // Tri 2: [p0(top-left), p3(bot-right), p2(bot-left)]
+    positions[vi++] = p0x; positions[vi++] = y1;  positions[vi++] = p0z; uvs[uvi++] = 0.0; uvs[uvi++] = 0.5;
+    positions[vi++] = p3x; positions[vi++] = wY;  positions[vi++] = p3z; uvs[uvi++] = 1.0; uvs[uvi++] = 1.0;
+    positions[vi++] = p2x; positions[vi++] = wY;  positions[vi++] = p2z; uvs[uvi++] = 0.0; uvs[uvi++] = 1.0;
   };
 
   for (let row = rowStart; row < rowEnd; row++) {
@@ -137,11 +152,11 @@ export function buildWaterGeometry(
       const crns   = hexCorners(layout, { q, r: row });
       const ownElev = map.getElevation(col, row);
 
-      // --- Standing water: full hex fan at waterLevel ---
+      // --- Standing water: full hex fan at waterLevel with world-space UV ---
       if (isWater) {
         for (let i = 0; i < 6; i++) {
           const i1 = (i + 1) % 6;
-          addTri(
+          addTriW(
             center.x,   waterLevel, center.z,
             crns[i1].x, waterLevel, crns[i1].z,
             crns[i].x,  waterLevel, crns[i].z,
@@ -163,9 +178,7 @@ export function buildWaterGeometry(
           const i1         = (i + 1) % 6;
           const isOutgoing = (i === outDir);
 
-          // Look up the neighbour's river surface Y.
-          // The outgoing quad uses the full range ry→nbRy (tutorial Part 6 approach).
-          let   nbRy     = ry;
+          let   nbRy      = ry;
           let   nbIsWater = false;
           const d  = edgeDirs[i];
           const nb = neighborOffset(col, row, d);
@@ -180,9 +193,8 @@ export function buildWaterGeometry(
 
           if (isBeginEnd) {
             if (isOutgoing) {
-              // Source: fan triangle from centre out to the hex edge.
+              // Source: fan from center outward. UV: center=(0.5,0), boundary=(0/1,1).
               if (nbIsWater && ry > waterLevel) {
-                // Waterfall into standing water: clip to water surface level.
                 const [dcx, dcz] = perturb(center.x, center.z);
                 const [dLx, dLz] = perturb(crns[i].x, crns[i].z);
                 const [dRx, dRz] = perturb(crns[i1].x, crns[i1].z);
@@ -192,55 +204,48 @@ export function buildWaterGeometry(
                 const pLz = (crns[i].z  + dLz) + (pcz - (crns[i].z  + dLz)) * t;
                 const pRx = (crns[i1].x + dRx) + (pcx - (crns[i1].x + dRx)) * t;
                 const pRz = (crns[i1].z + dRz) + (pcz - (crns[i1].z + dRz)) * t;
-                positions[vi++] = pcx; positions[vi++] = ry;         positions[vi++] = pcz;
-                positions[vi++] = pLx; positions[vi++] = waterLevel; positions[vi++] = pLz;
-                positions[vi++] = pRx; positions[vi++] = waterLevel; positions[vi++] = pRz;
+                positions[vi++] = pcx; positions[vi++] = ry;         positions[vi++] = pcz; uvs[uvi++] = 0.5; uvs[uvi++] = 0.0;
+                positions[vi++] = pLx; positions[vi++] = waterLevel; positions[vi++] = pLz; uvs[uvi++] = 0.0; uvs[uvi++] = 1.0;
+                positions[vi++] = pRx; positions[vi++] = waterLevel; positions[vi++] = pRz; uvs[uvi++] = 1.0; uvs[uvi++] = 1.0;
               } else if (!nbIsWater) {
                 addTri(
-                  center.x,    ry,    center.z,
-                  crns[i].x,   nbRy,  crns[i].z,
-                  crns[i1].x,  nbRy,  crns[i1].z,
+                  center.x,    ry,   center.z,    0.5, 0.0,
+                  crns[i].x,   nbRy, crns[i].z,   0.0, 1.0,
+                  crns[i1].x,  nbRy, crns[i1].z,  1.0, 1.0,
                 );
               }
             } else {
-              // Terminus: full flat fan from centre to hex edge at own river surface.
-              // The upstream outgoing quad ends at these hex corners, so this fills
-              // the receiving cell's half of the connection seamlessly.
+              // Terminus: incoming fan, reversed U, V=0 at boundary → 0.5 at center.
               addTri(
-                center.x,    ry, center.z,
-                crns[i].x,   ry, crns[i].z,
-                crns[i1].x,  ry, crns[i1].z,
+                center.x,    ry, center.z,    0.5, 0.5,
+                crns[i].x,   ry, crns[i].z,   1.0, 0.0,
+                crns[i1].x,  ry, crns[i1].z,  0.0, 0.0,
               );
             }
           } else {
-            // Through-river: replicate terrain's 5-case cL/cR routing.
+            // Through-river: 5-case cL/cR routing.
             const ip  = (i + 5) % 6;
             const in2 = (i + 2) % 6;
             let cLx: number, cLz: number, cRx: number, cRz: number;
 
             if (map.hasRiverThroughEdge(col, row, (i + 3) % 6)) {
-              // straight
               cLx = center.x + ox[ip]  * SOLID_FACTOR * 0.25;
               cLz = center.z + oz[ip]  * SOLID_FACTOR * 0.25;
               cRx = center.x + ox[in2] * SOLID_FACTOR * 0.25;
               cRz = center.z + oz[in2] * SOLID_FACTOR * 0.25;
             } else if (map.hasRiverThroughEdge(col, row, i1)) {
-              // sharp turn toward next
               cLx = center.x; cLz = center.z;
               cRx = center.x + ox[i1] * SOLID_FACTOR * (2 / 3);
               cRz = center.z + oz[i1] * SOLID_FACTOR * (2 / 3);
             } else if (map.hasRiverThroughEdge(col, row, ip)) {
-              // sharp turn toward prev
               cLx = center.x + ox[i] * SOLID_FACTOR * (2 / 3);
               cLz = center.z + oz[i] * SOLID_FACTOR * (2 / 3);
               cRx = center.x; cRz = center.z;
             } else if (map.hasRiverThroughEdge(col, row, in2)) {
-              // gentle curve toward next+2
               cLx = center.x; cLz = center.z;
               cRx = center.x + (ox[i1] + ox[in2]) * SOLID_FACTOR * 0.25 * INNER_TO_OUTER;
               cRz = center.z + (oz[i1] + oz[in2]) * SOLID_FACTOR * 0.25 * INNER_TO_OUTER;
             } else {
-              // gentle curve toward prev+2
               cLx = center.x + (ox[ip] + ox[i]) * SOLID_FACTOR * 0.25 * INNER_TO_OUTER;
               cLz = center.z + (oz[ip] + oz[i]) * SOLID_FACTOR * 0.25 * INNER_TO_OUTER;
               cRx = center.x; cRz = center.z;
@@ -248,11 +253,14 @@ export function buildWaterGeometry(
 
             const ccx = (cLx + cRx) * 0.5, ccz = (cLz + cRz) * 0.5;
 
-            // Centre tri: fills the inner channel — emitted for both directions.
-            addTri(cLx, ry, cLz,  ccx, ry, ccz,  cRx, ry, cRz);
-
             if (isOutgoing) {
-              // Outgoing: full-slope outer quad from cL/cR to hex boundary at nbRy.
+              // Centre tri: V=0.5 at control points, U=0→1 left→right.
+              addTri(
+                cLx, ry, cLz, 0.0, 0.5,
+                ccx, ry, ccz, 0.5, 0.5,
+                cRx, ry, cRz, 1.0, 0.5,
+              );
+              // Outer quad: V goes 0.5 (control pts) → 1.0 (hex boundary).
               if (nbIsWater && ry > waterLevel) {
                 addWaterfallQuad(
                   cLx, cLz, cRx, cRz,
@@ -261,21 +269,25 @@ export function buildWaterGeometry(
                 );
               } else if (!nbIsWater) {
                 addQuad(
-                  cLx,        ry,    cLz,
-                  cRx,        ry,    cRz,
-                  crns[i].x,  nbRy,  crns[i].z,
-                  crns[i1].x, nbRy,  crns[i1].z,
+                  cLx,        ry,   cLz,         0.0, 0.5,
+                  cRx,        ry,   cRz,         1.0, 0.5,
+                  crns[i].x,  nbRy, crns[i].z,   0.0, 1.0,
+                  crns[i1].x, nbRy, crns[i1].z,  1.0, 1.0,
                 );
               }
             } else {
-              // Incoming: flat fill quad from hex boundary inward to cL/cR, all at ry.
-              // This fills the receiving cell's half of the bridge; the upstream
-              // outgoing quad already ends at these hex corners at ry.
+              // Incoming: reversed U (1→0 left→right), V=0 at boundary → 0.5 at control pts.
+              addTri(
+                cLx, ry, cLz, 1.0, 0.5,
+                ccx, ry, ccz, 0.5, 0.5,
+                cRx, ry, cRz, 0.0, 0.5,
+              );
+              // Fill quad: crns at V=0, cL/cR at V=0.5, U reversed.
               addQuad(
-                crns[i].x,  ry, crns[i].z,
-                crns[i1].x, ry, crns[i1].z,
-                cLx,        ry, cLz,
-                cRx,        ry, cRz,
+                crns[i].x,  ry, crns[i].z,  1.0, 0.0,
+                crns[i1].x, ry, crns[i1].z, 0.0, 0.0,
+                cLx,        ry, cLz,         1.0, 0.5,
+                cRx,        ry, cRz,         0.0, 0.5,
               );
             }
           }
@@ -289,5 +301,6 @@ export function buildWaterGeometry(
   const n   = vi / 3;
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.BufferAttribute(positions.subarray(0, n * 3), 3));
+  geo.setAttribute('uv',       new THREE.BufferAttribute(uvs.subarray(0, n * 2), 2));
   return geo;
 }
