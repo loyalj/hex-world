@@ -1,0 +1,26 @@
+{
+  "name": "hex-world",
+  "version": "0.1.0",
+  "description": "Three.js hex grid library for strategy games",
+  "main": "./dist/hex-world.js",
+  "types": "./dist/types/index.d.ts",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "peerDependencies": {
+    "three": ">=0.150.0"
+  },
+  "dependencies": {
+    "three": "^0.184.0"
+  },
+  "devDependencies": {
+    "@types/three": "^0.184.1",
+    "typescript": "^6.0.3",
+    "vite": "^8.0.11"
+  }
+}

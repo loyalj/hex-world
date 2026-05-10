@@ -1,0 +1,1235 @@
+<!DOCTYPE html>
+<html lang="en">
+	<head prefix="og: http://ogp.me/ns#">
+		<meta charset="utf-8">
+		<meta property="og:url" content="https://catlikecoding.com/unity/tutorials/hex-map/part-3/">
+		<meta property="og:type" content="article">
+		<meta property="og:image:width" content="1024">
+		<meta property="og:image:height" content="512">
+		<meta property="og:image" content="https://catlikecoding.com/unity/tutorials/hex-map/part-3/tutorial-image.png">
+		<meta property="og:title" content="Hex Map 3">
+		<meta property="og:description" content="A Unity Hex Map tutorial about supporting different elevation levels. Part 3 of 27.">
+		<meta property="twitter:card" content="summary_large_image">
+		<meta property="twitter:creator" content="@catlikecoding">
+		<meta name="viewport" content="width=768">
+		<title>Hex Map 3</title>
+		<link href="../../tutorials.css" rel="stylesheet">
+		<link rel="icon" href="/favicon.ico" sizes="48x48">
+		<link rel="icon" href="/favicon.svg" sizes="any">
+		<link rel="apple touch icon" href="/apple-touch-icon.png">
+		<link rel="manifest" href="/site.webmanifest">
+
+
+		<script type="application/ld+json">{
+			"@context": "http://schema.org",
+			"@type": "WebPage",
+			"mainEntity": {
+				"@type": "TechArticle",
+				"@id": "https://catlikecoding.com/unity/tutorials/hex-map/part-3/#article",
+				"headline": "Hex Map 3",
+				"alternativeHeadline": "Elevation",
+				"datePublished": "2016-03-21",
+				"author": { "@type": "Person", "name": "Jasper Flick", "@id": "https://catlikecoding.com/jasper-flick/#person" },
+				"publisher": { "@type": "Organization", "name": "Catlike Coding", "@id": "https://catlikecoding.com/#organization" },
+				"description": "A Unity Hex Map tutorial about supporting different elevation levels. Part 3 of 27.",
+				"image": "https://catlikecoding.com/unity/tutorials/hex-map/part-3/tutorial-image.png",
+				"dependencies": "Unity 5.3.1",
+				"proficiencyLevel": "Expert"
+			},
+			"breadcrumb": {
+				"@type": "BreadcrumbList",
+				"itemListElement": [
+					{ "@type": "ListItem", "position": 1, "item": { "@id": "https://catlikecoding.com/unity/", "name": "Unity" }},
+					{ "@type": "ListItem", "position": 2, "item": { "@id": "https://catlikecoding.com/unity/tutorials/", "name": "Tutorials" }},
+					{ "@type": "ListItem", "position": 3, "item": { "@id": "https://catlikecoding.com/unity/tutorials/hex-map/", "name": "Hex Map" }}
+				]
+			}
+		}</script>
+		<script>
+			var customTypes = {
+				HexCell: 1,
+				HexEdgeType: 1,
+				HexCoordinates: 1,
+				HexCoordinatesDrawer: 1,
+				HexDirection: 1,
+				HexDirectionExtensions: 1,
+				HexGrid: 1,
+				HexMapEditor: 1,
+				HexMesh: 1,
+				HexMetrics: 1
+			};
+			
+			var hasMath = true;
+		</script>
+	</head>
+	<body>
+		<header>
+			<a href="https://catlikecoding.com"><img src="/favicon.svg" alt="Catlike Coding" width="45" height="45"></a>
+			<nav>
+				<ol>
+					<li><a href="https://catlikecoding.com">Catlike Coding</a></li>
+					<li><a href="https://catlikecoding.com/unity/">Unity</a></li>
+					<li><a href="https://catlikecoding.com/unity/tutorials/">Tutorials</a></li>
+					<li><a href="https://catlikecoding.com/unity/tutorials/hex-map/">Hex Map</a></li>
+				</ol>
+			</nav>
+		</header>
+		
+		<main>
+			<article>
+				<header>
+					<h1>Hex Map 3</h1>
+					<p>Elevation</p>
+					<ul>
+						<li>Add elevation to cells.</li>
+						<li>Triangulate slopes.</li>
+						<li>Insert terraces.</li>
+						<li>Merge terraces and cliffs.</li>
+					</ul>
+				</header>
+
+				<p>This tutorial is the third part of a series about <a href="https://catlikecoding.com/unity/tutorials/hex-map/">hexagon maps</a>. This time, we'll add support for different elevation levels, and create special transitions between them.</p>
+				
+				<figure>
+					<img src="tutorial-image.png" width="512" height="256">
+					<figcaption>Elevation and terraces.</figcaption>
+				</figure>
+				
+				<section>
+					<h2>Cell Elevation</h2>
+					
+					<p>We have divided our map into discrete cells, to cover a flat area. Now we'll give each cell its own elevation level as well. We'll use discrete elevation levels, so store it in an integer field in <code>HexCell</code>.</p>
+					
+					<pre translate="no">	<ins>public int elevation;</ins></pre>
+					
+					<p>How high should each successive elevation step be? We could use any value, so let's define it as another <code>HexMetrics</code> constant. I'll use five units per step, which produces very obvious transitions. For an actual game I'd probably use a smaller step size.</p>
+					
+					<pre translate="no">	<ins>public const float elevationStep = 5f;</ins></pre>
+					
+					<section>
+						<h3>Editing Cells</h3>
+						
+						<p>Up to this point we could only edit the color of a cell, but now we can also change its elevation. So the <code>HexGrid.ColorCell</code> method is no longer sufficient. Also, we might later add even more editable options per cell. This requires a new editing approach.</p>
+						
+						<p>Rename <code>ColorCell</code> to <code>GetCell</code> and have it return the cell at a given position instead of settings its color. As it now no longer changes anything, we should also no longer immediately triangulate the cells.</p>
+						
+						<pre translate="no">	<ins>public HexCell GetCell (Vector3 position) {</ins>
+		position = transform.InverseTransformPoint(position);
+		HexCoordinates coordinates = HexCoordinates.FromPosition(position);
+		int index = coordinates.X + coordinates.Z * width + coordinates.Z / 2;
+		<ins>return</ins> cells[index];
+	<ins>}</ins></pre>
+						
+						<p>Now it is up to the editor to adjust the cell. After that's done, the grid needs to be triangulated again. Add a public <code>HexGrid.Refresh</code> method to take care of that.</p>
+						
+						<pre translate="no">	<ins>public void Refresh () {</ins>
+		hexMesh.Triangulate(cells);
+	<ins>}</ins></pre>
+						
+						<p>Change <code>HexMapEditor</code> so it works with the new methods. Give it a new <code>EditCell</code> method that takes care of all the editing of a cell, followed by refreshing the grid.</p>
+						
+						<pre translate="no">	void HandleInput () {
+		Ray inputRay = Camera.main.ScreenPointToRay(Input.mousePosition);
+		RaycastHit hit;
+		if (Physics.Raycast(inputRay, out hit)) {
+			<ins>EditCell(</ins>hexGrid.GetCell(hit.point)<ins>)</ins>;
+		}
+	}
+
+	<ins>void EditCell (HexCell cell) {</ins>
+		<ins>cell.color = activeColor;</ins>
+		<ins>hexGrid.Refresh();</ins>
+	<ins>}</ins></pre>
+						
+						<p>We can adjust elevations by simply assigning a chosen elevation level to the cell we're editing.</p>
+						
+						<pre translate="no">	<ins>int activeElevation;</ins>
+
+	void EditCell (HexCell cell) {
+		cell.color = activeColor;
+		<ins>cell.elevation = activeElevation;</ins>
+		hexGrid.Refresh();
+	}</pre>
+						
+						<p>Just like with colors, we need a method to set the active elevation level, which we'll link to the UI. We'll use a slider to select from an elevation range. As sliders work with floats, our method requires a float parameter. We'll just convert it to an integer.</p>
+						
+						<pre translate="no">	<ins>public void SetElevation (float elevation) {</ins>
+		<ins>activeElevation = (int)elevation;</ins>
+	<ins>}</ins></pre>
+						
+						<p>Add a slider to the canvas via <i>GameObject / Create / Slider</i> and place it underneath the color panel. Make it a vertical slider which goes from bottom to top, so it visually matches elevation levels. Limit it to whole numbers and give it a reasonable range, like from 0 to 6. Then hook its <i>On Value Changed</i> event to the <code>SetElevation</code> method of our <i>Hex Map Editor</i> object. Make sure to select the method from the dynamic list, so it will be invoked with the slider's value.</p>
+						
+						<figure>
+							<img alt="ui" src="cell-elevation/slider-ui.png" width="86" height="270">
+							<img alt="component" src="cell-elevation/slider-component.png" width="320" height="471">
+							<figcaption>Elevation slider.</figcaption>
+						</figure>
+					</section>
+					
+					<section>
+						<h3>Visualizing Elevation</h3>
+						
+						<p>When editing a cell, we're now setting both its color and its elevation level. While you can check the inspector to see that elevations indeed change, the triangulation process still ignores it.</p>
+						
+						<p>All we need to do is adjust a cell's vertical local position whenever its elevation changes. To make this convenient, let's make <code>HexCell.elevation</code> private and add a public <code>HexCell.Elevation</code> property.</p>
+						
+						<pre translate="no">	<ins>public int Elevation {</ins>
+		<ins>get {</ins>
+			<ins>return elevation;</ins>
+		<ins>}</ins>
+		<ins>set {</ins>
+			<ins>elevation = value;</ins>
+		<ins>}</ins>
+	<ins>}</ins>
+	
+	<ins>int</ins> elevation;</pre>
+						
+						<p>Now we can adjust the cell's vertical position whenever its elevation is edited.</p>
+	
+						<pre translate="no">		set {
+			elevation = value;
+			<ins>Vector3 position = transform.localPosition;</ins>
+			<ins>position.y = value * HexMetrics.elevationStep;</ins>
+			<ins>transform.localPosition = position;</ins>
+		}</pre>
+						
+						<p>Of course this requires a small adjustment in <code>HexMapEditor.EditCell</code>.</p>
+						
+						<pre translate="no">	void EditCell (HexCell cell) {
+		cell.color = activeColor;
+		cell.<ins>Elevation</ins> = activeElevation;
+		hexGrid.Refresh();
+	}</pre>
+						
+						<figure>
+							<img src="cell-elevation/visualization.png" width="470" height="260">
+							<figcaption>Cells at different heights.</figcaption>
+						</figure>
+						
+						<aside>
+							<h3>Does the mesh collider adjust to match the new elevation?</h3>
+							<div>
+								<p>Older versions of Unity required setting the mesh collider to null before assigning the same mesh again. It just assumed that meshes don't change, so only a different mesh &ndash; or null &ndash; triggered a collider refresh. This is no longer necessary. So our current approach &ndash; reassigning the mesh to the collider after triangulating &ndash; is sufficient.</p>
+							</div>
+						</aside>
+						
+						<p>The cell elevations are now visible, but there are two problems. First, the cell labels disappear below elevated cells. Second, the connections between cells ignore elevation. Let's fix that.</p>
+					</section>
+					
+					<section>
+						<h3>Repositioning Cell Labels</h3>
+						
+						<p>Currently, the UI labels of the cells are created and positioned once, and then forgotten. To update their vertical positions, we have to keep track of them. Let's give each <code>HexCell</code> a reference to the <code>RectTransform</code> of its UI label, so it can be updated later.</p>
+						
+						<pre translate="no">	<ins>public RectTransform uiRect;</ins></pre>
+						
+						<p>Assign them at the end of <code>HexGrid.CreateCell</code>.</p>
+						
+						<pre translate="no">	void CreateCell (int x, int z, int i) {
+		&hellip;
+		<ins>cell.uiRect = label.rectTransform;</ins>
+	}</pre>
+						
+						<p>Now we can expand the <code>HexCell.Elevation</code> property to also adjust the position of its cell's UI. Because the hex grid canvas is rotated, the labels have to be moved in the negative Z direction, instead of the positive Y direction.</p>
+						
+						<pre translate="no">		set {
+			elevation = value;
+			Vector3 position = transform.localPosition;
+			position.y = value * HexMetrics.elevationStep;
+			transform.localPosition = position;
+
+			<ins>Vector3 uiPosition = uiRect.localPosition;</ins>
+			<ins>uiPosition.z = elevation * -HexMetrics.elevationStep;</ins>
+			<ins>uiRect.localPosition = uiPosition;</ins>
+		}</pre>
+						
+						<figure>
+							<img src="cell-elevation/elevated-labels.png" width="470" height="260">
+							<figcaption>Elevated labels.</figcaption>
+						</figure>
+					</section>
+					
+					<section>
+						<h3>Creating Slopes</h3>
+						
+						<p>Next, we have to convert the flat cell connections into slopes. This is done in <code>HexMesh.TriangulateConnection</code>. In the case of edge connections, we have to override the height of the other end of the bridge.</p>
+						
+						<pre translate="no">		Vector3 bridge = HexMetrics.GetBridge(direction);
+		Vector3 v3 = v1 + bridge;
+		Vector3 v4 = v2 + bridge;
+		<ins>v3.y = v4.y = neighbor.Elevation * HexMetrics.elevationStep;</ins></pre>
+						
+						<p>In the case of corner connections, we have to do the same for the bridge to the next neighbor.</p>
+						
+						<pre translate="no">		if (direction &lt;= HexDirection.E &amp;&amp; nextNeighbor != null) {
+			<ins>Vector3 v5 =</ins> v2 + HexMetrics.GetBridge(direction.Next());
+			<ins>v5.y = nextNeighbor.Elevation * HexMetrics.elevationStep;</ins>
+			AddTriangle(v2, v4, <ins>v5</ins>);
+			AddTriangleColor(cell.color, neighbor.color, nextNeighbor.color);
+		}</pre>
+						
+						<figure>
+							<img src="cell-elevation/elevated-connections.png" width="460" height="240">
+							<figcaption>Elevated connections.</figcaption>
+						</figure>
+						
+						<p>We now support cells at different elevations, with correctly sloping connections between them. But let's not stop here. We're going make those slopes more interesting.</p>
+					</section>
+					
+					<a href="cell-elevation/cell-elevation.unitypackage" download rel="nofollow">unitypackage</a>
+				</section>
+				
+				<section>
+					<h2>Terraced Edge Connections</h2>
+					
+					<p>Straight slopes are not that interesting to look at. We could split them into multiple steps, by adding terraces. Endless Legend is one game that does this.</p>
+					
+					<p>For example, we can insert two terraces per slope. As a result, one big slope becomes three small slopes, with two flat regions in between. In order to triangulate this, we'd have to split each connection into five steps.</p>
+					
+					<figure>
+						<img src="terraced-edge-connections/terraces.png" width="322" height="205">
+						<figcaption>Two terraces on a slope.</figcaption>
+					</figure>
+					
+					<p>We can define the amount of terraces per slope in <code>HexMetrics</code>, and derive the amount of steps from that.</p>
+					
+					<pre translate="no">	<ins>public const int terracesPerSlope = 2;</ins>
+
+	<ins>public const int terraceSteps = terracesPerSlope * 2 + 1;</ins></pre>
+					
+					<p>Ideally, we could simply interpolate each step along a slope. This isn't entirely trivial, as the Y coordinate must only change on odd steps, not even steps. Otherwise we wouldn't get flat terraces. Let's add a special interpolation method to <code>HexMetrics</code> to take care of that.</p>
+					
+					<pre translate="no">	<ins>public static Vector3 TerraceLerp (Vector3 a, Vector3 b, int step) {</ins>
+		<ins>return a;</ins>
+	<ins>}</ins></pre>
+					
+					<p>The horizontal interpolation is straightforward, if we know what the interpolation step size is.</p>
+					
+					<pre translate="no">	<ins>public const float horizontalTerraceStepSize = 1f / terraceSteps;</ins>
+	
+	public static Vector3 TerraceLerp (Vector3 a, Vector3 b, int step) {
+		<ins>float h = step * HexMetrics.horizontalTerraceStepSize;</ins>
+		<ins>a.x += (b.x - a.x) * h;</ins>
+		<ins>a.z += (b.z - a.z) * h;</ins>
+		return a;
+	}</pre>
+					
+					<aside>
+						<h3>How does interpolation between two values work?</h3>
+						<div>
+							<p>Interpolation between two values `a` and `b` is done with a third interpolator `t`. When `t` is 0, the result is `a`. When it is 1, the result is `b`. When `t` lies somewhere in between 0 and 1, `a` and `b` are mixed proportionally. Thus the formula for the interpolated result is `(1 - t)a + tb`.</p>
+							
+							<p>Note that `(1 - t)a + tb = a - ta + tb = a + t(b - a)`. The third form described the interpolation as a movement from `a` to `b` along the vector `(b - a)`. It also requires one fewer multiplication to calculate.</p>
+						</div>
+					</aside>
+					
+					<p>To only adjust Y on odd steps, we can use `(step + 1) / 2`. If we use an integer division, it will convert the sequence 1, 2, 3, 4 into 1, 1, 2, 2.</p>
+					
+					<pre translate="no">	<ins>public const float verticalTerraceStepSize = 1f / (terracesPerSlope + 1);</ins>
+	
+	public static Vector3 TerraceLerp (Vector3 a, Vector3 b, int step) {
+		float h = step * HexMetrics.horizontalTerraceStepSize;
+		a.x += (b.x - a.x) * h;
+		a.z += (b.z - a.z) * h;
+		<ins>float v = ((step + 1) / 2) * HexMetrics.verticalTerraceStepSize;</ins>
+		<ins>a.y += (b.y - a.y) * v;</ins>
+		return a;
+	}</pre>
+					
+					<p>Let's add a terrace interpolation method for colors as well. Just interpolate as if the connection is flat.</p>
+					
+					<pre translate="no">	<ins>public static Color TerraceLerp (Color a, Color b, int step) {</ins>
+		<ins>float h = step * HexMetrics.horizontalTerraceStepSize;</ins>
+		<ins>return Color.Lerp(a, b, h);</ins>
+	<ins>}</ins></pre>
+					
+					<section>
+						<h3>Triangulation</h3>
+						
+						<p>As triangulating an edge connection will become more complex, extract the relevant code from <code>HexMesh.TriangulateConnection</code> and put it in a separate method. I'll keep the original code in comments as well, for later reference.</p>
+
+						<pre translate="no">	void TriangulateConnection (
+		HexDirection direction, HexCell cell, Vector3 v1, Vector3 v2
+	) {
+		&hellip;
+		Vector3 bridge = HexMetrics.GetBridge(direction);
+		Vector3 v3 = v1 + bridge;
+		Vector3 v4 = v2 + bridge;
+		v3.y = v4.y = neighbor.Elevation * HexMetrics.elevationStep;
+
+		<ins>TriangulateEdgeTerraces(v1, v2, cell, v3, v4, neighbor);</ins>
+<ins>//		AddQuad(v1, v2, v3, v4);</ins>
+<ins>//		AddQuadColor(cell.color, neighbor.color);</ins>
+		&hellip;
+	}
+
+	<ins>void TriangulateEdgeTerraces (</ins>
+		<ins>Vector3 beginLeft, Vector3 beginRight, HexCell beginCell,</ins>
+		<ins>Vector3 endLeft, Vector3 endRight, HexCell endCell</ins>
+	<ins>) {</ins>
+		<ins>AddQuad(beginLeft, beginRight, endLeft, endRight);</ins>
+		<ins>AddQuadColor(beginCell.color, endCell.color);</ins>
+	<ins>}</ins></pre>
+
+						<p>Let's begin with just the first step of the process. Use our special interpolation methods to create the first quad. This should produce a short slope that's steeper that the original slope.</p>
+
+						<pre translate="no">	void TriangulateEdgeTerraces (
+		Vector3 beginLeft, Vector3 beginRight, HexCell beginCell,
+		Vector3 endLeft, Vector3 endRight, HexCell endCell
+	) {
+		<ins>Vector3 v3 = HexMetrics.TerraceLerp(beginLeft, endLeft, 1);</ins>
+		<ins>Vector3 v4 = HexMetrics.TerraceLerp(beginRight, endRight, 1);</ins>
+		<ins>Color c2 = HexMetrics.TerraceLerp(beginCell.color, endCell.color, 1);</ins>
+
+		AddQuad(beginLeft, beginRight, <ins>v3</ins>, <ins>v4</ins>);
+		AddQuadColor(beginCell.color, <ins>c2</ins>);
+	}</pre>
+
+						<figure>
+							<img src="terraced-edge-connections/first-step.png" width="300" height="240">
+							<figcaption>The first terrace step.</figcaption>
+						</figure>
+
+						<p>Now immediately jump to the last step, skipping everything in between. This will complete our edge connection, although not yet in the correct shape.</p>
+
+						<pre translate="no">		AddQuad(beginLeft, beginRight, v3, v4);
+		AddQuadColor(beginCell.color, c2);
+
+		<ins>AddQuad(v3, v4, endLeft, endRight);</ins>
+		<ins>AddQuadColor(c2, endCell.color);</ins></pre>
+
+						<figure>
+							<img src="terraced-edge-connections/last-step.png" width="300" height="240">
+							<figcaption>The last terrace step.</figcaption>
+						</figure>
+
+						<p>The intermediate steps can be added with a loop. Each step, the previous last two vertices become the new first two. The same goes for the color. Then the new vectors and colors are computed, and another quad is added.</p>
+
+						<pre translate="no">		AddQuad(beginLeft, beginRight, v3, v4);
+		AddQuadColor(beginCell.color, c2);
+
+		<ins>for (int i = 2; i &lt; HexMetrics.terraceSteps; i++) {</ins>
+			<ins>Vector3 v1 = v3;</ins>
+			<ins>Vector3 v2 = v4;</ins>
+			<ins>Color c1 = c2;</ins>
+			<ins>v3 = HexMetrics.TerraceLerp(beginLeft, endLeft, i);</ins>
+			<ins>v4 = HexMetrics.TerraceLerp(beginRight, endRight, i);</ins>
+			<ins>c2 = HexMetrics.TerraceLerp(beginCell.color, endCell.color, i);</ins>
+			<ins>AddQuad(v1, v2, v3, v4);</ins>
+			<ins>AddQuadColor(c1, c2);</ins>
+		<ins>}</ins>
+
+		AddQuad(v3, v4, endLeft, endRight);
+		AddQuadColor(c2, endCell.color);</pre>
+
+						<figure>
+							<img src="terraced-edge-connections/all-terraces.png" width="300" height="240">
+							<figcaption>All steps in between.</figcaption>
+						</figure>
+						
+						<p>Now all edge connections have two terraces, or however many you choose to set <code>HexMetrics.terracesPerSlope</code> to. Of course we haven't terraced the corner connections yet. We'll leave that for later.</p>
+						
+						<figure>
+							<img src="terraced-edge-connections/always-terraces.png" width="460" height="240">
+							<figcaption>All edge connections are terraced.</figcaption>
+						</figure>
+					</section>
+					
+					<a href="terraced-edge-connections/terraced-edge-connections.unitypackage" download rel="nofollow">unitypackage</a>
+				</section>
+				
+				<section>
+					<h2>Connection Types</h2>
+					
+					<p>Converting all edge connections into terraces might not be such a good idea. It looks fine when the elevation difference is just one level. But larger differences produce narrow terraces with big jumps between them, which doesn't look that great. Also, flat connections don't need to be terraced at all.</p>
+					
+					<p>Let's formalize this and define three edge types. Flat, slope, and cliff. Create a new enumeration for this.</p>
+					
+					<pre translate="no"><ins>public enum HexEdgeType {</ins>
+	<ins>Flat, Slope, Cliff</ins>
+<ins>}</ins></pre>
+					
+					<p>How do we determine what kind of connection we're dealing with? We can add a method to <code>HexMetrics</code> to derive that, based on two elevation levels.</p>
+					
+					<pre translate="no">	<ins>public static HexEdgeType GetEdgeType (int elevation1, int elevation2) {</ins>
+	<ins>}</ins></pre>
+					
+					<p>If the elevations are the same, we have a flat edge.</p>
+					
+					<pre translate="no">	public static HexEdgeType GetEdgeType (int elevation1, int elevation2) {
+		<ins>if (elevation1 == elevation2) {</ins>
+			<ins>return HexEdgeType.Flat;</ins>
+		<ins>}</ins>
+	}</pre>
+					
+					<p>If the level difference is exactly one step, then we have a slope. It doesn't matter whether the slope goes up or down. And in all other cases we have a cliff.</p>
+					
+					<pre translate="no">	public static HexEdgeType GetEdgeType (int elevation1, int elevation2) {
+		if (elevation1 == elevation2) {
+			return HexEdgeType.Flat;
+		}
+		<ins>int delta = elevation2 - elevation1;</ins>
+		<ins>if (delta == 1 || delta == -1) {</ins>
+			<ins>return HexEdgeType.Slope;</ins>
+		<ins>}</ins>
+		<ins>return HexEdgeType.Cliff;</ins>
+	}</pre>
+					
+					<p>Let's also add a convenient <code>HexCell.GetEdgeType</code> method to get a cell's edge type in a certain direction.</p>
+					
+					<pre translate="no">	<ins>public HexEdgeType GetEdgeType (HexDirection direction) {</ins>
+		<ins>return HexMetrics.GetEdgeType(</ins>
+			<ins>elevation, neighbors[(int)direction].elevation</ins>
+		<ins>);</ins>
+	<ins>}</ins></pre>
+					
+					<aside>
+						<h3>Shouldn't we check whether a neighbor actually exists in that direction?</h3>
+						<div>
+							<p>You might end up requesting the edge type in a direction which happens to be on the border of the map. In that case there would be no neighbor, and we'd get a <code>NullReferenceException</code>. We could check for this inside the method, and if this is the case, we'd have to throw some kind of exception. But that will already happen, so no need to do it explicitly. That is, unless you'd like to throw a custom exception.</p>
+							
+							<p>Note that we're only going to use this method when we already know that we're not dealing with a border edge. If we do make a mistake somewhere, we'll get the <code>NullReferenceException</code>.</p>
+						</div>
+					</aside>
+					
+					<section>
+						<h3>Limiting Terraces to Slopes</h3>
+						
+						<p>Now that we can determine the type of connection that we're dealing with, we can decide whether to insert terraces or not. Adjust <code>HexMesh.TriangulateConnection</code> so it only creates terraces for slopes.</p>
+						
+						<pre translate="no">		<ins>if (cell.GetEdgeType(direction) == HexEdgeType.Slope) {</ins>
+			TriangulateEdgeTerraces(v1, v2, cell, v3, v4, neighbor);
+		<ins>}</ins>
+//		AddQuad(v1, v2, v3, v4);
+//		AddQuadColor(cell.color, neighbor.color);</pre>
+						
+						<p>At this point we can reactivate the code that we previously commented out, to take care of the flats and cliffs.</p>
+						
+						<pre translate="no">		if (cell.GetEdgeType(direction) == HexEdgeType.Slope) {
+			TriangulateEdgeTerraces(v1, v2, cell, v3, v4, neighbor);
+		}
+		<ins>else {</ins>
+			<ins>AddQuad(v1, v2, v3, v4);</ins>
+			<ins>AddQuadColor(cell.color, neighbor.color);</ins>
+		<ins>}</ins></pre>
+						
+						<figure>
+							<img src="connection-types/slope-terraces.png" width="460" height="240">
+							<figcaption>Only slopes are terraced.</figcaption>
+						</figure>
+					</section>
+					
+					<a href="connection-types/connection-types.unitypackage" download rel="nofollow">unitypackage</a>
+				</section>
+				
+				<section>
+					<h2>Terraced Corner Connections</h2>
+					
+					<p>Corner connections are more complex than edge connections, because they involve three cells instead of just two. Each corner is connected to three edges, which could be flats, slopes, or cliffs. So there are many possible configurations. Just as for edge connections, we better add a new triangulation method to <code>HexMesh</code>.</p>
+					
+					<p>Our new method needs the corner triangle's vertices and the connected cells. To keep things manageable, let's order the connections so we know which cell has the lowest elevation. Then we can work from the bottom to the left and right.</p>
+					
+					<figure>
+						<img src="terraced-corner-connections/triangle.png" width="175" height="170">
+						<figcaption>Corner connection.</figcaption>
+					</figure>
+					
+					<pre translate="no">	<ins>void TriangulateCorner (</ins>
+		<ins>Vector3 bottom, HexCell bottomCell,</ins>
+		<ins>Vector3 left, HexCell leftCell,</ins>
+		<ins>Vector3 right, HexCell rightCell</ins>
+	<ins>) {</ins>
+		<ins>AddTriangle(bottom, left, right);</ins>
+		<ins>AddTriangleColor(bottomCell.color, leftCell.color, rightCell.color);</ins>
+	<ins>}</ins></pre>
+					
+					<p>Now <code>TriangulateConnection</code> has to figure out what the lowest cell is. First, check whether the cell being triangulated is lower than its neighbors, or tied for lowest. If this is the case, we can use it as the bottom cell.</p>
+					
+					<pre translate="no">	void TriangulateConnection (
+		HexDirection direction, HexCell cell, Vector3 v1, Vector3 v2
+	) {
+		&hellip;
+		
+		HexCell nextNeighbor = cell.GetNeighbor(direction.Next());
+		if (direction &lt;= HexDirection.E &amp;&amp; nextNeighbor != null) {
+			Vector3 v5 = v2 + HexMetrics.GetBridge(direction.Next());
+			v5.y = nextNeighbor.Elevation * HexMetrics.elevationStep;
+			
+			<ins>if (cell.Elevation &lt;= neighbor.Elevation) {</ins>
+				<ins>if (cell.Elevation &lt;= nextNeighbor.Elevation) {</ins>
+					<ins>TriangulateCorner(v2, cell, v4, neighbor, v5, nextNeighbor);</ins>
+				<ins>}</ins>
+			<ins>}</ins>
+		}
+	}</pre>
+					
+					<p>If the innermost check fails, it means that the next neighbor is the lowest cell. We have to rotate the triangle counterclockwise to keep it correctly oriented.</p>
+					
+					<pre translate="no">			if (cell.Elevation &lt;= neighbor.Elevation) {
+				if (cell.Elevation &lt;= nextNeighbor.Elevation) {
+					TriangulateCorner(v2, cell, v4, neighbor, v5, nextNeighbor);
+				}
+				<ins>else {</ins>
+					<ins>TriangulateCorner(v5, nextNeighbor, v2, cell, v4, neighbor);</ins>
+				<ins>}</ins>
+			}</pre>
+					
+					<p>If the first check already failed, it becomes a contest between the two neighboring cells. If the edge neighbor is the lowest, then we have to rotate clockwise, otherwise counterclockwise.</p>
+					
+					<pre translate="no">			if (cell.Elevation &lt;= neighbor.Elevation) {
+				if (cell.Elevation &lt;= nextNeighbor.Elevation) {
+					TriangulateCorner(v2, cell, v4, neighbor, v5, nextNeighbor);
+				}
+				else {
+					TriangulateCorner(v5, nextNeighbor, v2, cell, v4, neighbor);
+				}
+			}
+			<ins>else if (neighbor.Elevation &lt;= nextNeighbor.Elevation) {</ins>
+				<ins>TriangulateCorner(v4, neighbor, v5, nextNeighbor, v2, cell);</ins>
+			<ins>}</ins>
+			<ins>else {</ins>
+				<ins>TriangulateCorner(v5, nextNeighbor, v2, cell, v4, neighbor);</ins>
+			<ins>}</ins></pre>
+					
+					<figure>
+						<img src="terraced-corner-connections/triangle-orientations.png" width="520" height="185">
+						<figcaption>Counterclockwise, no, and clockwise rotation.</figcaption>
+					</figure>
+					
+					<section>
+						<h3>Slope Triangulation</h3>
+						
+						<p>To know how to triangulate a corner, we have to know what edge types we're dealing with. To facilitate this, let's add another convenience method to <code>HexCell</code> for determining the slope between any two cells.</p>
+						
+						<pre translate="no">	<ins>public HexEdgeType GetEdgeType (HexCell otherCell) {</ins>
+		<ins>return HexMetrics.GetEdgeType(</ins>
+			<ins>elevation, otherCell.elevation</ins>
+		<ins>);</ins>
+	<ins>}</ins></pre>
+						
+						<p>Use this new method in <code>HexMesh.TriangulateCorner</code> to determine the types of the left and right edges.</p>
+						
+						<pre translate="no">	void TriangulateCorner (
+		Vector3 bottom, HexCell bottomCell,
+		Vector3 left, HexCell leftCell,
+		Vector3 right, HexCell rightCell
+	) {
+		<ins>HexEdgeType leftEdgeType = bottomCell.GetEdgeType(leftCell);</ins>
+		<ins>HexEdgeType rightEdgeType = bottomCell.GetEdgeType(rightCell);</ins>
+
+		AddTriangle(bottom, left, right);
+		AddTriangleColor(bottomCell.color, leftCell.color, rightCell.color);
+	}</pre>
+						
+						<p>If both edges are slopes, then we have terraces on both the left and the right side. Also, because the bottom cell is the lowest, we know that those slopes go up. Furthermore, this means that the left and right cell have the same elevation, so the top edge connection is flat. We can identify this case as slope-slope-flat, or SSF for short.</p>
+						
+						<figure>
+							<img src="terraced-corner-connections/ssf.png" width="110" height="105">
+							<figcaption>Two slopes and a flat, SSF</figcaption>
+						</figure>
+						
+						<p>Check whether we are in this situation, and if so invoke a new method, <code>TriangulateCornerTerraces</code>. After that, return from the method. Put this check before the old triangulation code, so it will replace the default triangle.</p>
+						
+						<pre translate="no">	void TriangulateCorner (
+		Vector3 bottom, HexCell bottomCell,
+		Vector3 left, HexCell leftCell,
+		Vector3 right, HexCell rightCell
+	) {
+		HexEdgeType leftEdgeType = bottomCell.GetEdgeType(leftCell);
+		HexEdgeType rightEdgeType = bottomCell.GetEdgeType(rightCell);
+
+		<ins>if (leftEdgeType == HexEdgeType.Slope) {</ins>
+			<ins>if (rightEdgeType == HexEdgeType.Slope) {</ins>
+				<ins>TriangulateCornerTerraces(</ins>
+					<ins>bottom, bottomCell, left, leftCell, right, rightCell</ins>
+				<ins>);</ins>
+				<ins>return;</ins>
+			<ins>}</ins>
+		<ins>}</ins>
+
+		AddTriangle(bottom, left, right);
+		AddTriangleColor(bottomCell.color, leftCell.color, rightCell.color);
+	}
+	
+	<ins>void TriangulateCornerTerraces (</ins>
+		<ins>Vector3 begin, HexCell beginCell,</ins>
+		<ins>Vector3 left, HexCell leftCell,</ins>
+		<ins>Vector3 right, HexCell rightCell</ins>
+	<ins>) {</ins>
+		
+	<ins>}</ins></pre>
+						
+						<p>As long as we're not doing anything inside <code>TriangulateCornerTerraces</code>, some dual-slope corner connections will become holes. Whether one becomes a hole or not depends on which cell ends up as the bottom cell.</p>
+						
+						<figure>
+							<img src="terraced-corner-connections/hole.png" width="240" height="220">
+							<figcaption>A hole appears.</figcaption>
+						</figure>
+						
+						<p>To fill the hole, we have to connect the left and right terraces across the gap. The approach is the same as for edge connections, but inside a triple-color triangle instead of a dual-color quad. Let's again start with just the first step, which is now a triangle.</p>
+						
+						<pre translate="no">	void TriangulateCornerTerraces (
+		Vector3 begin, HexCell beginCell,
+		Vector3 left, HexCell leftCell,
+		Vector3 right, HexCell rightCell
+	) {
+		<ins>Vector3 v3 = HexMetrics.TerraceLerp(begin, left, 1);</ins>
+		<ins>Vector3 v4 = HexMetrics.TerraceLerp(begin, right, 1);</ins>
+		<ins>Color c3 = HexMetrics.TerraceLerp(beginCell.color, leftCell.color, 1);</ins>
+		<ins>Color c4 = HexMetrics.TerraceLerp(beginCell.color, rightCell.color, 1);</ins>
+
+		<ins>AddTriangle(begin, v3, v4);</ins>
+		<ins>AddTriangleColor(beginCell.color, c3, c4);</ins>
+	}</pre>
+						
+						<figure>
+							<img src="terraced-corner-connections/first-step.png" width="240" height="220">
+							<figcaption>First triangular step.</figcaption>
+						</figure>
+						
+						<p>Again, jump directly to the last step. It's a quad, which forms a trapezoid. The only difference with edge connections is that we're dealing with four different colors here, instead of just two.</p>
+						
+						<pre translate="no">		AddTriangle(begin, v3, v4);
+		AddTriangleColor(beginCell.color, c3, c4);
+
+		<ins>AddQuad(v3, v4, left, right);</ins>
+		<ins>AddQuadColor(c3, c4, leftCell.color, rightCell.color);</ins></pre>
+						
+						<figure>
+							<img src="terraced-corner-connections/last-step.png" width="240" height="220">
+							<figcaption>Last quad step.</figcaption>
+						</figure>
+						
+						<p>All the steps in between are all quads as well.</p>
+						
+						<pre translate="no">		AddTriangle(begin, v3, v4);
+		AddTriangleColor(beginCell.color, c3, c4);
+
+		<ins>for (int i = 2; i &lt; HexMetrics.terraceSteps; i++) {</ins>
+			<ins>Vector3 v1 = v3;</ins>
+			<ins>Vector3 v2 = v4;</ins>
+			<ins>Color c1 = c3;</ins>
+			<ins>Color c2 = c4;</ins>
+			<ins>v3 = HexMetrics.TerraceLerp(begin, left, i);</ins>
+			<ins>v4 = HexMetrics.TerraceLerp(begin, right, i);</ins>
+			<ins>c3 = HexMetrics.TerraceLerp(beginCell.color, leftCell.color, i);</ins>
+			<ins>c4 = HexMetrics.TerraceLerp(beginCell.color, rightCell.color, i);</ins>
+			<ins>AddQuad(v1, v2, v3, v4);</ins>
+			<ins>AddQuadColor(c1, c2, c3, c4);</ins>
+		<ins>}</ins>
+
+		AddQuad(v3, v4, left, right);
+		AddQuadColor(c3, c4, leftCell.color, rightCell.color);</pre>
+						
+						<figure>
+							<img src="terraced-corner-connections/all-steps.png" width="240" height="220">
+							<figcaption>All steps.</figcaption>
+						</figure>
+						
+					</section>
+					
+					<section>
+						<h3>Dual-slope Variants</h3>
+						
+						<p>The dual-slope case has two variants with different orientations, depending on which cell ended up as the bottom one. We can find them by checking for the left-right combinations slope-flat, and flat-slope.</p>
+						
+						<figure>
+							<img src="terraced-corner-connections/sfs-fss.png" width="215" height="105">
+							<figcaption>SFS and FSS.</figcaption>
+						</figure>
+						
+						<p>If the right edge is flat, then we have to begin terracing from the left instead of the bottom. If the left edge is flat, then we have to begin from the right.</p>
+						
+						<pre translate="no">		if (leftEdgeType == HexEdgeType.Slope) {
+			if (rightEdgeType == HexEdgeType.Slope) {
+				TriangulateCornerTerraces(
+					bottom, bottomCell, left, leftCell, right, rightCell
+				);
+				return;
+			}
+			<ins>if (rightEdgeType == HexEdgeType.Flat) {</ins>
+				<ins>TriangulateCornerTerraces(</ins>
+					<ins>left, leftCell, right, rightCell, bottom, bottomCell</ins>
+				<ins>);</ins>
+				<ins>return;</ins>
+			<ins>}</ins>
+		}
+		<ins>if (rightEdgeType == HexEdgeType.Slope) {</ins>
+			<ins>if (leftEdgeType == HexEdgeType.Flat) {</ins>
+				<ins>TriangulateCornerTerraces(</ins>
+					<ins>right, rightCell, bottom, bottomCell, left, leftCell</ins>
+				<ins>);</ins>
+				<ins>return;</ins>
+			<ins>}</ins>
+		<ins>}</ins></pre>
+						
+						<p>This will make our terraces flow around cells without interruptions, until they encounter a cliff or the end of the map.</p>
+						
+						<figure>
+							<img src="terraced-corner-connections/all-simple-slopes.png" width="460" height="240">
+							<figcaption>Continuous terraces.</figcaption>
+						</figure>
+					</section>
+					
+					<a href="terraced-corner-connections/terraced-corner-connections.unitypackage" download rel="nofollow">unitypackage</a>
+				</section>
+				
+				<section>
+					<h2>Merging Slopes and Cliffs</h2>
+					
+					<p>So what about when a slope meets a cliff? If we know that the left edge is a slope and the right edge is a cliff, what will the top edge be? It cannot be flat, but it could be either a slope or a cliff.</p>
+					
+					<figure>
+						<img alt="two slopes" src="merging-slopes-and-cliffs/two-slopes-one-cliff.png" width="240" height="220">
+						<img alt="two cliffs" src="merging-slopes-and-cliffs/one-slope-two-cliffs.png" width="240" height="220">
+						<img alt="diagram" src="merging-slopes-and-cliffs/scs-scc.png" width="215" height="105">
+						<figcaption>SCS and SCC.</figcaption>
+					</figure>
+					
+					<p>Let's add a new method to take care of both slope-cliff cases at once.</p>
+					
+					<pre translate="no">	<ins>void TriangulateCornerTerracesCliff (</ins>
+		<ins>Vector3 begin, HexCell beginCell,</ins>
+		<ins>Vector3 left, HexCell leftCell,</ins>
+		<ins>Vector3 right, HexCell rightCell</ins>
+	<ins>) {</ins>
+		
+	<ins>}</ins></pre>
+					
+					<p>It has to be invoked as the final option in <code>TriangulateCorner</code> when the left edge is a slope.</p>
+					
+					<pre translate="no">		if (leftEdgeType == HexEdgeType.Slope) {
+			if (rightEdgeType == HexEdgeType.Slope) {
+				TriangulateCornerTerraces(
+					bottom, bottomCell, left, leftCell, right, rightCell
+				);
+				return;
+			}
+			if (rightEdgeType == HexEdgeType.Flat) {
+				TriangulateCornerTerraces(
+					left, leftCell, right, rightCell, bottom, bottomCell
+				);
+				return;
+			}
+			<ins>TriangulateCornerTerracesCliff(</ins>
+				<ins>bottom, bottomCell, left, leftCell, right, rightCell</ins>
+			<ins>);</ins>
+			<ins>return;</ins>
+		}
+		if (rightEdgeType == HexEdgeType.Slope) {
+			if (leftEdgeType == HexEdgeType.Flat) {
+				TriangulateCornerTerraces(
+					right, rightCell, bottom, bottomCell, left, leftCell
+				);
+				return;
+			}
+		}</pre>
+					
+					<p>So how do we triangulate this? This problem can be split in two parts, the bottom and the top.</p>
+					
+					<section>
+						<h3>The Bottom Part</h3>
+						
+						<p>The bottom part has terraces on the left, and a cliff on the right. We have to merge them somehow. A simple way to do that is by collapsing the terraces so they meet in the right corner. This would taper the terraces upward.</p>
+						
+						<figure>
+							<img src="merging-slopes-and-cliffs/collapsing-terraces.png" width="110" height="105">
+							<figcaption>Collapsing terraces.</figcaption>
+						</figure>
+						
+						<p>But we don't actually want to let them meet in the right corner, because that will interfere with the terraces that might exist at the top. Also, we could be dealing with a very high cliff, which would result in very steep and thin triangles. Instead, we collapse them to a boundary point that lies along the cliff.</p>
+						
+						<figure>
+							<img src="merging-slopes-and-cliffs/collapsing-at-boundary.png" width="110" height="105">
+							<figcaption>Collapsing at boundary.</figcaption>
+						</figure>
+						
+						<p>Let's place this boundary point one elevation level above the bottom cell. We can find it by interpolating based on the elevation difference.</p>
+
+						<pre translate="no">	void TriangulateCornerTerracesCliff (
+		Vector3 begin, HexCell beginCell,
+		Vector3 left, HexCell leftCell,
+		Vector3 right, HexCell rightCell
+	) {
+		<ins>float b = 1f / (rightCell.Elevation - beginCell.Elevation);</ins>
+		<ins>Vector3 boundary = Vector3.Lerp(begin, right, b);</ins>
+		<ins>Color boundaryColor = Color.Lerp(beginCell.color, rightCell.color, b);</ins>
+	}</pre>
+
+						<p>To see if we got it right, cover the entire bottom part with a single triangle.</p>
+
+						<pre translate="no">		float b = 1f / (rightCell.Elevation - beginCell.Elevation);
+		Vector3 boundary = Vector3.Lerp(begin, right, b);
+		Color boundaryColor = Color.Lerp(beginCell.color, rightCell.color, b);
+
+		<ins>AddTriangle(begin, left, boundary);</ins>
+		<ins>AddTriangleColor(beginCell.color, leftCell.color, boundaryColor);</ins></pre>
+
+						<figure>
+							<img src="merging-slopes-and-cliffs/lower-triangle.png" width="240" height="220">
+							<figcaption>Lower triangle.</figcaption>
+						</figure>
+
+						<p>With the boundary in the right place, we can move on to triangulating the terraces. Once again, let's begin with just the first step.</p>
+
+						<pre translate="no">		float b = 1f / (rightCell.Elevation - beginCell.Elevation);
+		Vector3 boundary = Vector3.Lerp(begin, right, b);
+		Color boundaryColor = Color.Lerp(beginCell.color, rightCell.color, b);
+
+		<ins>Vector3 v2 = HexMetrics.TerraceLerp(begin, left, 1);</ins>
+		<ins>Color c2 = HexMetrics.TerraceLerp(beginCell.color, leftCell.color, 1);</ins>
+
+		AddTriangle(begin, <ins>v2</ins>, boundary);
+		AddTriangleColor(beginCell.color, <ins>c2</ins>, boundaryColor);</pre>
+
+						<figure>
+							<img src="merging-slopes-and-cliffs/first-step.png" width="240" height="220">
+							<figcaption>First collapsing step.</figcaption>
+						</figure>
+
+						<p>This time, the last step is also a triangle.</p>
+
+						<pre translate="no">		AddTriangle(begin, v2, boundary);
+		AddTriangleColor(beginCell.color, c2, boundaryColor);
+
+		<ins>AddTriangle(v2, left, boundary);</ins>
+		<ins>AddTriangleColor(c2, leftCell.color, boundaryColor);</ins></pre>
+						
+						<figure>
+							<img src="merging-slopes-and-cliffs/last-step.png" width="240" height="220">
+							<figcaption>Last collapsing step.</figcaption>
+						</figure>
+
+						<p>And all the steps in between are triangles as well.</p>
+
+						<pre translate="no">		AddTriangle(begin, v2, boundary);
+		AddTriangleColor(beginCell.color, c2, boundaryColor);
+
+		<ins>for (int i = 2; i &lt; HexMetrics.terraceSteps; i++) {</ins>
+			<ins>Vector3 v1 = v2;</ins>
+			<ins>Color c1 = c2;</ins>
+			<ins>v2 = HexMetrics.TerraceLerp(begin, left, i);</ins>
+			<ins>c2 = HexMetrics.TerraceLerp(beginCell.color, leftCell.color, i);</ins>
+			<ins>AddTriangle(v1, v2, boundary);</ins>
+			<ins>AddTriangleColor(c1, c2, boundaryColor);</ins>
+		<ins>}</ins>
+
+		AddTriangle(v2, left, boundary);
+		AddTriangleColor(c2, leftCell.color, boundaryColor);</pre>
+
+						<figure>
+							<img src="merging-slopes-and-cliffs/all-steps.png" width="240" height="220">
+							<figcaption>Collapsed terraces.</figcaption>
+						</figure>
+						
+						<aside>
+							<h3>Can't we keep the terraces level?</h3>
+							<div>
+								<p>We could indeed keep the terraces flat by interpolating between the begin and boundary points, instead of always using the boundary point. This will require use to use quads for the slopes between the terraces. However, these quads won't lie in a flat plane, because their left and right sides will not have the same slope. The result will look messy.</p>
+							</div>
+						</aside>
+					</section>
+					
+					<section>
+						<h3>Completing the Corner</h3>
+						
+						<p>With the bottom part completed, we can look at the top part. If the top edge is a slope, we again need to connect terraces and a cliff. So let's move that code to its own method.</p>
+						
+						<pre translate="no">	void TriangulateCornerTerracesCliff (
+		Vector3 begin, HexCell beginCell,
+		Vector3 left, HexCell leftCell,
+		Vector3 right, HexCell rightCell
+	) {
+		float b = 1f / (rightCell.Elevation - beginCell.Elevation);
+		Vector3 boundary = Vector3.Lerp(begin, right, b);
+		Color boundaryColor = Color.Lerp(beginCell.color, rightCell.color, b);
+
+		<ins>TriangulateBoundaryTriangle(</ins>
+			<ins>begin, beginCell, left, leftCell, boundary, boundaryColor</ins>
+		<ins>);</ins>
+	}
+
+	<ins>void TriangulateBoundaryTriangle (</ins>
+		<ins>Vector3 begin, HexCell beginCell,</ins>
+		<ins>Vector3 left, HexCell leftCell,</ins>
+		<ins>Vector3 boundary, Color boundaryColor</ins>
+	<ins>) {</ins>
+		Vector3 v2 = HexMetrics.TerraceLerp(begin, left, 1);
+		Color c2 = HexMetrics.TerraceLerp(beginCell.color, leftCell.color, 1);
+
+		AddTriangle(begin, v2, boundary);
+		AddTriangleColor(beginCell.color, c2, boundaryColor);
+
+		for (int i = 2; i &lt; HexMetrics.terraceSteps; i++) {
+			Vector3 v1 = v2;
+			Color c1 = c2;
+			v2 = HexMetrics.TerraceLerp(begin, left, i);
+			c2 = HexMetrics.TerraceLerp(beginCell.color, leftCell.color, i);
+			AddTriangle(v1, v2, boundary);
+			AddTriangleColor(c1, c2, boundaryColor);
+		}
+
+		AddTriangle(v2, left, boundary);
+		AddTriangleColor(c2, leftCell.color, boundaryColor);
+	<ins>}</ins></pre>
+						
+						<p>Now completion of the top part is simple. If we have a  slope, add a rotated boundary triangle. Otherwise a simple triangle suffices.</p>
+						
+						<pre translate="no">	void TriangulateCornerTerracesCliff (
+		Vector3 begin, HexCell beginCell,
+		Vector3 left, HexCell leftCell,
+		Vector3 right, HexCell rightCell
+	) {
+		float b = 1f / (rightCell.Elevation - beginCell.Elevation);
+		Vector3 boundary = Vector3.Lerp(begin, right, b);
+		Color boundaryColor = Color.Lerp(beginCell.color, rightCell.color, b);
+		
+		TriangulateBoundaryTriangle(
+			begin, beginCell, left, leftCell, boundary, boundaryColor
+		);
+
+		<ins>if (leftCell.GetEdgeType(rightCell) == HexEdgeType.Slope) {</ins>
+			<ins>TriangulateBoundaryTriangle(</ins>
+				<ins>left, leftCell, right, rightCell, boundary, boundaryColor</ins>
+			<ins>);</ins>
+		<ins>}</ins>
+		<ins>else {</ins>
+			<ins>AddTriangle(left, right, boundary);</ins>
+			<ins>AddTriangleColor(leftCell.color, rightCell.color, boundaryColor);</ins>
+		<ins>}</ins>
+	}</pre>
+						
+						<figure>
+							<img alt="double slope" src="merging-slopes-and-cliffs/double-slope.png" width="240" height="220">
+							<img alt="single slope" src="merging-slopes-and-cliffs/single-slope.png" width="240" height="220">
+							<figcaption>Complete triangulation of both parts.</figcaption>
+						</figure>
+					</section>
+					
+					<section>
+						<h3>The Mirror Cases</h3>
+						
+						<p>We have covered the slope-cliff cases. There are also two mirror cases, which have their cliff on the left.</p>
+						
+						<figure>
+							<img src="merging-slopes-and-cliffs/css-csc.png" width="215" height="105">
+							<figcaption>CSS and CSC.</figcaption>
+						</figure>
+						
+						<p>The approach is the same as before, with some small differences due to orientation. Copy <code>TriangulateCornerTerracesCliff</code> and adjust accordingly. I've marked only the differences.</p>
+						
+						<pre translate="no">	<ins>void TriangulateCornerCliffTerraces</ins> (
+		Vector3 begin, HexCell beginCell,
+		Vector3 left, HexCell leftCell,
+		Vector3 right, HexCell rightCell
+	) {
+		float b = 1f / (<ins>leftCell</ins>.Elevation - beginCell.Elevation);
+		Vector3 boundary = Vector3.Lerp(begin, <ins>left</ins>, b);
+		Color boundaryColor = Color.Lerp(beginCell.color, <ins>leftCell</ins>.color, b);
+
+		TriangulateBoundaryTriangle(
+			<ins>right</ins>, <ins>rightCell</ins>, <ins>begin</ins>, <ins>beginCell</ins>, boundary, boundaryColor
+		);
+
+		if (leftCell.GetEdgeType(rightCell) == HexEdgeType.Slope) {
+			TriangulateBoundaryTriangle(
+				left, leftCell, right, rightCell, boundary, boundaryColor
+			);
+		}
+		else {
+			AddTriangle(left, right, boundary);
+			AddTriangleColor(leftCell.color, rightCell.color, boundaryColor);
+		}
+	}</pre>
+						
+						<p>Include these cases in <code>TriangulateCorner</code>.</p>
+						
+						<pre translate="no">		if (leftEdgeType == HexEdgeType.Slope) {
+			&hellip;
+		}
+		if (rightEdgeType == HexEdgeType.Slope) {
+			if (leftEdgeType == HexEdgeType.Flat) {
+				TriangulateCornerTerraces(
+					right, rightCell, bottom, bottomCell, left, leftCell
+				);
+				return;
+			}
+			<ins>TriangulateCornerCliffTerraces(</ins>
+				<ins>bottom, bottomCell, left, leftCell, right, rightCell</ins>
+			<ins>);</ins>
+			<ins>return;</ins>
+		}</pre>
+						
+						<figure>
+							<img alt="double slope" src="merging-slopes-and-cliffs/double-slope-mirrored.png" width="240" height="220">
+							<img alt="single slope" src="merging-slopes-and-cliffs/single-slope-mirrored.png" width="240" height="220">
+							<figcaption>CSS and CSC triangulated.</figcaption>
+						</figure>
+					</section>
+					
+					<section>
+						<h3>Double Cliffs</h3>
+						
+						<p>The only remaining non-flat cases are those where the bottom cell has cliffs on both sides. This leaves all options open for the top edge. It could be either flat, a slope, or a cliff. We're only interested in the cliff-cliff-slope case, as it is the only one with terraces.</p>
+						
+						<p>Actually, there are two different cliff-cliff-slope versions, depending on which side is higher. They mirror each other. Let's identify them as CCSR and CCSL.</p>
+						
+						<figure>
+							<img alt="right higher" src="merging-slopes-and-cliffs/double-cliff-slope-right.png" width="240" height="280">
+							<img alt="left higher" src="merging-slopes-and-cliffs/double-cliff-slope-left.png" width="240" height="280">
+							<img alt="diagram" src="merging-slopes-and-cliffs/ccsr-ccsl.png" width="215" height="105">
+							<figcaption>CCSR and CCSL.</figcaption>
+						</figure>
+						
+						<p>We can cover both cases in <code>TriangulateCorner</code> by invoking our <code>TriangulateCornerCliffTerraces</code> and <code>TriangulateCornerTerracesCliff</code> methods with different cell rotations.</p>
+						
+						<pre translate="no">		if (leftEdgeType == HexEdgeType.Slope) {
+			&hellip;
+		}
+		if (rightEdgeType == HexEdgeType.Slope) {
+			&hellip;
+		}
+		<ins>if (leftCell.GetEdgeType(rightCell) == HexEdgeType.Slope) {</ins>
+			<ins>if (leftCell.Elevation &lt; rightCell.Elevation) {</ins>
+				<ins>TriangulateCornerCliffTerraces(</ins>
+					<ins>right, rightCell, bottom, bottomCell, left, leftCell</ins>
+				<ins>);</ins>
+			<ins>}</ins>
+			<ins>else {</ins>
+				<ins>TriangulateCornerTerracesCliff(</ins>
+					<ins>left, leftCell, right, rightCell, bottom, bottomCell</ins>
+				<ins>);</ins>
+			<ins>}</ins>
+			<ins>return;</ins>
+		<ins>}</ins></pre>
+						
+						<p>However, this will produce a weird triangulation. This happens because we're now triangulating from top to bottom. This causes our boundary interpolators to be negative, which is incorrect. The solution is to make sure that the interpolators are always positive.</p>
+						
+						<pre translate="no">	void TriangulateCornerTerracesCliff (
+		Vector3 begin, HexCell beginCell,
+		Vector3 left, HexCell leftCell,
+		Vector3 right, HexCell rightCell
+	) {
+		float b = 1f / (rightCell.Elevation - beginCell.Elevation);
+		<ins>if (b &lt; 0) {</ins>
+			<ins>b = -b;</ins>
+		<ins>}</ins>
+		&hellip;
+	}
+
+	void TriangulateCornerCliffTerraces (
+		Vector3 begin, HexCell beginCell,
+		Vector3 left, HexCell leftCell,
+		Vector3 right, HexCell rightCell
+	) {
+		float b = 1f / (leftCell.Elevation - beginCell.Elevation);
+		<ins>if (b &lt; 0) {</ins>
+			<ins>b = -b;</ins>
+		<ins>}</ins>
+		&hellip;
+	}</pre>
+						
+						<figure>
+							<img alt="right higher" src="merging-slopes-and-cliffs/double-cliff-slope-right-filled.png" width="240" height="280">
+							<img alt="left higher" src="merging-slopes-and-cliffs/double-cliff-slope-left-filled.png" width="240" height="280">
+							<figcaption>CCSR and CCSL triangulated.</figcaption>
+						</figure>
+						
+					</section>
+					
+					<section>
+						<h3>Cleanup</h3>
+						
+						<p>We have now covered all cases that needed special treatment to make sure that the terraces are correctly triangulated.</p>
+						
+						<figure>
+							<img src="merging-slopes-and-cliffs/all-corners.png" width="460" height="250">
+							<figcaption>Complete triangulation with terraces.</figcaption>
+						</figure>
+						
+						<p>We can clean <code>TriangulateCorner</code> a little by getting rid of the <code>return</code> statements and using <code>else</code> blocks instead.</p>
+						
+						<pre translate="no">	void TriangulateCorner (
+		Vector3 bottom, HexCell bottomCell,
+		Vector3 left, HexCell leftCell,
+		Vector3 right, HexCell rightCell
+	) {
+		HexEdgeType leftEdgeType = bottomCell.GetEdgeType(leftCell);
+		HexEdgeType rightEdgeType = bottomCell.GetEdgeType(rightCell);
+
+		if (leftEdgeType == HexEdgeType.Slope) {
+			if (rightEdgeType == HexEdgeType.Slope) {
+				TriangulateCornerTerraces(
+					bottom, bottomCell, left, leftCell, right, rightCell
+				);
+			<ins>}</ins>
+			<ins>else</ins> if (rightEdgeType == HexEdgeType.Flat) {
+				TriangulateCornerTerraces(
+					left, leftCell, right, rightCell, bottom, bottomCell
+				);
+			<ins>}</ins>
+			<ins>else {</ins>
+				TriangulateCornerTerracesCliff(
+					bottom, bottomCell, left, leftCell, right, rightCell
+				);
+			<ins>}</ins>
+		}
+		<ins>else</ins> if (rightEdgeType == HexEdgeType.Slope) {
+			if (leftEdgeType == HexEdgeType.Flat) {
+				TriangulateCornerTerraces(
+					right, rightCell, bottom, bottomCell, left, leftCell
+				);
+			<ins>}</ins>
+			<ins>else {</ins>
+				TriangulateCornerCliffTerraces(
+					bottom, bottomCell, left, leftCell, right, rightCell
+				);
+			<ins>}</ins>
+		}
+		<ins>else</ins> if (leftCell.GetEdgeType(rightCell) == HexEdgeType.Slope) {
+			if (leftCell.Elevation &lt; rightCell.Elevation) {
+				TriangulateCornerCliffTerraces(
+					right, rightCell, bottom, bottomCell, left, leftCell
+				);
+			}
+			else {
+				TriangulateCornerTerracesCliff(
+					left, leftCell, right, rightCell, bottom, bottomCell
+				);
+			}
+		<ins>}</ins>
+		<ins>else {</ins>
+			AddTriangle(bottom, left, right);
+			AddTriangleColor(bottomCell.color, leftCell.color, rightCell.color);
+		<ins>}</ins>
+	}</pre>
+						
+						<p>The final <code>else</code> block covers all remaining cases that we haven't covered yet. Those cases are FFF, CCF, CCCR, and CCCL. They are all covered with a single triangle.</p>
+						
+						<figure>
+							<img src="merging-slopes-and-cliffs/diagram.png" width="300" height="300">
+							<figcaption>All distinct cases.</figcaption>
+						</figure>
+						
+						<p>The next tutorial is <a href="https://catlikecoding.com/unity/tutorials/hex-map/part-4/">Irregularity</a>.</p>
+					</section>
+					
+					<a href="merging-slopes-and-cliffs/merging-slopes-and-cliffs.unitypackage" download rel="nofollow">unitypackage</a>
+					<a href="Hex-Map-3.pdf" download rel="nofollow">PDF</a>
+				</section>
+				
+			</article>
+		</main>
+
+		<footer>
+			<p>Enjoying the <a href="https://catlikecoding.com/unity/tutorials/">tutorials</a>? Are they useful? Want more?</p>
+			<p><b><a href="https://www.patreon.com/catlikecoding">Please support me on Patreon!</a></b></p>
+			<p><a href="https://www.patreon.com/catlikecoding"><img src="https://catlikecoding.com/unity/tutorials/become-a-patron.png" alt="Become my patron!" width="217" height="51"></a></p>
+			<p><b><a href="https://catlikecoding.com/unity/tutorials/donating.html">Or make a direct donation</a>!</b></p>
+			<p>made by <a href="https://catlikecoding.com/jasper-flick/" rel="author">Jasper Flick</a></p>
+		</footer>
+		
+		
+		<script src="../../tutorials.js"></script>
+	</body>
+</html>
