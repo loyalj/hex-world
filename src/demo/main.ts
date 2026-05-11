@@ -6,6 +6,9 @@ import { HexMap } from '../map/HexMap.js';
 import { TerrainType } from '../map/HexCell.js';
 import { ChunkManager } from '../geometry/ChunkManager.js';
 import { createWaterMaterial } from '../geometry/WaterMaterial.js';
+import { createWaterShoreMaterial } from '../geometry/WaterShoreMaterial.js';
+import { createEstuaryMaterial } from '../geometry/EstuaryMaterial.js';
+import { createRiverMaterial } from '../geometry/RiverMaterial.js';
 import { HEX_DIRECTIONS } from '../math/HexCoord.js';
 
 const MAP_WIDTH   = 256;
@@ -142,8 +145,11 @@ sun.position.set(100, 120, 80);
 scene.add(ambient, sun);
 
 // --- Materials ---
-const terrainMaterial = new THREE.MeshPhongMaterial({ vertexColors: true, shininess: 12, side: THREE.DoubleSide });
-const waterMaterial   = createWaterMaterial();
+const terrainMaterial  = new THREE.MeshPhongMaterial({ vertexColors: true, shininess: 12, side: THREE.DoubleSide });
+const waterMaterial    = createWaterMaterial();
+const shoreMaterial    = createWaterShoreMaterial();
+const estuaryMaterial  = createEstuaryMaterial();
+const riverMaterial    = createRiverMaterial();
 
 // --- Chunk manager ---
 const chunkManager = new ChunkManager({
@@ -152,9 +158,12 @@ const chunkManager = new ChunkManager({
   scene,
   material: terrainMaterial,
   waterMaterial,
+  shoreMaterial,
+  estuaryMaterial,
+  riverMaterial,
   chunkSize: CHUNK_SIZE,
   loadRadius: LOAD_RADIUS,
-  geometryOptions: { debugColors: true },
+  geometryOptions: {},
 });
 
 // --- HUD ---
@@ -185,7 +194,11 @@ function animate() {
   controls.update();
   chunkManager.update(camera);
 
-  waterMaterial.uniforms.uTime.value = performance.now() / 1000;
+  const t = performance.now() / 1000;
+  waterMaterial.uniforms.uTime.value   = t;
+  shoreMaterial.uniforms.uTime.value   = t;
+  estuaryMaterial.uniforms.uTime.value = t;
+  riverMaterial.uniforms.uTime.value   = t;
 
   frameCount++;
   const now     = performance.now();

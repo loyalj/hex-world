@@ -3,7 +3,9 @@ import type { HexMap } from '../map/HexMap.js';
 import type { HexLayout } from '../math/HexLayout.js';
 import { worldToHex } from '../math/HexLayout.js';
 import { buildChunkGeometry, type ChunkBounds, type ChunkGeometryOptions } from './HexChunk.js';
-import { buildWaterGeometry, type WaterGeometryOptions } from './WaterChunk.js';
+import { buildWaterGeometry, buildRiverGeometry, type WaterGeometryOptions } from './WaterChunk.js';
+import { buildShoreGeometry } from './WaterShoreChunk.js';
+import { buildEstuaryGeometry } from './EstuaryChunk.js';
 
 export interface ChunkManagerOptions {
   map: HexMap;
@@ -18,6 +20,12 @@ export interface ChunkManagerOptions {
   geometryOptions?: ChunkGeometryOptions;
   /** If provided, water and river surfaces are rendered with this material. */
   waterMaterial?: THREE.Material;
+  /** If provided, shore foam strips are rendered with this material. */
+  shoreMaterial?: THREE.Material;
+  /** If provided, estuary (river-meets-shore) regions are rendered with this material. */
+  estuaryMaterial?: THREE.Material;
+  /** If provided, river channels on land cells are rendered with this material. */
+  riverMaterial?: THREE.Material;
   /** Passed through to the water geometry builder. */
   waterGeometryOptions?: WaterGeometryOptions;
 }
@@ -28,6 +36,9 @@ export class ChunkManager {
   private readonly scene: THREE.Scene;
   private readonly material: THREE.Material;
   private readonly waterMaterial: THREE.Material | null;
+  private readonly shoreMaterial:   THREE.Material | null;
+  private readonly estuaryMaterial: THREE.Material | null;
+  private readonly riverMaterial:   THREE.Material | null;
   private readonly geoOptions: ChunkGeometryOptions;
   private readonly waterGeoOptions: WaterGeometryOptions;
   readonly chunkSize: number;
@@ -35,7 +46,10 @@ export class ChunkManager {
 
   private readonly chunks      = new Map<string, THREE.Mesh>();
   private readonly waterChunks = new Map<string, THREE.Mesh>();
-  private readonly dirty       = new Set<string>();
+  private readonly shoreChunks   = new Map<string, THREE.Mesh>();
+  private readonly estuaryChunks = new Map<string, THREE.Mesh>();
+  private readonly riverChunks   = new Map<string, THREE.Mesh>();
+  private readonly dirty         = new Set<string>();
 
   /** Total number of chunks across the map width */
   readonly chunksX: number;
@@ -48,6 +62,9 @@ export class ChunkManager {
     this.scene           = opts.scene;
     this.material        = opts.material;
     this.waterMaterial   = opts.waterMaterial ?? null;
+    this.shoreMaterial   = opts.shoreMaterial   ?? null;
+    this.estuaryMaterial = opts.estuaryMaterial ?? null;
+    this.riverMaterial   = opts.riverMaterial   ?? null;
     this.geoOptions      = opts.geometryOptions      ?? {};
     this.waterGeoOptions = opts.waterGeometryOptions ?? {};
     this.chunkSize  = opts.chunkSize  ?? 32;
@@ -90,6 +107,37 @@ export class ChunkManager {
         this.waterChunks.set(k, wMesh);
       }
     }
+
+    if (this.shoreMaterial) {
+      const sGeo = buildShoreGeometry(this.map, this.layout, b, this.waterGeoOptions);
+      if (sGeo) {
+        const sMesh = new THREE.Mesh(sGeo, this.shoreMaterial);
+        sMesh.frustumCulled = true;
+        this.scene.add(sMesh);
+        this.shoreChunks.set(k, sMesh);
+      }
+    }
+
+    if (this.estuaryMaterial) {
+      const eGeo = buildEstuaryGeometry(this.map, this.layout, b, this.waterGeoOptions);
+      if (eGeo) {
+        const eMesh = new THREE.Mesh(eGeo, this.estuaryMaterial);
+        eMesh.frustumCulled = true;
+        this.scene.add(eMesh);
+        this.estuaryChunks.set(k, eMesh);
+      }
+    }
+
+    if (this.riverMaterial) {
+      const rGeo = buildRiverGeometry(this.map, this.layout, b, this.waterGeoOptions);
+      if (rGeo) {
+        const rMesh = new THREE.Mesh(rGeo, this.riverMaterial);
+        rMesh.frustumCulled = true;
+        rMesh.renderOrder = 1; // draw after water (equivalent to Unity Queue=Transparent+1)
+        this.scene.add(rMesh);
+        this.riverChunks.set(k, rMesh);
+      }
+    }
   }
 
   private unloadChunk(k: string): void {
@@ -104,6 +152,27 @@ export class ChunkManager {
       this.scene.remove(wMesh);
       wMesh.geometry.dispose();
       this.waterChunks.delete(k);
+    }
+
+    const sMesh = this.shoreChunks.get(k);
+    if (sMesh) {
+      this.scene.remove(sMesh);
+      sMesh.geometry.dispose();
+      this.shoreChunks.delete(k);
+    }
+
+    const eMesh = this.estuaryChunks.get(k);
+    if (eMesh) {
+      this.scene.remove(eMesh);
+      eMesh.geometry.dispose();
+      this.estuaryChunks.delete(k);
+    }
+
+    const rMesh = this.riverChunks.get(k);
+    if (rMesh) {
+      this.scene.remove(rMesh);
+      rMesh.geometry.dispose();
+      this.riverChunks.delete(k);
     }
 
     this.dirty.delete(k);
@@ -132,6 +201,42 @@ export class ChunkManager {
         } else {
           this.scene.remove(wMesh);
           this.waterChunks.delete(k);
+        }
+      }
+
+      const sMesh = this.shoreChunks.get(k);
+      if (sMesh) {
+        sMesh.geometry.dispose();
+        const sGeo = buildShoreGeometry(this.map, this.layout, b, this.waterGeoOptions);
+        if (sGeo) {
+          sMesh.geometry = sGeo;
+        } else {
+          this.scene.remove(sMesh);
+          this.shoreChunks.delete(k);
+        }
+      }
+
+      const eMesh = this.estuaryChunks.get(k);
+      if (eMesh) {
+        eMesh.geometry.dispose();
+        const eGeo = buildEstuaryGeometry(this.map, this.layout, b, this.waterGeoOptions);
+        if (eGeo) {
+          eMesh.geometry = eGeo;
+        } else {
+          this.scene.remove(eMesh);
+          this.estuaryChunks.delete(k);
+        }
+      }
+
+      const rMesh = this.riverChunks.get(k);
+      if (rMesh) {
+        rMesh.geometry.dispose();
+        const rGeo = buildRiverGeometry(this.map, this.layout, b, this.waterGeoOptions);
+        if (rGeo) {
+          rMesh.geometry = rGeo;
+        } else {
+          this.scene.remove(rMesh);
+          this.riverChunks.delete(k);
         }
       }
 
@@ -202,6 +307,10 @@ export class ChunkManager {
   /** Total number of water/river meshes currently in the scene. */
   get loadedWaterChunkCount(): number {
     return this.waterChunks.size;
+  }
+
+  get loadedShoreChunkCount(): number {
+    return this.shoreChunks.size;
   }
 
   get loadedChunkCount(): number {
