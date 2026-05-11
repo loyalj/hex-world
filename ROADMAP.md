@@ -44,7 +44,7 @@ Follows the structure of the [Catlike Coding Hex Map tutorial series](https://ca
 
 - [x] Per-cell color/terrain-type storage
 - [x] Vertex color blending at cell edges — 3-cell corner average, no hard borders
-- [ ] Texture splatting support (terrain texture atlas) — deferred to later stage
+- [x] Texture splatting — `TerrainMaterial` (splat map + `DataArrayTexture`), procedural noise per terrain type with per-type image override support (`buildTerrainTextureArray`), `colorMode: 'flat' | 'splat' | 'debug'` on `ChunkGeometryOptions`, `ChunkManager.setColorMode()` for runtime switching
 - [x] Demo: multi-terrain map with smooth blends
 
 ---

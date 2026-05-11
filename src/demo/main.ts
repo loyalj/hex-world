@@ -9,6 +9,8 @@ import { createWaterMaterial } from '../geometry/WaterMaterial.js';
 import { createWaterShoreMaterial } from '../geometry/WaterShoreMaterial.js';
 import { createEstuaryMaterial } from '../geometry/EstuaryMaterial.js';
 import { createRiverMaterial } from '../geometry/RiverMaterial.js';
+import { buildTerrainTextureArray } from '../geometry/TerrainTextures.js';
+import { createTerrainMaterial } from '../geometry/TerrainMaterial.js';
 import { HEX_DIRECTIONS } from '../math/HexCoord.js';
 
 const MAP_WIDTH   = 256;
@@ -145,26 +147,10 @@ sun.position.set(100, 120, 80);
 scene.add(ambient, sun);
 
 // --- Materials ---
-const terrainMaterial  = new THREE.MeshPhongMaterial({ vertexColors: true, shininess: 12, side: THREE.DoubleSide });
-const waterMaterial    = createWaterMaterial();
-const shoreMaterial    = createWaterShoreMaterial();
-const estuaryMaterial  = createEstuaryMaterial();
-const riverMaterial    = createRiverMaterial();
-
-// --- Chunk manager ---
-const chunkManager = new ChunkManager({
-  map,
-  layout,
-  scene,
-  material: terrainMaterial,
-  waterMaterial,
-  shoreMaterial,
-  estuaryMaterial,
-  riverMaterial,
-  chunkSize: CHUNK_SIZE,
-  loadRadius: LOAD_RADIUS,
-  geometryOptions: {},
-});
+const waterMaterial   = createWaterMaterial();
+const shoreMaterial   = createWaterShoreMaterial();
+const estuaryMaterial = createEstuaryMaterial();
+const riverMaterial   = createRiverMaterial();
 
 // --- HUD ---
 const hud = document.createElement('div');
@@ -188,35 +174,62 @@ let fps = 0;
 let frameCount = 0;
 let lastFpsTime = performance.now();
 
-// --- Render loop ---
-function animate() {
-  requestAnimationFrame(animate);
-  controls.update();
-  chunkManager.update(camera);
+async function start() {
+  // Build terrain texture array (procedural noise; pass overrides: {...} to use images).
+  const terrainTex      = await buildTerrainTextureArray();
+  const terrainMaterial = createTerrainMaterial(terrainTex, {
+    lightDir:   new THREE.Vector3(100, 120, 80),
+    lightColor: new THREE.Color(0xffffff).multiplyScalar(0.7),
+    ambient:    new THREE.Color(0xffffff).multiplyScalar(0.45),
+  });
 
-  const t = performance.now() / 1000;
-  waterMaterial.uniforms.uTime.value   = t;
-  shoreMaterial.uniforms.uTime.value   = t;
-  estuaryMaterial.uniforms.uTime.value = t;
-  riverMaterial.uniforms.uTime.value   = t;
+  // --- Chunk manager ---
+  const chunkManager = new ChunkManager({
+    map,
+    layout,
+    scene,
+    material: terrainMaterial,
+    waterMaterial,
+    shoreMaterial,
+    estuaryMaterial,
+    riverMaterial,
+    chunkSize: CHUNK_SIZE,
+    loadRadius: LOAD_RADIUS,
+    geometryOptions: { colorMode: 'splat' },
+  });
 
-  frameCount++;
-  const now     = performance.now();
-  const elapsed = now - lastFpsTime;
-  if (elapsed >= 500) {
-    fps        = Math.round((frameCount / elapsed) * 1000);
-    frameCount = 0;
-    lastFpsTime = now;
+  // --- Render loop ---
+  function animate() {
+    requestAnimationFrame(animate);
+    controls.update();
+    chunkManager.update(camera);
+
+    const t = performance.now() / 1000;
+    waterMaterial.uniforms.uTime.value   = t;
+    shoreMaterial.uniforms.uTime.value   = t;
+    estuaryMaterial.uniforms.uTime.value = t;
+    riverMaterial.uniforms.uTime.value   = t;
+
+    frameCount++;
+    const now     = performance.now();
+    const elapsed = now - lastFpsTime;
+    if (elapsed >= 500) {
+      fps        = Math.round((frameCount / elapsed) * 1000);
+      frameCount = 0;
+      lastFpsTime = now;
+    }
+
+    hud.textContent =
+      `FPS:    ${fps}\n` +
+      `Map:    ${MAP_WIDTH} × ${MAP_HEIGHT} cells\n` +
+      `Chunks: ${chunkManager.loadedChunkCount} loaded  (${CHUNK_SIZE}×${CHUNK_SIZE} cells each)\n` +
+      `Total:  ${chunkManager.chunksX * chunkManager.chunksY} chunks in map\n` +
+      `Zoom:   ${controls.currentDistance.toFixed(1)}  (min ${controls.minDist} / max ${controls.maxDist})\n` +
+      `Tilt:   ${controls.currentPitchDeg.toFixed(1)}°  (min ${controls.minPitchDeg}° / max ${controls.maxPitchDeg}°)`;
+
+    renderer.render(scene, camera);
   }
-
-  hud.textContent =
-    `FPS:    ${fps}\n` +
-    `Map:    ${MAP_WIDTH} × ${MAP_HEIGHT} cells\n` +
-    `Chunks: ${chunkManager.loadedChunkCount} loaded  (${CHUNK_SIZE}×${CHUNK_SIZE} cells each)\n` +
-    `Total:  ${chunkManager.chunksX * chunkManager.chunksY} chunks in map\n` +
-    `Zoom:   ${controls.currentDistance.toFixed(1)}  (min ${controls.minDist} / max ${controls.maxDist})\n` +
-    `Tilt:   ${controls.currentPitchDeg.toFixed(1)}°  (min ${controls.minPitchDeg}° / max ${controls.maxPitchDeg}°)`;
-
-  renderer.render(scene, camera);
+  animate();
 }
-animate();
+
+start();

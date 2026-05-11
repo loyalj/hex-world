@@ -2,7 +2,8 @@ import * as THREE from 'three';
 import type { HexMap } from '../map/HexMap.js';
 import type { HexLayout } from '../math/HexLayout.js';
 import { worldToHex } from '../math/HexLayout.js';
-import { buildChunkGeometry, type ChunkBounds, type ChunkGeometryOptions } from './HexChunk.js';
+import { buildChunkGeometry, type ChunkBounds, type ChunkGeometryOptions, type TerrainColorMode } from './HexChunk.js';
+export type { TerrainColorMode };
 import { buildWaterGeometry, buildRiverGeometry, type WaterGeometryOptions } from './WaterChunk.js';
 import { buildShoreGeometry } from './WaterShoreChunk.js';
 import { buildEstuaryGeometry } from './EstuaryChunk.js';
@@ -34,7 +35,7 @@ export class ChunkManager {
   private readonly map: HexMap;
   private readonly layout: HexLayout;
   private readonly scene: THREE.Scene;
-  private readonly material: THREE.Material;
+  private material: THREE.Material;
   private readonly waterMaterial: THREE.Material | null;
   private readonly shoreMaterial:   THREE.Material | null;
   private readonly estuaryMaterial: THREE.Material | null;
@@ -301,6 +302,23 @@ export class ChunkManager {
   dispose(): void {
     for (const k of [...this.chunks.keys()]) {
       this.unloadChunk(k);
+    }
+  }
+
+  /**
+   * Switch the terrain color mode at runtime.
+   * Updates the material on all loaded terrain meshes and rebuilds geometry.
+   * Use 'flat' or 'debug' with MeshPhongMaterial({ vertexColors: true }),
+   * or 'splat' with a TerrainMaterial.
+   */
+  setColorMode(mode: TerrainColorMode, material: THREE.Material): void {
+    this.material = material;
+    this.geoOptions.colorMode = mode;
+    for (const mesh of this.chunks.values()) {
+      mesh.material = material;
+    }
+    for (const k of this.chunks.keys()) {
+      this.dirty.add(k);
     }
   }
 
