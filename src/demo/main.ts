@@ -36,13 +36,16 @@ map.forEach((col, row) => {
     Math.sin(nx * 16) * Math.cos(ny * 16) * 0.25 +
     Math.sin(nx * 3  + 1.3) * Math.cos(ny * 3) * 0.25;
 
+  const isWater = n < -0.55;
   if      (n > 0.55)  map.setTerrain(col, row, TerrainType.Rock);
   else if (n > 0.25)  map.setTerrain(col, row, TerrainType.Desert);
-  else if (n < -0.55) map.setTerrain(col, row, TerrainType.Water);
+  else if (isWater)   map.setTerrain(col, row, TerrainType.Water);
   else if (n < -0.25) map.setTerrain(col, row, TerrainType.Snow);
   else                map.setTerrain(col, row, TerrainType.Grassland);
 
-  map.setElevation(col, row, Math.round(n * 8) + ELEV_OFFSET);
+  // Water cells must stay below waterLevel=0 so their terrain never pokes above the surface.
+  const elev = Math.round(n * 8) + ELEV_OFFSET;
+  map.setElevation(col, row, isWater ? Math.min(elev, -1) : elev);
 });
 
 // --- Rivers ---
@@ -184,6 +187,11 @@ async function start() {
   });
 
   // --- Chunk manager ---
+  // waterLevel=-0.25 sits between water terrain max Y (-0.3, elev=-1 with perturbation)
+  // and land terrain min Y (-0.2, elev=0 with max negative perturbation), so the
+  // water surface is always above the water bowl and below adjacent land terrain.
+  const waterGeoOptions = { waterLevel: -0.25 };
+
   const chunkManager = new ChunkManager({
     map,
     layout,
@@ -196,6 +204,7 @@ async function start() {
     chunkSize: CHUNK_SIZE,
     loadRadius: LOAD_RADIUS,
     geometryOptions: { colorMode: 'splat' },
+    waterGeometryOptions: waterGeoOptions,
   });
 
   // --- Render loop ---

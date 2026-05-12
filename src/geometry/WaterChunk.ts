@@ -81,8 +81,8 @@ export function buildWaterGeometry(
       const c    = hexToWorld(layout, { q, r: row });
       const crns = hexCorners(layout, { q, r: row });
 
-      // Full hex fan — all 6 wedges. The shore mesh renders on top (higher polygon
-      // offset priority) for land-facing edges, so no special skipping needed here.
+      // Full hex fan — all 6 wedges. Shore renders on top (higher polygonOffset)
+      // for land-facing edges, so no special skipping needed here.
       for (let i = 0; i < 6; i++) {
         const i1 = (i + 1) % 6;
         addTriW(c.x, c.z, crns[i1].x, crns[i1].z, crns[i].x, crns[i].z);

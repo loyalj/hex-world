@@ -36,9 +36,21 @@ const fragmentShader = /* glsl */`
 
   out vec4 fragColor;
 
+  vec4 sampleTriplanar(float typeIdx) {
+    // High-power blend weights make each axis win decisively, reducing seam artifacts
+    // on diagonal faces where two planes would otherwise compete.
+    vec3 blend = pow(abs(vNormal), vec3(8.0));
+    blend /= dot(blend, vec3(1.0));
+
+    vec4 xSample = texture(uTerrainTex, vec3(vWorldPos.yz * uTexScale, typeIdx));
+    vec4 ySample = texture(uTerrainTex, vec3(vWorldPos.xz * uTexScale, typeIdx));
+    vec4 zSample = texture(uTerrainTex, vec3(vWorldPos.xy * uTexScale, typeIdx));
+
+    return xSample * blend.x + ySample * blend.y + zSample * blend.z;
+  }
+
   vec4 sampleSlot(int slot, float typeIdx) {
-    vec2 uv = vWorldPos.xz * uTexScale;
-    return texture(uTerrainTex, vec3(uv, typeIdx)) * vColor[slot];
+    return sampleTriplanar(typeIdx) * vColor[slot];
   }
 
   void main() {
