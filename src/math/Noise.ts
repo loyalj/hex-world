@@ -16,6 +16,26 @@ function hash(ix: number, iz: number, ch: number): number {
   return n - Math.floor(n);
 }
 
+/**
+ * Fractal Brownian Motion over sampleNoise. Returns a value in roughly [-1, 1].
+ * Each octave uses a different noise channel to avoid harmonic correlation.
+ * startScale: world-space period of the first (largest) octave in cells.
+ */
+export function fbm(x: number, z: number, octaves: number): number {
+  let value    = 0;
+  let amplitude = 1;
+  let frequency = 1;
+  let maxValue  = 0;
+  for (let i = 0; i < octaves; i++) {
+    const n = sampleNoise(x * frequency, z * frequency);
+    value    += (n[i % 4] * 2 - 1) * amplitude;
+    maxValue += amplitude;
+    amplitude *= 0.5;
+    frequency *= 2;
+  }
+  return value / maxValue;
+}
+
 export function sampleNoise(x: number, z: number): [number, number, number, number] {
   const ix = Math.floor(x);
   const iz = Math.floor(z);

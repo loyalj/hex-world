@@ -145,35 +145,32 @@ export const WATER_GLSL = /* glsl */`
 // ---------------------------------------------------------------------------
 
 const vertexShader = /* glsl */`
-  varying vec2 vWorldXZ;
+  attribute float depth;
+  varying vec2  vWorldXZ;
+  varying float vDepth;
   void main() {
     vec4 worldPos = modelMatrix * vec4(position, 1.0);
     vWorldXZ = worldPos.xz;
+    vDepth   = depth;
     gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
   }
 `;
 
 const fragmentShader = /* glsl */`
   uniform float uTime;
-  varying vec2 vWorldXZ;
+  varying vec2  vWorldXZ;
+  varying float vDepth;
 
   ${WATER_GLSL}
 
   void main() {
-    float waves = Waves(vWorldXZ, uTime);
+    vec3 shallow = vec3(0.32, 0.52, 0.70);
+    vec3 deep    = vec3(0.12, 0.28, 0.48);
+    vec3 color   = mix(shallow, deep, vDepth);
 
-    vec3 deep    = vec3(0.35, 0.50, 0.62);
-    vec3 shallow = vec3(0.58, 0.72, 0.82);
-    vec3 color   = mix(deep, shallow, waves);
-
-    float spec = smoothstep(0.7, 1.0, waves) * 0.12;
-    color += spec;
-
-    // Simplex-noise highlight: fine pixel-like shimmer over the surface.
-    float hl = waterNoise(vec3(vWorldXZ * 4.5, uTime * 0.1));
-    color += hl * 0.10;
-
-    gl_FragColor = vec4(color, 0.78);
+    float hl = waterNoise(vec3(vWorldXZ * 4.5, uTime * 0.2));
+    color += hl * 0.2;
+    gl_FragColor = vec4(color, 0.82);
   }
 `;
 

@@ -50,27 +50,30 @@ export function buildWaterGeometry(
 
   const positions = new Float32Array(maxVerts * 3);
   const uvs       = new Float32Array(maxVerts * 2);
-  let vi = 0, uvi = 0;
+  const depths    = new Float32Array(maxVerts);
+  let vi = 0, uvi = 0, di = 0;
 
   const perturb = (x: number, z: number): [number, number] => {
     const n = sampleNoise(x * noiseScale, z * noiseScale);
     return [(n[0] * 2 - 1) * perturbStr, (n[2] * 2 - 1) * perturbStr];
   };
 
-  const addVertW = (x: number, z: number) => {
+  const addVertW = (x: number, z: number, depth: number) => {
     const [dx, dz] = perturb(x, z);
     positions[vi++] = x + dx;
     positions[vi++] = waterLevel;
     positions[vi++] = z + dz;
     uvs[uvi++] = x * UV_WATER_SCALE;
     uvs[uvi++] = z * UV_WATER_SCALE;
+    depths[di++] = depth;
   };
 
   const addTriW = (
     x0: number, z0: number,
     x1: number, z1: number,
     x2: number, z2: number,
-  ) => { addVertW(x0, z0); addVertW(x1, z1); addVertW(x2, z2); };
+    depth: number,
+  ) => { addVertW(x0, z0, depth); addVertW(x1, z1, depth); addVertW(x2, z2, depth); };
 
   for (let row = rowStart; row < rowEnd; row++) {
     for (let col = colStart; col < colEnd; col++) {
@@ -81,11 +84,13 @@ export function buildWaterGeometry(
       const c    = hexToWorld(layout, { q, r: row });
       const crns = hexCorners(layout, { q, r: row });
 
-      // Full hex fan — all 6 wedges. Shore renders on top (higher polygonOffset)
-      // for land-facing edges, so no special skipping needed here.
+      // Depth: 0 = shallow (elev=-1, shore edge), 1 = deep (elev=-9+).
+      const elev  = map.getElevation(col, row);
+      const depth = Math.min(1.0, Math.max(0.0, (-elev - 1) / 8.0));
+
       for (let i = 0; i < 6; i++) {
         const i1 = (i + 1) % 6;
-        addTriW(c.x, c.z, crns[i1].x, crns[i1].z, crns[i].x, crns[i].z);
+        addTriW(c.x, c.z, crns[i1].x, crns[i1].z, crns[i].x, crns[i].z, depth);
       }
     }
   }
@@ -96,6 +101,7 @@ export function buildWaterGeometry(
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.BufferAttribute(positions.subarray(0, n * 3), 3));
   geo.setAttribute('uv',       new THREE.BufferAttribute(uvs.subarray(0, n * 2), 2));
+  geo.setAttribute('depth',    new THREE.BufferAttribute(depths.subarray(0, n),   1));
   return geo;
 }
 
@@ -109,11 +115,20 @@ export function buildRiverGeometry(
   bounds: ChunkBounds,
   opts: WaterGeometryOptions = {},
 ): THREE.BufferGeometry | null {
-  const waterLevel = opts.waterLevel      ?? 0;
-  const noiseScale = opts.noiseScale      ?? 0.35;
-  const perturbStr = opts.perturbStrength ?? 0.8;
-  const elevScale  = opts.elevationScale  ?? 0.5;
-  const edgeDirs   = layout.orientation.edgeDirections;
+  const waterLevel     = opts.waterLevel      ?? 0;
+  const noiseScale     = opts.noiseScale      ?? 0.35;
+  const perturbStr     = opts.perturbStrength ?? 0.8;
+  const elevScale      = opts.elevationScale  ?? 0.5;
+  const elevPerturbStr = 0.2; // must match HexChunk elevPerturbStrength default
+  const edgeDirs       = layout.orientation.edgeDirections;
+
+  /** Y of the terrain surface at cell center — matches EstuaryChunk / WaterShoreChunk. */
+  const landCellY = (c: number, r: number): number => {
+    const qq = c - (r - (r & 1)) / 2;
+    const wc = hexToWorld(layout, { q: qq, r });
+    const n  = sampleNoise(wc.x * noiseScale, wc.z * noiseScale);
+    return map.getElevation(c, r) * elevScale + (n[1] * 2 - 1) * elevPerturbStr;
+  };
 
   const { colStart, colEnd, rowStart, rowEnd } = bounds;
   const hexCount = (colEnd - colStart) * (rowEnd - rowStart);
@@ -230,38 +245,39 @@ export function buildRiverGeometry(
             ? waterLevel
             : (nbElev + RIVER_SURFACE_ELEVATION_OFFSET) * elevScale;
         }
+        // For estuary edges (outgoing into water) the river mesh should meet the
+        // estuary's land-side height (halfway up the slope) instead of dropping
+        // all the way to waterLevel, so the two meshes connect flush.
+        const estuaryEdgeY = nbIsWater
+          ? waterLevel + (landCellY(col, row) - waterLevel) * 0.5
+          : nbRy;
 
         if (isBeginEnd) {
           if (isOutgoing) {
             // Source: triangle fan from center outward.
             if (nbIsWater && ry > waterLevel) {
-              // Clipped waterfall into water (bridge vertices at 1/4 and 3/4).
+              // Source meets estuary: slope from center down to estuary edge height.
               const [dcx, dcz] = perturb(center.x, center.z);
               const [dLx, dLz] = perturb(eLx, eLz);
               const [dRx, dRz] = perturb(eRx, eRz);
               const pcx = center.x + dcx, pcz = center.z + dcz;
-              const t = (waterLevel - nbRy) / (ry - nbRy);
-              const pLx = (eLx + dLx) + (pcx - (eLx + dLx)) * t;
-              const pLz = (eLz + dLz) + (pcz - (eLz + dLz)) * t;
-              const pRx = (eRx + dRx) + (pcx - (eRx + dRx)) * t;
-              const pRz = (eRz + dRz) + (pcz - (eRz + dRz)) * t;
-              positions[vi++] = pcx; positions[vi++] = ry;         positions[vi++] = pcz; uvs[uvi++] = 0.5; uvs[uvi++] = 0.0;
-              positions[vi++] = pLx; positions[vi++] = waterLevel; positions[vi++] = pLz; uvs[uvi++] = 0.0; uvs[uvi++] = 1.0;
-              positions[vi++] = pRx; positions[vi++] = waterLevel; positions[vi++] = pRz; uvs[uvi++] = 1.0; uvs[uvi++] = 1.0;
+              positions[vi++] = pcx;       positions[vi++] = ry;           positions[vi++] = pcz;       uvs[uvi++] = 0.5; uvs[uvi++] = 0.0;
+              positions[vi++] = eLx + dLx; positions[vi++] = estuaryEdgeY; positions[vi++] = eLz + dLz; uvs[uvi++] = 0.0; uvs[uvi++] = 1.0;
+              positions[vi++] = eRx + dRx; positions[vi++] = estuaryEdgeY; positions[vi++] = eRz + dRz; uvs[uvi++] = 1.0; uvs[uvi++] = 1.0;
             } else {
               // Land or same-level water: two-step source (center→midedge→bridge pts).
               const mLx = (center.x + eLx) * 0.5, mLz = (center.z + eLz) * 0.5;
               const mRx = (center.x + eRx) * 0.5, mRz = (center.z + eRz) * 0.5;
               addTri(
-                center.x, ry, center.z, 0.5, 0.0,
-                mLx,      ry, mLz,      0.0, 0.4,
-                mRx,      ry, mRz,      1.0, 0.4,
+                center.x, ry,           center.z, 0.5, 0.0,
+                mLx,      ry,           mLz,      0.0, 0.4,
+                mRx,      ry,           mRz,      1.0, 0.4,
               );
               addQuad(
-                mLx, ry,   mLz, 0.0, 0.4,
-                mRx, ry,   mRz, 1.0, 0.4,
-                eLx, nbRy, eLz, 0.0, 0.8,
-                eRx, nbRy, eRz, 1.0, 0.8,
+                mLx, ry,           mLz, 0.0, 0.4,
+                mRx, ry,           mRz, 1.0, 0.4,
+                eLx, estuaryEdgeY, eLz, 0.0, 0.8,
+                eRx, estuaryEdgeY, eRz, 1.0, 0.8,
               );
             }
           } else {
@@ -319,7 +335,16 @@ export function buildRiverGeometry(
               cRx, ry, cRz, 1.0, 0.8,
             );
             // Bridge quad: control points (V=0.8) → inner edge 1/4 and 3/4 pts (V=1.0).
-            if (nbIsWater && ry > waterLevel) {
+            // For estuary edges (nbIsWater) use estuaryEdgeY so the river mesh
+            // meets the estuary fan flush; otherwise use the normal waterfall path.
+            if (nbIsWater) {
+              addQuad(
+                cLx, ry,           cLz, 0.0, 0.8,
+                cRx, ry,           cRz, 1.0, 0.8,
+                eLx, estuaryEdgeY, eLz, 0.0, 1.0,
+                eRx, estuaryEdgeY, eRz, 1.0, 1.0,
+              );
+            } else if (ry > waterLevel) {
               addWaterfallQuad(
                 cLx, cLz, cRx, cRz,
                 eLx, eLz, eRx, eRz,

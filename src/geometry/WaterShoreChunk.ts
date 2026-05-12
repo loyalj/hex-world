@@ -139,13 +139,16 @@ export function buildShoreGeometry(
         // 2. Strip quad: water side (waterLevel) → land side (terrain Y).
         //    Land-side uses actual terrain Y so the V=1 foam edge sits on the
         //    terrain surface and is visible via polygonOffset over the terrain.
-        //    Skipped for estuary edges; EstuaryChunk handles those.
-        const isEstuary = map.hasRiverThroughEdge(col, row, i);
-        if (!isEstuary) {
+        //    Also rendered for estuary edges — the estuary mesh sits on top via
+        //    its own (more-negative) polygon offset, and this strip fills the
+        //    side corners where the estuary fan doesn't reach.
+        {
           const nbc  = hexCenter(nc, nr);
           const ls1  = cornerAt(nbc.x, nbc.z, (i + 4) % 6, SOLID_FACTOR);
           const ls2  = cornerAt(nbc.x, nbc.z, (i + 3) % 6, SOLID_FACTOR);
-          const nbY  = landCellY(nc, nr);
+          // Land-side Y stops halfway up the slope so the foam band doesn't
+          // climb all the way to the terrain tile surface.
+          const nbY  = waterLevel + (landCellY(nc, nr) - waterLevel) * 0.5;
 
           addQuad(
             c1.x,  c1.z,  waterLevel, 0, 0,
@@ -167,12 +170,13 @@ export function buildShoreGeometry(
           const cornerJ    = (i + 5) % 6;
           const factor     = nb2IsWater ? WATER_FACTOR : SOLID_FACTOR;
           const v3         = cornerAt(nb2Center.x, nb2Center.z, cornerJ, factor);
-          const v3Y        = nb2IsWater ? waterLevel : landCellY(nb2c, nb2r);
+          const rawV3Y     = nb2IsWater ? waterLevel : landCellY(nb2c, nb2r);
+          const v3Y        = nb2IsWater ? waterLevel : waterLevel + (rawV3Y - waterLevel) * 0.5;
           const v3V        = nb2IsWater ? 0 : 1;
 
           const nbc2 = hexCenter(nc, nr);
           const ls2  = cornerAt(nbc2.x, nbc2.z, (i + 3) % 6, SOLID_FACTOR);
-          const ls2Y = landCellY(nc, nr);
+          const ls2Y = waterLevel + (landCellY(nc, nr) - waterLevel) * 0.5;
 
           addTri(
             c2.x,  c2.z,  waterLevel, 0, 0,

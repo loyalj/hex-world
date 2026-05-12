@@ -36,6 +36,17 @@ const fragmentShader = /* glsl */`
 
   out vec4 fragColor;
 
+  float tHash(vec2 p) {
+    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+  }
+  float tNoise(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    return mix(mix(tHash(i), tHash(i + vec2(1,0)), f.x),
+               mix(tHash(i + vec2(0,1)), tHash(i + vec2(1,1)), f.x), f.y);
+  }
+
   vec4 sampleTriplanar(float typeIdx) {
     // High-power blend weights make each axis win decisively, reducing seam artifacts
     // on diagonal faces where two planes would otherwise compete.
@@ -62,6 +73,14 @@ const fragmentShader = /* glsl */`
     vec3  n     = gl_FrontFacing ? vNormal : -vNormal;
     float diff  = max(dot(n, normalize(uLightDir)), 0.0);
     vec3  light = uAmbient + uLightColor * diff;
+
+    // Subtle world-space color variation: two octaves, ±18%.
+    float mv = tNoise(vWorldPos.xz * 0.28) * 0.7 + tNoise(vWorldPos.xz * 0.07) * 0.3;
+    c.rgb *= 0.82 + mv * 0.36;
+
+    // Darken cliff faces by how vertical they are.
+    float cliff = 1.0 - abs(n.y);
+    c.rgb *= 1.0 - cliff * 0.125;
 
     fragColor = vec4(c.rgb * light, 1.0);
   }

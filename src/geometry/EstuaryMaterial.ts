@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { WATER_GLSL } from './WaterMaterial.js';
 
 const vertexShader = /* glsl */`
+  attribute vec2 uv2;
   varying vec2 vUv;
   varying vec2 vUv2;
   varying vec2 vWorldXZ;
@@ -23,27 +24,26 @@ const fragmentShader = /* glsl */`
   ${WATER_GLSL}
 
   void main() {
-    float blend = vUv.x;  // 0 = pure shore effect, 1 = pure river effect
+    float blend = vUv.x;  // 0 = shore side, 1 = river center
     float shore = vUv.y;  // 0 = water edge, 1 = land edge
 
-    float foam  = Foam(shore, vWorldXZ, uTime);
-    float waves = Waves(vWorldXZ, uTime);
-    waves *= (1.0 - sqrt(shore));
-    float shoreWater = max(foam, waves);
-
-    float river = River(vUv2, uTime);
-
-    float water = mix(shoreWater, river, blend);
-
-    vec3 deep    = vec3(0.35, 0.50, 0.62);
-    vec3 shallow = vec3(0.58, 0.72, 0.82);
     vec3 foamCol = vec3(0.92, 0.96, 1.00);
 
-    vec3 color = mix(mix(deep, shallow, waves), foamCol, foam);
-    color = mix(color, mix(deep, shallow, river), blend);
-    color = clamp(color, 0.0, 1.0);
+    float hl = waterNoise(vec3(vWorldXZ * 4.5, uTime * 0.2));
+    vec3 waterColor = vec3(0.25, 0.44, 0.64) + hl * 0.2;
 
-    gl_FragColor = vec4(color, 0.78);
+    // Shore side: foam at land edge (shore=1), water color at water edge (shore=0).
+    float foam = Foam(shore, vWorldXZ, uTime);
+    vec3 shoreColor = mix(waterColor, foamCol, foam);
+
+    // River center: flowing pattern blended into water color.
+    float river = River(vUv2, uTime);
+    vec3 riverColor = mix(vec3(0.25, 0.44, 0.64), foamCol, river * 0.6);
+
+    // blend=0 at outer edges (shore-like), blend=1 at river center.
+    vec3 color = mix(shoreColor, riverColor, blend);
+
+    gl_FragColor = vec4(color, 0.82);
   }
 `;
 
@@ -55,8 +55,8 @@ export function createEstuaryMaterial(): THREE.ShaderMaterial {
     transparent: true,
     depthWrite: false,
     polygonOffset: true,
-    polygonOffsetFactor: -3,
-    polygonOffsetUnits: -3,
+    polygonOffsetFactor: -4,
+    polygonOffsetUnits: -4,
     side: THREE.DoubleSide,
   });
 }

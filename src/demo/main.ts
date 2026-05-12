@@ -12,6 +12,7 @@ import { createRiverMaterial } from '../geometry/RiverMaterial.js';
 import { buildTerrainTextureArray } from '../geometry/TerrainTextures.js';
 import { createTerrainMaterial } from '../geometry/TerrainMaterial.js';
 import { HEX_DIRECTIONS } from '../math/HexCoord.js';
+import { fbm } from '../math/Noise.js';
 
 const MAP_WIDTH   = 256;
 const MAP_HEIGHT  = 256;
@@ -27,25 +28,21 @@ const map = new HexMap({ width: MAP_WIDTH, height: MAP_HEIGHT });
 const ELEV_OFFSET = 4;
 
 map.forEach((col, row) => {
-  // Normalise to a 32-cell tile so adjacent cells see enough n-delta to produce
-  // a natural mix of flat (diff=0), slope/terrace (diff=1), and cliff (diff≥2) edges.
-  const nx = col / 32;
-  const ny = row / 32;
-  const n =
-    Math.sin(nx * 8)  * Math.cos(ny * 8)  * 0.5 +
-    Math.sin(nx * 16) * Math.cos(ny * 16) * 0.25 +
-    Math.sin(nx * 3  + 1.3) * Math.cos(ny * 3) * 0.25;
+  // FBM: large continental scale (period=64 cells) down through 6 octaves of detail.
+  // Scale by 2.2 to spread the value-noise distribution across the full ±1 threshold range.
+  const n = fbm(col / 64, row / 64, 6) * 2.2;
 
   const isWater = n < -0.55;
-  if      (n > 0.55)  map.setTerrain(col, row, TerrainType.Rock);
-  else if (n > 0.25)  map.setTerrain(col, row, TerrainType.Desert);
+  if      (n > 0.72)  map.setTerrain(col, row, TerrainType.Snow);
+  else if (n > 0.42)  map.setTerrain(col, row, TerrainType.Rock);
   else if (isWater)   map.setTerrain(col, row, TerrainType.Water);
-  else if (n < -0.25) map.setTerrain(col, row, TerrainType.Snow);
+  else if (n < -0.38) map.setTerrain(col, row, TerrainType.Desert);
   else                map.setTerrain(col, row, TerrainType.Grassland);
 
-  // Water cells must stay below waterLevel=0 so their terrain never pokes above the surface.
-  const elev = Math.round(n * 8) + ELEV_OFFSET;
-  map.setElevation(col, row, isWater ? Math.min(elev, -1) : elev);
+  // Water cells capped at -1 so terrain stays below waterLevel.
+  // Land cells clamped to 0 minimum so terrain Y >= -0.2 > waterLevel=-0.25 (shore slopes upward).
+  const elev = Math.round(n * 10) + ELEV_OFFSET;
+  map.setElevation(col, row, isWater ? Math.min(elev, -1) : Math.max(elev, 0));
 });
 
 // --- Rivers ---
@@ -139,6 +136,7 @@ const controls = new RtsCameraController({
   initialTarget:   { x: MAP_WIDTH / 2, z: MAP_HEIGHT / 2 },
   initialDistance: 60,
   minPitch: 30,
+  maxPitch: 66,
   minDistance: 6,
   maxDistance: 80,
 });

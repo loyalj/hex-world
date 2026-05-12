@@ -22,24 +22,17 @@ const fragmentShader = /* glsl */`
   void main() {
     float shore = vUv.y;
 
-    // Foam: distorted sine waves, stronger near the land edge.
+    // Match the water surface exactly at V=0: same noise, same base color.
+    float hl = waterNoise(vec3(vWorldXZ * 4.5, uTime * 0.1));
+    vec3 waterColor = vec3(0.25, 0.44, 0.64) + hl * 0.2;
+
+    // Foam fades in toward the land edge.
     float foam = Foam(shore, vWorldXZ, uTime);
-
-    // Open-water waves faded toward land (so they blend smoothly with shore foam).
-    float waves = Waves(vWorldXZ, uTime);
-    waves *= (1.0 - shore);
-
-    float water = max(foam, waves);
-
-    vec3 deep    = vec3(0.35, 0.50, 0.62);
-    vec3 shallow = vec3(0.58, 0.72, 0.82);
     vec3 foamCol = vec3(0.92, 0.96, 1.00);
 
-    // Blend between the base water color and white foam.
-    vec3 color = mix(mix(deep, shallow, waves), foamCol, foam);
-    color = clamp(color, 0.0, 1.0);
+    vec3 color = mix(waterColor, foamCol, foam);
 
-    gl_FragColor = vec4(color, 0.78);
+    gl_FragColor = vec4(color, 0.82);
   }
 `;
 
