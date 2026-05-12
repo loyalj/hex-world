@@ -11,7 +11,11 @@ import { createEstuaryMaterial } from '../geometry/EstuaryMaterial.js';
 import { createRiverMaterial } from '../geometry/RiverMaterial.js';
 import { buildTerrainTextureArray } from '../geometry/TerrainTextures.js';
 import { createTerrainMaterial } from '../geometry/TerrainMaterial.js';
+import type { TerrainColorMode } from '../geometry/ChunkManager.js';
 import { HEX_DIRECTIONS } from '../math/HexCoord.js';
+
+/** Change this one constant to switch terrain rendering mode. */
+const TERRAIN_COLOR_MODE: TerrainColorMode = 'flat';
 import { fbm } from '../math/Noise.js';
 
 const MAP_WIDTH   = 256;
@@ -176,19 +180,23 @@ let frameCount = 0;
 let lastFpsTime = performance.now();
 
 async function start() {
-  // Build terrain texture array (procedural noise; pass overrides: {...} to use images).
-  const terrainTex      = await buildTerrainTextureArray();
-  const terrainMaterial = createTerrainMaterial(terrainTex, {
-    lightDir:   new THREE.Vector3(100, 120, 80),
-    lightColor: new THREE.Color(0xffffff).multiplyScalar(0.7),
-    ambient:    new THREE.Color(0xffffff).multiplyScalar(0.45),
-  });
-
   // --- Chunk manager ---
   // waterLevel=-0.25 sits between water terrain max Y (-0.3, elev=-1 with perturbation)
   // and land terrain min Y (-0.2, elev=0 with max negative perturbation), so the
   // water surface is always above the water bowl and below adjacent land terrain.
   const waterGeoOptions = { waterLevel: -0.25 };
+
+  let terrainMaterial: THREE.Material;
+  if (TERRAIN_COLOR_MODE === 'splat') {
+    const terrainTex = await buildTerrainTextureArray();
+    terrainMaterial = createTerrainMaterial(terrainTex, {
+      lightDir:   new THREE.Vector3(100, 120, 80),
+      lightColor: new THREE.Color(0xffffff).multiplyScalar(0.7),
+      ambient:    new THREE.Color(0xffffff).multiplyScalar(0.45),
+    });
+  } else {
+    terrainMaterial = new THREE.MeshPhongMaterial({ vertexColors: true, side: THREE.DoubleSide });
+  }
 
   const chunkManager = new ChunkManager({
     map,
@@ -201,7 +209,7 @@ async function start() {
     riverMaterial,
     chunkSize: CHUNK_SIZE,
     loadRadius: LOAD_RADIUS,
-    geometryOptions: { colorMode: 'splat' },
+    geometryOptions: { colorMode: TERRAIN_COLOR_MODE },
     waterGeometryOptions: waterGeoOptions,
   });
 

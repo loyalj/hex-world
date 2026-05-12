@@ -338,19 +338,15 @@ export function buildRiverGeometry(
             // For estuary edges (nbIsWater) use estuaryEdgeY so the river mesh
             // meets the estuary fan flush; otherwise use the normal waterfall path.
             if (nbIsWater) {
+              // Estuary: smooth ramp to estuary edge height (replaces the old waterfall).
               addQuad(
                 cLx, ry,           cLz, 0.0, 0.8,
                 cRx, ry,           cRz, 1.0, 0.8,
                 eLx, estuaryEdgeY, eLz, 0.0, 1.0,
                 eRx, estuaryEdgeY, eRz, 1.0, 1.0,
               );
-            } else if (ry > waterLevel) {
-              addWaterfallQuad(
-                cLx, cLz, cRx, cRz,
-                eLx, eLz, eRx, eRz,
-                ry, nbRy, waterLevel,
-              );
             } else {
+              // Land-to-land: normal slope quad.
               addQuad(
                 cLx, ry,   cLz, 0.0, 0.8,
                 cRx, ry,   cRz, 1.0, 0.8,
