@@ -76,7 +76,7 @@ const fragmentShader = /* glsl */`
 
     // Subtle world-space color variation: two octaves, ±18%.
     float mv = tNoise(vWorldPos.xz * 0.28) * 0.7 + tNoise(vWorldPos.xz * 0.07) * 0.3;
-    c.rgb *= 0.82 + mv * 0.36;
+    c.rgb *= 0.93 + mv * 0.14;
 
     // Darken cliff faces by how vertical they are.
     float cliff = 1.0 - abs(n.y);

@@ -532,6 +532,18 @@ export function buildChunkGeometry(
       const ownBedY      = streamBedY(col, row);
       const hasRiverCell = map.hasRiver(col, row);
 
+      // Baked AO: darken vertices at the base of cliffs from higher neighbors
+      const AO_STRENGTH = 0.4;
+      const faceAO: number[] = [];
+      for (let f = 0; f < 6; f++) {
+        const nf   = nbOffset(col, row, edgeDirs[f]);
+        const diff = map.inBounds(nf.col, nf.row)
+          ? map.getElevation(nf.col, nf.row) - ownElev
+          : 0;
+        faceAO.push(diff > 0 ? Math.min(1, diff / 4) * AO_STRENGTH : 0);
+      }
+      const centAO = (faceAO[0]+faceAO[1]+faceAO[2]+faceAO[3]+faceAO[4]+faceAO[5]) / 6;
+
       for (let i = 0; i < 6; i++) {
         const i1  = (i + 1) % 6;
         const e1x = center.x + ox[i]  * SOLID_FACTOR, e1z = center.z + oz[i]  * SOLID_FACTOR;
@@ -542,10 +554,17 @@ export function buildChunkGeometry(
         const tt = ownType, ot = ownType; // all interior tris use own type for all 3 slots
 
         if (!hasRiverCell) {
-          addTri(center.x,ownY,center.z,sr,sg,sb, e1x,ownY,e1z,sr,sg,sb, e2x,ownY,e2z,sr,sg,sb, tt,ot,ot);
-          addTri(center.x,ownY,center.z,sr,sg,sb, e2x,ownY,e2z,sr,sg,sb, e3x,ownY,e3z,sr,sg,sb, tt,ot,ot);
-          addTri(center.x,ownY,center.z,sr,sg,sb, e3x,ownY,e3z,sr,sg,sb, e4x,ownY,e4z,sr,sg,sb, tt,ot,ot);
-          addTri(center.x,ownY,center.z,sr,sg,sb, e4x,ownY,e4z,sr,sg,sb, e5x,ownY,e5z,sr,sg,sb, tt,ot,ot);
+          const aoE1 = (faceAO[(i+5)%6] + faceAO[i]) * 0.5;
+          const aoE5 = (faceAO[i] + faceAO[i1]) * 0.5;
+          const aoE2 = aoE1 * 0.75 + aoE5 * 0.25;
+          const aoE3 = (aoE1 + aoE5) * 0.5;
+          const aoE4 = aoE1 * 0.25 + aoE5 * 0.75;
+          const cC  = 1 - centAO;
+          const cE1 = 1 - aoE1, cE2 = 1 - aoE2, cE3 = 1 - aoE3, cE4 = 1 - aoE4, cE5 = 1 - aoE5;
+          addTri(center.x,ownY,center.z,sr*cC,sg*cC,sb*cC, e1x,ownY,e1z,sr*cE1,sg*cE1,sb*cE1, e2x,ownY,e2z,sr*cE2,sg*cE2,sb*cE2, tt,ot,ot);
+          addTri(center.x,ownY,center.z,sr*cC,sg*cC,sb*cC, e2x,ownY,e2z,sr*cE2,sg*cE2,sb*cE2, e3x,ownY,e3z,sr*cE3,sg*cE3,sb*cE3, tt,ot,ot);
+          addTri(center.x,ownY,center.z,sr*cC,sg*cC,sb*cC, e3x,ownY,e3z,sr*cE3,sg*cE3,sb*cE3, e4x,ownY,e4z,sr*cE4,sg*cE4,sb*cE4, tt,ot,ot);
+          addTri(center.x,ownY,center.z,sr*cC,sg*cC,sb*cC, e4x,ownY,e4z,sr*cE4,sg*cE4,sb*cE4, e5x,ownY,e5z,sr*cE5,sg*cE5,sb*cE5, tt,ot,ot);
 
           // TriangulateWithoutRiver road logic (tutorial section 3)
           if (map.hasRoads(col, row)) {

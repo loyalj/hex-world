@@ -12,7 +12,8 @@
       "Bash(curl -s \"https://catlikecoding.com/unity/tutorials/hex-map/part-8/\")",
       "Bash(curl -s \"https://catlikecoding.com/unity/tutorials/hex-map/part-14/\")",
       "Bash(curl -s \"https://catlikecoding.com/unity/tutorials/hex-map/part-7/\")",
-      "Bash(npx tsc *)"
+      "Bash(npx tsc *)",
+      "Bash(curl -s \"https://catlikecoding.com/unity/tutorials/hex-map/part-9/\")"
     ],
     "additionalDirectories": [
       "C:\\Users\\loyal\\.claude\\projects\\d--Coding-hex-world\\ef551f1b-c5cb-4cf2-8696-3be1d9fe7853\\tool-results"
