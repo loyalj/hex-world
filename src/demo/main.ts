@@ -9,13 +9,14 @@ import { createWaterMaterial } from '../geometry/WaterMaterial.js';
 import { createWaterShoreMaterial } from '../geometry/WaterShoreMaterial.js';
 import { createEstuaryMaterial } from '../geometry/EstuaryMaterial.js';
 import { createRiverMaterial } from '../geometry/RiverMaterial.js';
+import { createRoadMaterial } from '../geometry/RoadMaterial.js';
 import { buildTerrainTextureArray } from '../geometry/TerrainTextures.js';
 import { createTerrainMaterial } from '../geometry/TerrainMaterial.js';
 import type { TerrainColorMode } from '../geometry/ChunkManager.js';
 import { HEX_DIRECTIONS } from '../math/HexCoord.js';
 
 /** Change this one constant to switch terrain rendering mode. */
-const TERRAIN_COLOR_MODE: TerrainColorMode = 'flat';
+const TERRAIN_COLOR_MODE: TerrainColorMode = 'splat';
 import { fbm } from '../math/Noise.js';
 
 const MAP_WIDTH   = 256;
@@ -118,6 +119,40 @@ for (let row = RIVER_GRID / 2; row < MAP_HEIGHT; row += RIVER_GRID) {
   }
 }
 
+// --- Roads ---
+// Traces a connected road path starting at (col, row).
+// getFace(row) returns the face index to use from each row, allowing alternating faces
+// for paths that must stay on a fixed column despite the hex offset grid.
+function traceRoad(col: number, row: number, getFace: (row: number) => number, steps: number): void {
+  let c = col, r = row;
+  for (let s = 0; s < steps; s++) {
+    const faceIdx = getFace(r);
+    const d  = POINTY_TOP_EDGE_DIRS[faceIdx];
+    const nb = neighborOff(c, r, d);
+    if (!map.inBounds(nb.col, nb.row)) break;
+    if (map.getTerrain(c, r) === TerrainType.Water) break;
+    if (map.getTerrain(nb.col, nb.row) === TerrainType.Water) break;
+    if (Math.abs(map.getElevation(c, r) - map.getElevation(nb.col, nb.row)) > 1) break;
+    if (map.hasRiverThroughEdge(c, r, faceIdx)) break;
+    const oppFace = (faceIdx + 3) % 6;
+    map.setRoad(c, r, faceIdx, true);
+    map.setRoad(nb.col, nb.row, oppFace, true);
+    c = nb.col;
+    r = nb.row;
+  }
+}
+
+const ROAD_GRID = 24;
+// Horizontal roads (face 5 = rightward along same row)
+for (let row = ROAD_GRID / 2; row < MAP_HEIGHT; row += ROAD_GRID) {
+  traceRoad(0, row, () => 5, MAP_WIDTH);
+}
+// Vertical roads: face 0 on even rows, face 1 on odd rows → path stays at the same column
+// (face 0 = {q:0,r:+1} drifts right on odd rows; face 1 = {q:-1,r:+1} corrects back)
+for (let col = ROAD_GRID / 2; col < MAP_WIDTH; col += ROAD_GRID) {
+  traceRoad(col, 0, r => r % 2 === 0 ? 0 : 1, MAP_HEIGHT);
+}
+
 // --- Layout ---
 const layout = createLayout(POINTY_TOP, HEX_SIZE);
 
@@ -156,6 +191,7 @@ const waterMaterial   = createWaterMaterial();
 const shoreMaterial   = createWaterShoreMaterial();
 const estuaryMaterial = createEstuaryMaterial();
 const riverMaterial   = createRiverMaterial();
+const roadMaterial    = createRoadMaterial();
 
 // --- HUD ---
 const hud = document.createElement('div');
@@ -211,6 +247,7 @@ async function start() {
     loadRadius: LOAD_RADIUS,
     geometryOptions: { colorMode: TERRAIN_COLOR_MODE },
     waterGeometryOptions: waterGeoOptions,
+    roadMaterial,
   });
 
   // --- Render loop ---

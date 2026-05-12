@@ -75,12 +75,17 @@ function nbOffset(col: number, row: number, d: number): { col: number; row: numb
 // [x, y, z, elevation, colorR, colorG, colorB, terrainTypeIndex]
 type CV = [number, number, number, number, number, number, number, number];
 
+export interface ChunkGeometries {
+  terrain: THREE.BufferGeometry;
+  roads: THREE.BufferGeometry | null;
+}
+
 export function buildChunkGeometry(
   map: HexMap,
   layout: HexLayout,
   bounds: ChunkBounds,
   opts: ChunkGeometryOptions = {},
-): THREE.BufferGeometry {
+): ChunkGeometries {
   const elevScale           = opts.elevationScale      ?? 0.5;
   const perturbStrength     = opts.perturbStrength      ?? 0.8;
   const elevPerturbStrength = opts.elevPerturbStrength  ?? 0.2;
@@ -96,6 +101,12 @@ export function buildChunkGeometry(
   const colors    = new Float32Array(maxVerts * 3);
   const terrainTypes = isSplat ? new Float32Array(maxVerts * 3) : null;
   let vi = 0, tti = 0;
+
+  // Road geometry — separate position + UV buffers, same perturbation as terrain
+  const maxRoadVerts = hexCount * 300;
+  const rPos = new Float32Array(maxRoadVerts * 3);
+  const rUV  = new Float32Array(maxRoadVerts * 2);
+  let rvi = 0, rui = 0;
 
   // ---- perturbation ----
 
@@ -172,6 +183,85 @@ export function buildChunkGeometry(
     addVert(x1, y1, z1, r1, g1, b1, tx, ty, tz);
     addVert(x2, y2, z2, r2, g2, b2, tx, ty, tz);
     addVert(x3, y3, z3, r3, g3, b3, tx, ty, tz);
+  };
+
+  // ---- road vertex emitters ----
+
+  const addRoadVert = (x: number, y: number, z: number, u: number) => {
+    const [dx, dz] = perturb(x, z);
+    rPos[rvi] = x + dx; rPos[rvi+1] = y; rPos[rvi+2] = z + dz;
+    rUV[rui]  = u;       rUV[rui+1]  = 0;
+    rvi += 3; rui += 2;
+  };
+
+  // Tutorial winding: (v0,v2,v1),(v1,v2,v3)
+  const addRoadQuad = (
+    x0: number, y0: number, z0: number, u0: number,
+    x1: number, y1: number, z1: number, u1: number,
+    x2: number, y2: number, z2: number, u2: number,
+    x3: number, y3: number, z3: number, u3: number,
+  ) => {
+    addRoadVert(x0,y0,z0,u0); addRoadVert(x2,y2,z2,u2); addRoadVert(x1,y1,z1,u1);
+    addRoadVert(x1,y1,z1,u1); addRoadVert(x2,y2,z2,u2); addRoadVert(x3,y3,z3,u3);
+  };
+
+  const addRoadTri = (
+    x0: number, y0: number, z0: number, u0: number,
+    x1: number, y1: number, z1: number, u1: number,
+    x2: number, y2: number, z2: number, u2: number,
+  ) => {
+    addRoadVert(x0,y0,z0,u0); addRoadVert(x1,y1,z1,u1); addRoadVert(x2,y2,z2,u2);
+  };
+
+  // v1-v3 = inner edge row, v4-v6 = outer edge row; U=1 at v2/v5 (center), U=0 at sides
+  const triangulateRoadSegment = (
+    v1x: number, v1y: number, v1z: number,
+    v2x: number, v2y: number, v2z: number,
+    v3x: number, v3y: number, v3z: number,
+    v4x: number, v4y: number, v4z: number,
+    v5x: number, v5y: number, v5z: number,
+    v6x: number, v6y: number, v6z: number,
+  ) => {
+    addRoadQuad(v1x,v1y,v1z,0, v2x,v2y,v2z,1, v4x,v4y,v4z,0, v5x,v5y,v5z,1);
+    addRoadQuad(v2x,v2y,v2z,1, v3x,v3y,v3z,0, v5x,v5y,v5z,1, v6x,v6y,v6z,0);
+  };
+
+  // Single triangle fill for road edge (center is at road middle, mL/mR at sides)
+  const triangulateRoadEdge = (
+    cx: number, cy: number, cz: number,
+    mLx: number, mLy: number, mLz: number,
+    mRx: number, mRy: number, mRz: number,
+  ) => {
+    addRoadTri(cx,cy,cz,1, mLx,mLy,mLz,0, mRx,mRy,mRz,0);
+  };
+
+  // Full road wedge from roadCenter toward edge (or just an edge fill if no road through edge)
+  const triangulateRoad = (
+    rcx: number, rcy: number, rcz: number,
+    mLx: number, mLy: number, mLz: number,
+    mRx: number, mRy: number, mRz: number,
+    e2x: number, e2y: number, e2z: number,
+    e3x: number, e3y: number, e3z: number,
+    e4x: number, e4y: number, e4z: number,
+    hasRoadThroughEdge: boolean,
+  ) => {
+    if (hasRoadThroughEdge) {
+      const mCx = (mLx + mRx) * 0.5, mCy = (mLy + mRy) * 0.5, mCz = (mLz + mRz) * 0.5;
+      triangulateRoadSegment(mLx,mLy,mLz, mCx,mCy,mCz, mRx,mRy,mRz, e2x,e2y,e2z, e3x,e3y,e3z, e4x,e4y,e4z);
+      addRoadTri(rcx,rcy,rcz,1, mLx,mLy,mLz,0, mCx,mCy,mCz,1);
+      addRoadTri(rcx,rcy,rcz,1, mCx,mCy,mCz,1, mRx,mRy,mRz,0);
+    } else {
+      triangulateRoadEdge(rcx,rcy,rcz, mLx,mLy,mLz, mRx,mRy,mRz);
+    }
+  };
+
+  // Returns interpolation factors for left/right middle verts (0.5 = halfway, 0.25 = quarter)
+  const getRoadInterpolators = (col: number, row: number, faceIdx: number): { l: number; r: number } => {
+    if (map.hasRoadThroughEdge(col, row, faceIdx)) return { l: 0.5, r: 0.5 };
+    return {
+      l: map.hasRoadThroughEdge(col, row, (faceIdx + 5) % 6) ? 0.5 : 0.25,
+      r: map.hasRoadThroughEdge(col, row, (faceIdx + 1) % 6) ? 0.5 : 0.25,
+    };
   };
 
   // ---- terrace lerp helpers ----
@@ -326,6 +416,7 @@ export function buildChunkGeometry(
     type1: number,
     type2: number,
     ownBedY = ownY, nbBedY = nbY,
+    hasRoad = false,
   ) => {
     const tx = type1, ty = type2, tz = type1;
     const ie2x = ie1x + (ie5x - ie1x) * 0.25, ie2z = ie1z + (ie5z - ie1z) * 0.25;
@@ -344,6 +435,13 @@ export function buildChunkGeometry(
             oe3x, nbBedY,  oe3z, nr,ng,nb2, oe4x, nbY,     oe4z, nr,ng,nb2, tx,ty,tz);
     addQuad(ie4x, ownY,    ie4z, or,og,ob,  ie5x, ownY,    ie5z, or,og,ob,
             oe4x, nbY,     oe4z, nr,ng,nb2, oe5x, nbY,     oe5z, nr,ng,nb2, tx,ty,tz);
+    if (hasRoad) {
+      // Reuse exact terrain vertex positions — no Y mismatch possible
+      triangulateRoadSegment(
+        ie2x, ownY,    ie2z,  ie3x, ownBedY, ie3z,  ie4x, ownY,    ie4z,
+        oe2x, nbY,     oe2z,  oe3x, nbBedY,  oe3z,  oe4x, nbY,     oe4z,
+      );
+    }
   };
 
   // type1 = lower/begin side, type2 = upper/end side.
@@ -357,6 +455,7 @@ export function buildChunkGeometry(
     type1: number,
     type2: number,
     lowerBedY = lowerY, upperBedY = upperY,
+    hasRoad = false,
   ) => {
     const tx = type1, ty = type2, tz = type1;
     const ie2x = ie1x + (ie5x - ie1x) * 0.25, ie2z = ie1z + (ie5z - ie1z) * 0.25;
@@ -389,6 +488,12 @@ export function buildChunkGeometry(
               n3x, n3y, n3z, ncr,ncg,ncb, n4x, ny,  n4z, ncr,ncg,ncb, tx,ty,tz);
       addQuad(p4x, py,  p4z, pr,pg,pb,  p5x, py,  p5z, pr,pg,pb,
               n4x, ny,  n4z, ncr,ncg,ncb, n5x, ny,  n5z, ncr,ncg,ncb, tx,ty,tz);
+      if (hasRoad) {
+        triangulateRoadSegment(
+          p2x, py,  p2z,  p3x, p3y, p3z,  p4x, py,  p4z,
+          n2x, ny,  n2z,  n3x, n3y, n3z,  n4x, ny,  n4z,
+        );
+      }
       p1x = n1x; p1z = n1z;
       p2x = n2x; p2z = n2z;
       p3x = n3x; p3z = n3z;
@@ -442,6 +547,22 @@ export function buildChunkGeometry(
           addTri(center.x,ownY,center.z,sr,sg,sb, e3x,ownY,e3z,sr,sg,sb, e4x,ownY,e4z,sr,sg,sb, tt,ot,ot);
           addTri(center.x,ownY,center.z,sr,sg,sb, e4x,ownY,e4z,sr,sg,sb, e5x,ownY,e5z,sr,sg,sb, tt,ot,ot);
 
+          // TriangulateWithoutRiver road logic (tutorial section 3)
+          if (map.hasRoads(col, row)) {
+            const interp = getRoadInterpolators(col, row, i);
+            const mLx = center.x + (e1x - center.x) * interp.l, mLz = center.z + (e1z - center.z) * interp.l;
+            const mRx = center.x + (e5x - center.x) * interp.r, mRz = center.z + (e5z - center.z) * interp.r;
+            triangulateRoad(
+              center.x, ownY, center.z,
+              mLx, ownY, mLz,
+              mRx, ownY, mRz,
+              e2x, ownY, e2z,
+              e3x, ownY, e3z,
+              e4x, ownY, e4z,
+              map.hasRoadThroughEdge(col, row, i),
+            );
+          }
+
         } else if (!map.hasRiverThroughEdge(col, row, i)) {
           const in1 = i1, ip = (i + 5) % 6, ip2 = (i + 4) % 6, in2 = (i + 2) % 6;
           let adjCx = center.x, adjCz = center.z;
@@ -470,6 +591,75 @@ export function buildChunkGeometry(
           addTri(adjCx,ownY,adjCz,sr,sg,sb, m2x,ownY,m2z,sr,sg,sb, m3x,ownY,m3z,sr,sg,sb, tt,ot,ot);
           addTri(adjCx,ownY,adjCz,sr,sg,sb, m3x,ownY,m3z,sr,sg,sb, m4x,ownY,m4z,sr,sg,sb, tt,ot,ot);
           addTri(adjCx,ownY,adjCz,sr,sg,sb, m4x,ownY,m4z,sr,sg,sb, m5x,ownY,m5z,sr,sg,sb, tt,ot,ot);
+
+          // TriangulateRoadAdjacentToRiver (tutorial section 4)
+          if (map.hasRoads(col, row)) (() => {
+            const prevFace = (i + 5) % 6, nextFace = i1;
+            const hasRoadThrough   = map.hasRoadThroughEdge(col, row, i);
+            const previousHasRiver = map.hasRiverThroughEdge(col, row, prevFace);
+            const nextHasRiver     = map.hasRiverThroughEdge(col, row, nextFace);
+            const interp    = getRoadInterpolators(col, row, i);
+            const inDir     = map.getIncomingRiverDir(col, row);
+            const outDir    = map.getOutgoingRiverDir(col, row);
+
+            let rcx = center.x, rcz = center.z;  // road center (adjusted per river type)
+            let cx  = center.x, cz  = center.z;  // actual center (adjusted for straight/inside-curve)
+
+            if (map.hasRiverBeginOrEnd(col, row)) {
+              const riverDir = inDir >= 0 ? inDir : outDir;
+              const oppDir   = (riverDir + 3) % 6;
+              const oppI1    = (oppDir + 1) % 6;
+              rcx += (ox[oppDir] + ox[oppI1]) * 0.5 * SOLID_FACTOR / 3;
+              rcz += (oz[oppDir] + oz[oppI1]) * 0.5 * SOLID_FACTOR / 3;
+            } else if (inDir >= 0 && outDir >= 0 && inDir === (outDir + 3) % 6) {
+              // Straight river — split road to either side; prune if nothing on this side
+              if (previousHasRiver) {
+                if (!hasRoadThrough && !map.hasRoadThroughEdge(col, row, nextFace)) return;
+                const cornerX = ox[i1] * SOLID_FACTOR, cornerZ = oz[i1] * SOLID_FACTOR;
+                rcx += cornerX * 0.5; rcz += cornerZ * 0.5;
+                cx  += cornerX * 0.25; cz  += cornerZ * 0.25;
+              } else {
+                if (!hasRoadThrough && !map.hasRoadThroughEdge(col, row, prevFace)) return;
+                const cornerX = ox[i] * SOLID_FACTOR, cornerZ = oz[i] * SOLID_FACTOR;
+                rcx += cornerX * 0.5; rcz += cornerZ * 0.5;
+                cx  += cornerX * 0.25; cz  += cornerZ * 0.25;
+              }
+            } else if (inDir >= 0 && outDir >= 0 && inDir === (outDir + 5) % 6) {
+              // Zigzag A
+              rcx -= ox[(inDir + 1) % 6] * 0.2;
+              rcz -= oz[(inDir + 1) % 6] * 0.2;
+            } else if (inDir >= 0 && outDir >= 0 && inDir === (outDir + 1) % 6) {
+              // Zigzag B
+              rcx -= ox[inDir] * 0.2;
+              rcz -= oz[inDir] * 0.2;
+            } else if (previousHasRiver && nextHasRiver) {
+              // Inside of curve — prune if no road through this edge
+              if (!hasRoadThrough) return;
+              const midX = (ox[i] + ox[i1]) * 0.5 * SOLID_FACTOR;
+              const midZ = (oz[i] + oz[i1]) * 0.5 * SOLID_FACTOR;
+              rcx += midX * INNER_TO_OUTER * 0.7; rcz += midZ * INNER_TO_OUTER * 0.7;
+              cx  += midX * INNER_TO_OUTER * 0.5; cz  += midZ * INNER_TO_OUTER * 0.5;
+            } else {
+              // Outside of curve — find middle direction, prune if no roads near it
+              let mid: number;
+              if (previousHasRiver)  mid = nextFace;
+              else if (nextHasRiver) mid = prevFace;
+              else                   mid = i;
+              const mI1 = (mid + 1) % 6;
+              if (!map.hasRoadThroughEdge(col, row, mid) &&
+                  !map.hasRoadThroughEdge(col, row, (mid + 5) % 6) &&
+                  !map.hasRoadThroughEdge(col, row, mI1)) return;
+              rcx += (ox[mid] + ox[mI1]) * 0.5 * SOLID_FACTOR * 0.25;
+              rcz += (oz[mid] + oz[mI1]) * 0.5 * SOLID_FACTOR * 0.25;
+            }
+
+            const mLx = rcx + (e1x - rcx) * interp.l, mLz = rcz + (e1z - rcz) * interp.l;
+            const mRx = rcx + (e5x - rcx) * interp.r, mRz = rcz + (e5z - rcz) * interp.r;
+            triangulateRoad(rcx,ownY,rcz, mLx,ownY,mLz, mRx,ownY,mRz,
+              e2x,ownY,e2z, e3x,ownY,e3z, e4x,ownY,e4z, hasRoadThrough);
+            if (previousHasRiver) triangulateRoadEdge(rcx,ownY,rcz, cx,ownY,cz, mLx,ownY,mLz);
+            if (nextHasRiver)     triangulateRoadEdge(rcx,ownY,rcz, mRx,ownY,mRz, cx,ownY,cz);
+          })();
 
         } else if (map.hasRiverBeginOrEnd(col, row)) {
           const e3y = ownBedY;
@@ -575,23 +765,24 @@ export function buildChunkGeometry(
         const riverEdge  = map.hasRiverThroughEdge(col, row, i);
         const edgeBedOwn = riverEdge ? streamBedY(col, row)       : ownY;
         const edgeBedNb  = riverEdge ? streamBedY(nb.col, nb.row) : nbY;
+        const hasRoad    = !riverEdge && map.hasRoadThroughEdge(col, row, i);
 
         if (et === 1) {
           if (ownElev < nbElev) {
             // own is lower: lower=(1,0,0)/ownType, upper=(0,1,0)/nbType
             addTerraceEdgeStrip(v1x,v1z, v2x,v2z,  bx,  bz, ownY,nbY, er,eg,eb, er2,eg2,eb2,
-              ownType, nbType, edgeBedOwn, edgeBedNb);
+              ownType, nbType, edgeBedOwn, edgeBedNb, hasRoad);
           } else {
             // nb is lower: lower must still be (1,0,0) in splat; flat uses actual cell colors
             const [loR,loG,loB, hiR,hiG,hiB] = colorMode === 'splat'
               ? [er, eg, eb, er2, eg2, eb2]     // splat: color1=(1,0,0) for lower, color2 for upper
               : [er2, eg2, eb2, er, eg, eb];    // flat/debug: nb color for lower, own for upper
             addTerraceEdgeStrip(v3x,v3z, v4x,v4z, -bx,-bz, nbY,ownY, loR,loG,loB, hiR,hiG,hiB,
-              nbType, ownType, edgeBedNb, edgeBedOwn);
+              nbType, ownType, edgeBedNb, edgeBedOwn, hasRoad);
           }
         } else {
           addBridgeEdgeStrip(v1x,v1z, v2x,v2z, bx,bz, ownY,nbY, er,eg,eb, er2,eg2,eb2,
-            ownType, nbType, edgeBedOwn, edgeBedNb);
+            ownType, nbType, edgeBedOwn, edgeBedNb, hasRoad);
         }
 
         // Corner triangles — dirs 0 and 1 only
@@ -664,5 +855,14 @@ export function buildChunkGeometry(
     geo.setAttribute('terrainType', new THREE.BufferAttribute(terrainTypes.subarray(0, n * 3), 3));
   }
   geo.computeVertexNormals();
-  return geo;
+
+  let roadsGeo: THREE.BufferGeometry | null = null;
+  if (rvi > 0) {
+    roadsGeo = new THREE.BufferGeometry();
+    roadsGeo.setAttribute('position', new THREE.BufferAttribute(rPos.subarray(0, rvi), 3));
+    roadsGeo.setAttribute('uv',       new THREE.BufferAttribute(rUV.subarray(0, rui), 2));
+    roadsGeo.computeVertexNormals();
+  }
+
+  return { terrain: geo, roads: roadsGeo };
 }

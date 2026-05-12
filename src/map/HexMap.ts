@@ -28,6 +28,7 @@ export class HexMap {
 
   readonly uint8: Uint8Array;
   private readonly int8: Int8Array;
+  private readonly roadBits: Uint8Array;
 
   constructor(options: HexMapOptions) {
     this.width = options.width;
@@ -35,6 +36,7 @@ export class HexMap {
     const buffer = new ArrayBuffer(this.width * this.height * CELL_STRIDE);
     this.uint8 = new Uint8Array(buffer);
     this.int8 = new Int8Array(buffer);
+    this.roadBits = new Uint8Array(this.width * this.height);
 
     if (options.defaultTerrain !== undefined && options.defaultTerrain !== TerrainType.Grassland) {
       for (let i = 0; i < this.width * this.height; i++) {
@@ -150,6 +152,27 @@ export class HexMap {
   /** Clear all river data for this cell. */
   clearRiver(col: number, row: number): void {
     this.uint8[this.index(col, row) + OFFSET_RIVER_DIR] = 0;
+  }
+
+  // --- Roads ---
+  // One bit per edge direction (0–5) packed into a single byte per cell.
+
+  hasRoadThroughEdge(col: number, row: number, edgeIndex: number): boolean {
+    return (this.roadBits[row * this.width + col] & (1 << edgeIndex)) !== 0;
+  }
+
+  hasRoads(col: number, row: number): boolean {
+    return this.roadBits[row * this.width + col] !== 0;
+  }
+
+  /** Set or clear a road through the given edge. Does NOT update the neighbour cell. */
+  setRoad(col: number, row: number, edgeIndex: number, state: boolean): void {
+    const idx = row * this.width + col;
+    if (state) {
+      this.roadBits[idx] |= (1 << edgeIndex);
+    } else {
+      this.roadBits[idx] &= ~(1 << edgeIndex);
+    }
   }
 
   // --- Iteration ---

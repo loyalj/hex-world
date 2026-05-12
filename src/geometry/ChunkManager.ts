@@ -27,6 +27,8 @@ export interface ChunkManagerOptions {
   estuaryMaterial?: THREE.Material;
   /** If provided, river channels on land cells are rendered with this material. */
   riverMaterial?: THREE.Material;
+  /** If provided, roads are rendered with this material. */
+  roadMaterial?: THREE.Material;
   /** Passed through to the water geometry builder. */
   waterGeometryOptions?: WaterGeometryOptions;
 }
@@ -40,6 +42,7 @@ export class ChunkManager {
   private readonly shoreMaterial:   THREE.Material | null;
   private readonly estuaryMaterial: THREE.Material | null;
   private readonly riverMaterial:   THREE.Material | null;
+  private readonly roadMaterial:    THREE.Material | null;
   private readonly geoOptions: ChunkGeometryOptions;
   private readonly waterGeoOptions: WaterGeometryOptions;
   readonly chunkSize: number;
@@ -50,6 +53,7 @@ export class ChunkManager {
   private readonly shoreChunks   = new Map<string, THREE.Mesh>();
   private readonly estuaryChunks = new Map<string, THREE.Mesh>();
   private readonly riverChunks   = new Map<string, THREE.Mesh>();
+  private readonly roadChunks    = new Map<string, THREE.Mesh>();
   private readonly dirty         = new Set<string>();
 
   /** Total number of chunks across the map width */
@@ -66,6 +70,7 @@ export class ChunkManager {
     this.shoreMaterial   = opts.shoreMaterial   ?? null;
     this.estuaryMaterial = opts.estuaryMaterial ?? null;
     this.riverMaterial   = opts.riverMaterial   ?? null;
+    this.roadMaterial    = opts.roadMaterial    ?? null;
     this.geoOptions      = opts.geometryOptions      ?? {};
     this.waterGeoOptions = opts.waterGeometryOptions ?? {};
     this.chunkSize  = opts.chunkSize  ?? 32;
@@ -93,7 +98,7 @@ export class ChunkManager {
     if (this.chunks.has(k)) return;
 
     const b    = this.bounds(cx, cy);
-    const geo  = buildChunkGeometry(this.map, this.layout, b, this.geoOptions);
+    const { terrain: geo, roads: roadsGeo } = buildChunkGeometry(this.map, this.layout, b, this.geoOptions);
     const mesh = new THREE.Mesh(geo, this.material);
     mesh.frustumCulled = true;
     this.scene.add(mesh);
@@ -139,6 +144,14 @@ export class ChunkManager {
         this.riverChunks.set(k, rMesh);
       }
     }
+
+    if (this.roadMaterial && roadsGeo) {
+      const rdMesh = new THREE.Mesh(roadsGeo, this.roadMaterial);
+      rdMesh.frustumCulled = true;
+      rdMesh.renderOrder = 2; // draw on top of terrain and water
+      this.scene.add(rdMesh);
+      this.roadChunks.set(k, rdMesh);
+    }
   }
 
   private unloadChunk(k: string): void {
@@ -176,6 +189,13 @@ export class ChunkManager {
       this.riverChunks.delete(k);
     }
 
+    const rdMesh = this.roadChunks.get(k);
+    if (rdMesh) {
+      this.scene.remove(rdMesh);
+      rdMesh.geometry.dispose();
+      this.roadChunks.delete(k);
+    }
+
     this.dirty.delete(k);
   }
 
@@ -191,7 +211,8 @@ export class ChunkManager {
       const [cx, cy] = k.split(',').map(Number);
       const b = this.bounds(cx, cy);
       mesh.geometry.dispose();
-      mesh.geometry = buildChunkGeometry(this.map, this.layout, b, this.geoOptions);
+      const { terrain: newGeo, roads: newRoadsGeo } = buildChunkGeometry(this.map, this.layout, b, this.geoOptions);
+      mesh.geometry = newGeo;
 
       const wMesh = this.waterChunks.get(k);
       if (wMesh) {
@@ -239,6 +260,23 @@ export class ChunkManager {
           this.scene.remove(rMesh);
           this.riverChunks.delete(k);
         }
+      }
+
+      const rdMesh = this.roadChunks.get(k);
+      if (rdMesh) {
+        rdMesh.geometry.dispose();
+        if (newRoadsGeo) {
+          rdMesh.geometry = newRoadsGeo;
+        } else {
+          this.scene.remove(rdMesh);
+          this.roadChunks.delete(k);
+        }
+      } else if (newRoadsGeo && this.roadMaterial) {
+        const newRdMesh = new THREE.Mesh(newRoadsGeo, this.roadMaterial);
+        newRdMesh.frustumCulled = true;
+        newRdMesh.renderOrder = 2;
+        this.scene.add(newRdMesh);
+        this.roadChunks.set(k, newRdMesh);
       }
 
       this.dirty.delete(k);

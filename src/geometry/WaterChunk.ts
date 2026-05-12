@@ -172,35 +172,6 @@ export function buildRiverGeometry(
     addTri(x0, y0, z0, u0, v0,  x3, y3, z3, u3, v3,  x2, y2, z2, u2, v2);
   };
 
-  /**
-   * Waterfall quad clipped to the water surface.
-   * Top vertices at y1; bottom vertices lerped toward top to land at wY.
-   */
-  const addWaterfallQuad = (
-    x0: number, z0: number,
-    x1: number, z1: number,
-    x2: number, z2: number,
-    x3: number, z3: number,
-    y1: number, y2: number, wY: number,
-  ) => {
-    const [d0x, d0z] = perturb(x0, z0);
-    const [d1x, d1z] = perturb(x1, z1);
-    const [d2x, d2z] = perturb(x2, z2);
-    const [d3x, d3z] = perturb(x3, z3);
-    const p0x = x0 + d0x, p0z = z0 + d0z;
-    const p1x = x1 + d1x, p1z = z1 + d1z;
-    let   p2x = x2 + d2x, p2z = z2 + d2z;
-    let   p3x = x3 + d3x, p3z = z3 + d3z;
-    const t = (wY - y2) / (y1 - y2);
-    p2x += (p0x - p2x) * t;  p2z += (p0z - p2z) * t;
-    p3x += (p1x - p3x) * t;  p3z += (p1z - p3z) * t;
-    positions[vi++] = p0x; positions[vi++] = y1;  positions[vi++] = p0z; uvs[uvi++] = 0.0; uvs[uvi++] = 0.8;
-    positions[vi++] = p1x; positions[vi++] = y1;  positions[vi++] = p1z; uvs[uvi++] = 1.0; uvs[uvi++] = 0.8;
-    positions[vi++] = p3x; positions[vi++] = wY;  positions[vi++] = p3z; uvs[uvi++] = 1.0; uvs[uvi++] = 1.0;
-    positions[vi++] = p0x; positions[vi++] = y1;  positions[vi++] = p0z; uvs[uvi++] = 0.0; uvs[uvi++] = 0.8;
-    positions[vi++] = p3x; positions[vi++] = wY;  positions[vi++] = p3z; uvs[uvi++] = 1.0; uvs[uvi++] = 1.0;
-    positions[vi++] = p2x; positions[vi++] = wY;  positions[vi++] = p2z; uvs[uvi++] = 0.0; uvs[uvi++] = 1.0;
-  };
 
   for (let row = rowStart; row < rowEnd; row++) {
     for (let col = colStart; col < colEnd; col++) {
