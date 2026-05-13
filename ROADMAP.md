@@ -93,11 +93,11 @@ Follows the structure of the [Catlike Coding Hex Map tutorial series](https://ca
 
 ---
 
-## Stage 7 — Saving & Loading
+## Stage 7 — Saving & Loading ✅
 *Tutorial equivalent: Parts 12–13*
 
-- [ ] Binary serialization format for `HexMap` data
-- [ ] Save/load API (`MapSerializer`)
+- [x] Binary serialization format for `HexMap` data — `HXMP` magic, version byte, uint32 dimensions, three packed data sections
+- [x] Save/load API — `serializeMap` / `deserializeMap` (binary `Uint8Array`), `serializeMapJSON` / `deserializeMapJSON` (base64 JSON envelope)
 - [ ] Map metadata (name, size, seed)
 - [ ] Demo: save and reload a map in-browser
 
@@ -107,8 +107,8 @@ Follows the structure of the [Catlike Coding Hex Map tutorial series](https://ca
 *Tutorial equivalent: Parts 15–17*
 
 - [x] Hex distance, neighbors, range, line — already in `HexCoord.ts`
-- [ ] A* pathfinding on hex grid with terrain cost support
-- [ ] Movement range calculation (flood fill with budget)
+- [x] A* pathfinding — `findPath(from, to, costFn, map)` returns `HexCoord[] | null`; game supplies `MoveCostFn`, return `Infinity` for impassable
+- [x] Movement range — `getMovementRange(center, budget, costFn, map)` returns all reachable cells; Dijkstra flood-fill, budget in cost units
 - [ ] Path smoothing helper
 - [ ] Demo: click-to-pathfind with movement range highlight
 

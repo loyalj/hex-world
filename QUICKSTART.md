@@ -278,6 +278,53 @@ All map data is preserved: terrain, elevation, flags, rivers, roads, and scatter
 
 ---
 
+## Pathfinding and movement range
+
+The library provides the algorithms. Your game supplies a `MoveCostFn` that closes over your map and any unit-specific rules.
+
+```ts
+import {
+  findPath, getMovementRange,
+  offsetToHex, hexToOffset,
+  type MoveCostFn,
+} from 'hex-world';
+
+// Define movement costs for your game
+const cost: MoveCostFn = (from, to) => {
+  const { col, row } = hexToOffset(to);
+  if (map.getTerrain(col, row) === TerrainType.Water) return Infinity; // impassable
+  if (map.getElevation(col, row) > 4)                return 3;        // steep
+  return 1;                                                            // normal
+};
+
+// A* — returns [start, ..., goal] or null if no path exists
+const path = findPath(
+  offsetToHex(startCol, startRow),
+  offsetToHex(goalCol,  goalRow),
+  cost,
+  map,
+);
+if (path) {
+  for (const hex of path) {
+    const { col, row } = hexToOffset(hex);
+    console.log(col, row);
+  }
+}
+
+// Flood-fill — all cells reachable within a movement budget
+const reachable = getMovementRange(
+  offsetToHex(unitCol, unitRow),
+  3,      // budget (in cost units)
+  cost,
+  map,
+);
+// reachable includes the unit's own cell (cost 0)
+```
+
+Costs must be non-negative. Return `Infinity` (or any non-finite value) to mark a transition as impassable — the algorithms skip those edges automatically.
+
+---
+
 ## What the library does NOT own
 
 Keep these in your game, not in hex-world:
@@ -292,7 +339,5 @@ Keep these in your game, not in hex-world:
 
 ## What's coming to the library
 
-- `findPath(from, to, costFn)` — A* with game-supplied cost function
-- `getMovementRange(center, budget, costFn)` — flood-fill reachable cells
 - Fog of war — per-cell visibility state + LOS calculation
 - Unit position / visibility hooks

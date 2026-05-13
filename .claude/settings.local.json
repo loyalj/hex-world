@@ -17,7 +17,8 @@
       "Bash(curl -s \"http://www-cs-students.stanford.edu/~amitp/game-programming/polygon-map-generation/\")",
       "Bash(curl -s \"https://catlikecoding.com/unity/tutorials/hex-map/part-24/\")",
       "Bash(curl -s \"https://catlikecoding.com/unity/tutorials/hex-map/part-25/\")",
-      "Bash(curl -s \"https://catlikecoding.com/unity/tutorials/hex-map/part-26/\")"
+      "Bash(curl -s \"https://catlikecoding.com/unity/tutorials/hex-map/part-26/\")",
+      "Bash(curl -s \"https://catlikecoding.com/unity/tutorials/hex-map/part-20/\")"
     ],
     "additionalDirectories": [
       "C:\\Users\\loyal\\.claude\\projects\\d--Coding-hex-world\\ef551f1b-c5cb-4cf2-8696-3be1d9fe7853\\tool-results"
