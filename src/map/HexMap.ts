@@ -12,6 +12,8 @@ export interface HexMapOptions {
   height: number;
   /** Default terrain for all cells */
   defaultTerrain?: TerrainType;
+  /** Number of scatter feature layers. Default 0. */
+  featureLayerCount?: number;
 }
 
 /**
@@ -25,18 +27,24 @@ export interface HexMapOptions {
 export class HexMap {
   readonly width: number;
   readonly height: number;
+  readonly featureLayerCount: number;
 
   readonly uint8: Uint8Array;
   private readonly int8: Int8Array;
   private readonly roadBits: Uint8Array;
+  private readonly featureData: Uint8Array | null;
 
   constructor(options: HexMapOptions) {
     this.width = options.width;
     this.height = options.height;
+    this.featureLayerCount = options.featureLayerCount ?? 0;
     const buffer = new ArrayBuffer(this.width * this.height * CELL_STRIDE);
     this.uint8 = new Uint8Array(buffer);
     this.int8 = new Int8Array(buffer);
     this.roadBits = new Uint8Array(this.width * this.height);
+    this.featureData = this.featureLayerCount > 0
+      ? new Uint8Array(this.width * this.height * this.featureLayerCount)
+      : null;
 
     if (options.defaultTerrain !== undefined && options.defaultTerrain !== TerrainType.Grassland) {
       for (let i = 0; i < this.width * this.height; i++) {
@@ -55,6 +63,18 @@ export class HexMap {
 
   private index(col: number, row: number): number {
     return (row * this.width + col) * CELL_STRIDE;
+  }
+
+  // --- Feature layers ---
+
+  getFeatureLevel(col: number, row: number, layer: number): number {
+    if (!this.featureData || layer >= this.featureLayerCount) return 0;
+    return this.featureData[(row * this.width + col) * this.featureLayerCount + layer];
+  }
+
+  setFeatureLevel(col: number, row: number, layer: number, value: number): void {
+    if (!this.featureData || layer >= this.featureLayerCount) return;
+    this.featureData[(row * this.width + col) * this.featureLayerCount + layer] = value & 3;
   }
 
   // --- Terrain ---

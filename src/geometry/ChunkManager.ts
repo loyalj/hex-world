@@ -7,6 +7,9 @@ export type { TerrainColorMode };
 import { buildWaterGeometry, buildRiverGeometry, type WaterGeometryOptions } from './WaterChunk.js';
 import { buildShoreGeometry } from './WaterShoreChunk.js';
 import { buildEstuaryGeometry } from './EstuaryChunk.js';
+import { buildScatterMeshes } from './ScatterBuilder.js';
+import type { HexHashGrid } from './HexHashGrid.js';
+import type { ScatterLayerConfig } from './ScatterTypes.js';
 
 export interface ChunkManagerOptions {
   map: HexMap;
@@ -31,6 +34,10 @@ export interface ChunkManagerOptions {
   roadMaterial?: THREE.Material;
   /** Passed through to the water geometry builder. */
   waterGeometryOptions?: WaterGeometryOptions;
+  /** Hash grid for deterministic scatter placement. Required when scatterLayers is provided. */
+  hashGrid?: HexHashGrid;
+  /** One config per feature layer defined on the map. */
+  scatterLayers?: ScatterLayerConfig[];
 }
 
 export class ChunkManager {
@@ -43,17 +50,20 @@ export class ChunkManager {
   private readonly estuaryMaterial: THREE.Material | null;
   private readonly riverMaterial:   THREE.Material | null;
   private readonly roadMaterial:    THREE.Material | null;
+  private readonly hashGrid:        HexHashGrid | null;
+  private readonly scatterLayers:   ScatterLayerConfig[] | null;
   private readonly geoOptions: ChunkGeometryOptions;
   private readonly waterGeoOptions: WaterGeometryOptions;
   readonly chunkSize: number;
   private readonly loadRadius: number;
 
-  private readonly chunks      = new Map<string, THREE.Mesh>();
-  private readonly waterChunks = new Map<string, THREE.Mesh>();
+  private readonly chunks        = new Map<string, THREE.Mesh>();
+  private readonly waterChunks   = new Map<string, THREE.Mesh>();
   private readonly shoreChunks   = new Map<string, THREE.Mesh>();
   private readonly estuaryChunks = new Map<string, THREE.Mesh>();
   private readonly riverChunks   = new Map<string, THREE.Mesh>();
   private readonly roadChunks    = new Map<string, THREE.Mesh>();
+  private readonly scatterChunks = new Map<string, THREE.InstancedMesh[]>();
   private readonly dirty         = new Set<string>();
 
   /** Total number of chunks across the map width */
@@ -71,6 +81,8 @@ export class ChunkManager {
     this.estuaryMaterial = opts.estuaryMaterial ?? null;
     this.riverMaterial   = opts.riverMaterial   ?? null;
     this.roadMaterial    = opts.roadMaterial    ?? null;
+    this.hashGrid        = opts.hashGrid        ?? null;
+    this.scatterLayers   = opts.scatterLayers   ?? null;
     this.geoOptions      = opts.geometryOptions      ?? {};
     this.waterGeoOptions = opts.waterGeometryOptions ?? {};
     this.chunkSize  = opts.chunkSize  ?? 32;
@@ -152,6 +164,14 @@ export class ChunkManager {
       this.scene.add(rdMesh);
       this.roadChunks.set(k, rdMesh);
     }
+
+    if (this.hashGrid && this.scatterLayers && this.scatterLayers.length > 0) {
+      const scMeshes = buildScatterMeshes(this.map, this.layout, b, this.hashGrid, this.scatterLayers);
+      if (scMeshes.length > 0) {
+        for (const m of scMeshes) this.scene.add(m);
+        this.scatterChunks.set(k, scMeshes);
+      }
+    }
   }
 
   private unloadChunk(k: string): void {
@@ -194,6 +214,15 @@ export class ChunkManager {
       this.scene.remove(rdMesh);
       rdMesh.geometry.dispose();
       this.roadChunks.delete(k);
+    }
+
+    const scMeshes = this.scatterChunks.get(k);
+    if (scMeshes) {
+      for (const m of scMeshes) {
+        this.scene.remove(m);
+        m.dispose();
+      }
+      this.scatterChunks.delete(k);
     }
 
     this.dirty.delete(k);
@@ -277,6 +306,19 @@ export class ChunkManager {
         newRdMesh.renderOrder = 2;
         this.scene.add(newRdMesh);
         this.roadChunks.set(k, newRdMesh);
+      }
+
+      const oldScMeshes = this.scatterChunks.get(k);
+      if (oldScMeshes) {
+        for (const m of oldScMeshes) { this.scene.remove(m); m.dispose(); }
+        this.scatterChunks.delete(k);
+      }
+      if (this.hashGrid && this.scatterLayers && this.scatterLayers.length > 0) {
+        const newScMeshes = buildScatterMeshes(this.map, this.layout, b, this.hashGrid, this.scatterLayers);
+        if (newScMeshes.length > 0) {
+          for (const m of newScMeshes) this.scene.add(m);
+          this.scatterChunks.set(k, newScMeshes);
+        }
       }
 
       this.dirty.delete(k);

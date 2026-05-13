@@ -14,19 +14,21 @@ import { buildTerrainTextureArray } from '../geometry/TerrainTextures.js';
 import { createTerrainMaterial } from '../geometry/TerrainMaterial.js';
 import type { TerrainColorMode } from '../geometry/ChunkManager.js';
 import { HEX_DIRECTIONS } from '../math/HexCoord.js';
+import { HexHashGrid } from '../geometry/HexHashGrid.js';
+import type { ScatterLayerConfig } from '../geometry/ScatterTypes.js';
 
 /** Change this one constant to switch terrain rendering mode. */
 const TERRAIN_COLOR_MODE: TerrainColorMode = 'splat';
 import { fbm } from '../math/Noise.js';
 
-const MAP_WIDTH   = 256;
-const MAP_HEIGHT  = 256;
+const MAP_WIDTH   = 1024;
+const MAP_HEIGHT  = 512;
 const HEX_SIZE    = 1;
 const CHUNK_SIZE  = 32;
 const LOAD_RADIUS = 5;
 
 // --- Map ---
-const map = new HexMap({ width: MAP_WIDTH, height: MAP_HEIGHT });
+const map = new HexMap({ width: MAP_WIDTH, height: MAP_HEIGHT, featureLayerCount: 1 });
 
 // Elevation offset so all land cells have elev >= 0 and water cells have elev < 0.
 // With n*8 in range -8..8, +4 gives land (n>-0.5) at elev 0..12, water at elev <0.
@@ -43,6 +45,10 @@ map.forEach((col, row) => {
   else if (isWater)   map.setTerrain(col, row, TerrainType.Water);
   else if (n < -0.38) map.setTerrain(col, row, TerrainType.Desert);
   else                map.setTerrain(col, row, TerrainType.Grassland);
+
+  // Layer 0 = pine trees: dense on grassland, sparse on desert, none elsewhere
+  const treeLevel = isWater || n > 0.42 ? 0 : n >= -0.38 ? 2 : 1;
+  map.setFeatureLevel(col, row, 0, treeLevel);
 
   // Water cells capped at -1 so terrain stays below waterLevel.
   // Land cells clamped to 0 minimum so terrain Y >= -0.2 > waterLevel=-0.25 (shore slopes upward).
@@ -234,6 +240,19 @@ async function start() {
     terrainMaterial = new THREE.MeshPhongMaterial({ vertexColors: true, side: THREE.DoubleSide });
   }
 
+  // --- Scatter ---
+  const hashGrid = new HexHashGrid(1234);
+
+  const treeMat = new THREE.MeshLambertMaterial({ color: 0x5e8c2a });
+  const pineLayer: ScatterLayerConfig = [
+    // tier 0 (high density / level-3 cells): tall tree
+    [{ geometry: new THREE.ConeGeometry(0.42, 2.0, 7), material: treeMat, yOffset: 1.0 }],
+    // tier 1 (medium)
+    [{ geometry: new THREE.ConeGeometry(0.33, 1.5, 7), material: treeMat, yOffset: 0.75 }],
+    // tier 2 (low density / level-1 cells): small scrubby tree
+    [{ geometry: new THREE.ConeGeometry(0.24, 1.0, 7), material: treeMat, yOffset: 0.5 }],
+  ];
+
   const chunkManager = new ChunkManager({
     map,
     layout,
@@ -248,6 +267,8 @@ async function start() {
     geometryOptions: { colorMode: TERRAIN_COLOR_MODE },
     waterGeometryOptions: waterGeoOptions,
     roadMaterial,
+    hashGrid,
+    scatterLayers: [pineLayer],
   });
 
   // --- Render loop ---
