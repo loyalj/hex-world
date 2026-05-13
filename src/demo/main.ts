@@ -17,9 +17,22 @@ import type { ScatterLayerConfig } from '../geometry/ScatterTypes.js';
 import type { MapGeneratorPlugin } from '../generators/MapGeneratorPlugin.js';
 import { FbmPlugin } from '../generators/FbmPlugin.js';
 import { ChunkPlugin } from '../generators/ChunkPlugin.js';
+import { pickHexFromMeshes } from '../geometry/HexPicking.js';
+import { hexToWorld, hexCorners } from '../math/HexLayout.js';
+import { offsetToHex } from '../math/HexCoord.js';
+import { TerrainType } from '../map/HexCell.js';
 
 /** Change this one constant to switch terrain rendering mode. */
 const TERRAIN_COLOR_MODE: TerrainColorMode = 'splat';
+
+const TERRAIN_NAMES: Record<number, string> = {
+  [TerrainType.Water]:     'Water',
+  [TerrainType.Grassland]: 'Grassland',
+  [TerrainType.Desert]:    'Desert',
+  [TerrainType.Mud]:       'Mud',
+  [TerrainType.Rock]:      'Rock',
+  [TerrainType.Snow]:      'Snow',
+};
 
 const MAP_WIDTH   = 100;
 const MAP_HEIGHT  = 100;
@@ -79,6 +92,24 @@ const sun = new THREE.DirectionalLight(0xfff4d0, 1.4);
 sun.position.set(100, 120, 80);
 scene.add(ambient, sun);
 
+// --- Hover indicator (flat translucent hex that follows the cursor) ---
+const indicatorGeo = new THREE.BufferGeometry();
+const corners = hexCorners(layout, { q: 0, r: 0 });
+const indicatorVerts: number[] = [];
+corners.forEach((c, i) => {
+  const next = corners[(i + 1) % 6];
+  indicatorVerts.push(0, 0, 0, c.x, 0, c.z, next.x, 0, next.z);
+});
+indicatorGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(indicatorVerts), 3));
+const hoverMesh = new THREE.Mesh(
+  indicatorGeo,
+  new THREE.MeshBasicMaterial({ color: 0xffff88, transparent: true, opacity: 0.35, depthWrite: false, depthTest: false, side: THREE.DoubleSide }),
+);
+hoverMesh.renderOrder = 5;
+hoverMesh.visible = false;
+scene.add(hoverMesh);
+let hoverCell: { col: number; row: number } | null = null;
+
 // --- Materials ---
 const waterMaterial   = createWaterMaterial();
 const shoreMaterial   = createWaterShoreMaterial();
@@ -102,6 +133,11 @@ window.addEventListener('resize', () => {
   camera.updateProjectionMatrix();
   renderer.setSize(innerWidth, innerHeight);
 });
+
+// --- Mouse tracking (re-picked every frame so hover updates on camera move) ---
+let lastMouseX = 0;
+let lastMouseY = 0;
+window.addEventListener('pointermove', e => { lastMouseX = e.clientX; lastMouseY = e.clientY; });
 
 // --- FPS tracking ---
 let fps = 0;
@@ -189,7 +225,23 @@ async function start() {
       lastFpsTime = now;
     }
 
+    // Cell picking — raycast against actual terrain meshes for accurate results
+    const picked = pickHexFromMeshes(lastMouseX, lastMouseY, renderer.domElement, camera, layout, map, chunkManager.terrainMeshes);
+    hoverCell = picked;
+    if (picked) {
+      const wp = hexToWorld(layout, offsetToHex(picked.col, picked.row));
+      hoverMesh.position.set(wp.x, map.getElevation(picked.col, picked.row) * 0.5 + 0.02, wp.z);
+      hoverMesh.visible = true;
+    } else {
+      hoverMesh.visible = false;
+    }
+
     const gen = GENERATORS[activeGenIndex];
+    const hoverLine = hoverCell
+      ? `Hover:     [${hoverCell.col}, ${hoverCell.row}]  ` +
+        `${TERRAIN_NAMES[map.getTerrain(hoverCell.col, hoverCell.row)] ?? '?'}  ` +
+        `elev ${map.getElevation(hoverCell.col, hoverCell.row)}`
+      : `Hover:     —`;
     hud.textContent =
       `FPS:       ${fps}\n` +
       `Generator: ${gen.name}  [G] cycle\n` +
@@ -198,7 +250,8 @@ async function start() {
       `Chunks:    ${chunkManager.loadedChunkCount} loaded  (${CHUNK_SIZE}×${CHUNK_SIZE} cells each)\n` +
       `Total:     ${chunkManager.chunksX * chunkManager.chunksY} chunks in map\n` +
       `Zoom:      ${controls.currentDistance.toFixed(1)}  (min ${controls.minDist} / max ${controls.maxDist})\n` +
-      `Tilt:      ${controls.currentPitchDeg.toFixed(1)}°  (min ${controls.minPitchDeg}° / max ${controls.maxPitchDeg}°)`;
+      `Tilt:      ${controls.currentPitchDeg.toFixed(1)}°  (min ${controls.minPitchDeg}° / max ${controls.maxPitchDeg}°)\n` +
+      `\n${hoverLine}`;
 
     renderer.render(scene, camera);
   }

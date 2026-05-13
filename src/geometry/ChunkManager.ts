@@ -414,4 +414,9 @@ export class ChunkManager {
   get loadedChunkCount(): number {
     return this.chunks.size;
   }
+
+  /** Currently loaded terrain meshes — pass to pickHexFromMeshes for accurate raycasting. */
+  get terrainMeshes(): THREE.Mesh[] {
+    return [...this.chunks.values()];
+  }
 }

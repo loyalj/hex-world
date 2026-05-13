@@ -173,6 +173,42 @@ Each scatter layer is fully game-defined — geometry, material, density curve. 
 
 ---
 
+## Cell picking
+
+### Mesh raycasting (recommended)
+
+Cast against the actual terrain geometry — accurate at any camera angle and elevation. Pass `chunkManager.terrainMeshes` to get the currently loaded chunk meshes.
+
+```ts
+import { pickHexFromMeshes } from 'hex-world';
+
+renderer.domElement.addEventListener('pointermove', e => {
+  const cell = pickHexFromMeshes(
+    e.clientX, e.clientY, renderer.domElement,
+    camera, layout, map,
+    chunkManager.terrainMeshes,
+  );
+  if (cell) {
+    console.log(cell.col, cell.row);
+    console.log(map.getTerrain(cell.col, cell.row));
+  }
+});
+```
+
+Call it inside the render loop (not just on `pointermove`) so the hovered cell updates correctly when the camera pans or zooms under a stationary mouse.
+
+### Plane raycasting (lightweight alternative)
+
+Intersects a flat horizontal plane at a given Y. Faster, but drifts at low camera angles over elevated terrain. Useful for water surfaces or flat maps.
+
+```ts
+import { pickHex } from 'hex-world';
+
+const cell = pickHex(e.clientX, e.clientY, renderer.domElement, camera, layout, map, 0);
+```
+
+---
+
 ## RTS camera
 
 ```ts
