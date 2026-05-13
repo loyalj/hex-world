@@ -4,6 +4,13 @@
   "description": "Three.js hex grid library for strategy games",
   "main": "./dist/hex-world.js",
   "types": "./dist/types/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/hex-world.js",
+      "types": "./dist/types/index.d.ts"
+    }
+  },
+  "files": ["dist"],
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build"
@@ -15,10 +22,8 @@
   "peerDependencies": {
     "three": ">=0.150.0"
   },
-  "dependencies": {
-    "three": "^0.184.0"
-  },
   "devDependencies": {
+    "three": "^0.184.0",
     "@types/three": "^0.184.1",
     "typescript": "^6.0.3",
     "vite": "^8.0.11"
