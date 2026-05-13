@@ -19,6 +19,10 @@ export interface FbmTerrainOptions {
   rockThreshold?: number;
   /** FBM threshold above which cells become Snow. Default 0.72. */
   snowThreshold?: number;
+  /** World-space X offset added to noise input — use to shift to a different region of noise space. Default 0. */
+  noiseOffsetX?: number;
+  /** World-space Z offset added to noise input. Default 0. */
+  noiseOffsetZ?: number;
 }
 
 /**
@@ -35,9 +39,11 @@ export function generateFbmTerrain(map: HexMap, opts: FbmTerrainOptions = {}): v
   const desertThreshold = opts.desertThreshold ?? -0.38;
   const rockThreshold   = opts.rockThreshold   ?? 0.42;
   const snowThreshold   = opts.snowThreshold   ?? 0.72;
+  const noiseOffsetX   = opts.noiseOffsetX   ?? 0;
+  const noiseOffsetZ   = opts.noiseOffsetZ   ?? 0;
 
   map.forEach((col, row) => {
-    const n = fbm(col / period, row / period, octaves) * amplitude;
+    const n = fbm((col + noiseOffsetX) / period, (row + noiseOffsetZ) / period, octaves) * amplitude;
 
     const isWater = n < waterThreshold;
     if      (n > snowThreshold)   map.setTerrain(col, row, TerrainType.Snow);

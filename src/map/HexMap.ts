@@ -205,6 +205,15 @@ export class HexMap {
     }
   }
 
+  // --- Reset ---
+
+  /** Zero out all cell data so the map can be regenerated in place. */
+  clear(): void {
+    this.uint8.fill(0);
+    this.roadBits.fill(0);
+    this.featureData?.fill(0);
+  }
+
   // --- Serialization ---
 
   toBuffer(): Uint8Array {

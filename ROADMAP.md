@@ -144,16 +144,10 @@ Follows the structure of the [Catlike Coding Hex Map tutorial series](https://ca
 ### Plugin Interface (do first, before any Phase A work)
 All generators implement a common interface so the demo (and future games) can swap them via a dropdown without knowing their internal details. Raw generator functions remain exported for library consumers who want fine-grained control.
 
-- [ ] **`MapGeneratorPlugin<TConfig>`** (`src/generators/MapGeneratorPlugin.ts`)
-  - `id: string` — registry key
-  - `name: string` — dropdown label
-  - `defaultConfig: TConfig` — used to populate UI controls and as the starting point for serialization
-  - `generate(map: HexMap, config: TConfig, seed: number): void` — fills the map; caller is responsible for creating the `HexMap` with the right dimensions and `featureLayerCount`
-- [ ] **`FbmPlugin`** — wraps existing `generateFbmTerrain` + `generateRivers` + `generateRoads` with typed `FbmGeneratorConfig`; exported from `FbmTerrainGenerator.ts`
-- [ ] Update demo `main.ts`:
-  - Register `[FbmPlugin, ...]` in an array; active generator selected by index
-  - `seed` displayed in HUD; keyboard shortcut (`R`) regenerates with a new random seed
-  - Dropdown/key cycles through generators (actual HTML dropdown can come later; key-cycling is enough for now)
+- [x] **`MapGeneratorPlugin<TConfig>`** (`src/generators/MapGeneratorPlugin.ts`) — `id`, `name`, `defaultConfig`, `generate(map, config, seed)`
+- [x] **`FbmPlugin`** (`src/generators/FbmPlugin.ts`) — wraps `generateFbmTerrain` + `generateRivers` + `generateRoads`; seed drives `noiseOffsetX/Z` via mulberry32 so different seeds produce genuinely different maps
+- [x] **`HexMap.clear()`** — zeros all cell data (uint8, roadBits, featureData) for in-place regeneration
+- [x] Update demo `main.ts` — `GENERATORS` array, `[R]` new seed, `[G]` cycle generator, seed + generator name shown in HUD
 
 ### Phase A — Chunk Land Generator (Part 23–24)
 Replaces the current FBM elevation pass with a budget-controlled BFS raise/sink algorithm.

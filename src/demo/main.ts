@@ -14,9 +14,8 @@ import { createTerrainMaterial } from '../geometry/TerrainMaterial.js';
 import type { TerrainColorMode } from '../geometry/ChunkManager.js';
 import { HexHashGrid } from '../geometry/HexHashGrid.js';
 import type { ScatterLayerConfig } from '../geometry/ScatterTypes.js';
-import { generateFbmTerrain } from '../generators/FbmTerrainGenerator.js';
-import { generateRivers } from '../generators/RiverGenerator.js';
-import { generateRoads } from '../generators/RoadGenerator.js';
+import type { MapGeneratorPlugin } from '../generators/MapGeneratorPlugin.js';
+import { FbmPlugin } from '../generators/FbmPlugin.js';
 
 /** Change this one constant to switch terrain rendering mode. */
 const TERRAIN_COLOR_MODE: TerrainColorMode = 'splat';
@@ -27,11 +26,22 @@ const HEX_SIZE    = 1;
 const CHUNK_SIZE  = 32;
 const LOAD_RADIUS = 5;
 
-// --- Map generation ---
+// --- Generator registry ---
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const GENERATORS: MapGeneratorPlugin<any>[] = [FbmPlugin];
+let activeGenIndex = 0;
+let seed = Math.floor(Math.random() * 0xffffffff);
+
+// --- Map ---
 const map = new HexMap({ width: MAP_WIDTH, height: MAP_HEIGHT, featureLayerCount: 1 });
-generateFbmTerrain(map);
-generateRivers(map);
-generateRoads(map);
+
+function runGenerator(): void {
+  const gen = GENERATORS[activeGenIndex];
+  map.clear();
+  gen.generate(map, gen.defaultConfig, seed);
+}
+
+runGenerator();
 
 // --- Layout ---
 const layout = createLayout(POINTY_TOP, HEX_SIZE);
@@ -96,10 +106,8 @@ let frameCount = 0;
 let lastFpsTime = performance.now();
 
 async function start() {
-  // --- Chunk manager ---
   // waterLevel=-0.25 sits between water terrain max Y (-0.3, elev=-1 with perturbation)
-  // and land terrain min Y (-0.2, elev=0 with max negative perturbation), so the
-  // water surface is always above the water bowl and below adjacent land terrain.
+  // and land terrain min Y (-0.2, elev=0 with max negative perturbation).
   const waterGeoOptions = { waterLevel: -0.25 };
 
   let terrainMaterial: THREE.Material;
@@ -119,11 +127,8 @@ async function start() {
 
   const treeMat = new THREE.MeshLambertMaterial({ color: 0x5e8c2a });
   const pineLayer: ScatterLayerConfig = [
-    // tier 0 (high density / level-3 cells): tall tree
     [{ geometry: new THREE.ConeGeometry(0.42, 2.0, 7), material: treeMat, yOffset: 1.0 }],
-    // tier 1 (medium)
     [{ geometry: new THREE.ConeGeometry(0.33, 1.5, 7), material: treeMat, yOffset: 0.75 }],
-    // tier 2 (low density / level-1 cells): small scrubby tree
     [{ geometry: new THREE.ConeGeometry(0.24, 1.0, 7), material: treeMat, yOffset: 0.5 }],
   ];
 
@@ -143,6 +148,21 @@ async function start() {
     roadMaterial,
     hashGrid,
     scatterLayers: [pineLayer],
+  });
+
+  // --- Keyboard shortcuts ---
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'r' || e.key === 'R') {
+      // New random seed, same generator
+      seed = Math.floor(Math.random() * 0xffffffff);
+      runGenerator();
+      chunkManager.dispose();
+    } else if (e.key === 'g' || e.key === 'G') {
+      // Cycle to next generator, keep same seed
+      activeGenIndex = (activeGenIndex + 1) % GENERATORS.length;
+      runGenerator();
+      chunkManager.dispose();
+    }
   });
 
   // --- Render loop ---
@@ -166,13 +186,16 @@ async function start() {
       lastFpsTime = now;
     }
 
+    const gen = GENERATORS[activeGenIndex];
     hud.textContent =
-      `FPS:    ${fps}\n` +
-      `Map:    ${MAP_WIDTH} × ${MAP_HEIGHT} cells\n` +
-      `Chunks: ${chunkManager.loadedChunkCount} loaded  (${CHUNK_SIZE}×${CHUNK_SIZE} cells each)\n` +
-      `Total:  ${chunkManager.chunksX * chunkManager.chunksY} chunks in map\n` +
-      `Zoom:   ${controls.currentDistance.toFixed(1)}  (min ${controls.minDist} / max ${controls.maxDist})\n` +
-      `Tilt:   ${controls.currentPitchDeg.toFixed(1)}°  (min ${controls.minPitchDeg}° / max ${controls.maxPitchDeg}°)`;
+      `FPS:       ${fps}\n` +
+      `Generator: ${gen.name}  [G] cycle\n` +
+      `Seed:      ${seed >>> 0}  [R] new\n` +
+      `Map:       ${MAP_WIDTH} × ${MAP_HEIGHT} cells\n` +
+      `Chunks:    ${chunkManager.loadedChunkCount} loaded  (${CHUNK_SIZE}×${CHUNK_SIZE} cells each)\n` +
+      `Total:     ${chunkManager.chunksX * chunkManager.chunksY} chunks in map\n` +
+      `Zoom:      ${controls.currentDistance.toFixed(1)}  (min ${controls.minDist} / max ${controls.maxDist})\n` +
+      `Tilt:      ${controls.currentPitchDeg.toFixed(1)}°  (min ${controls.minPitchDeg}° / max ${controls.maxPitchDeg}°)`;
 
     renderer.render(scene, camera);
   }
