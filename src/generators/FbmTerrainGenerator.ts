@@ -11,6 +11,8 @@ export interface FbmTerrainOptions {
   amplitude?: number;
   /** Elevation offset added after rounding (land >= 0, water < 0). Default 4. */
   elevOffset?: number;
+  /** Multiplier on n before rounding to elevation steps — higher values create steeper cliffs. Default 16. */
+  elevScale?: number;
   /** FBM threshold below which cells become Water. Default -0.55. */
   waterThreshold?: number;
   /** FBM threshold above which cells become Desert (and below waterThreshold). Default -0.38. */
@@ -37,6 +39,7 @@ export function generateFbmTerrain(map: HexMap, opts: FbmTerrainOptions = {}): v
   const octaves        = opts.octaves        ?? 6;
   const amplitude      = opts.amplitude      ?? 2.2;
   const elevOffset     = opts.elevOffset     ?? 4;
+  const elevScale      = opts.elevScale      ?? 16;
   const waterThreshold  = opts.waterThreshold  ?? -0.55;
   const desertThreshold = opts.desertThreshold ?? -0.38;
   const mudThreshold    = opts.mudThreshold    ?? -0.28;
@@ -56,7 +59,7 @@ export function generateFbmTerrain(map: HexMap, opts: FbmTerrainOptions = {}): v
     else if (n < mudThreshold)    map.setTerrain(col, row, TerrainType.Mud);
     else                          map.setTerrain(col, row, TerrainType.Grassland);
 
-    const elev = Math.round(n * 10) + elevOffset;
+    const elev = Math.round(n * elevScale) + elevOffset;
     map.setElevation(col, row, isWater ? Math.min(elev, -1) : Math.max(elev, 0));
 
     if (map.featureLayerCount > 0) {

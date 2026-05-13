@@ -61,9 +61,9 @@ Follows the structure of the [Catlike Coding Hex Map tutorial series](https://ca
 - [x] `SOLID_FACTOR` 0.8, `BLEND_FACTOR` 0.2 (Part 4)
 - [x] `computeVertexNormals()` on each chunk so lighting reacts to slopes
 - [x] Demo: mountainous terrain with smooth slopes, terraced edges, and organically perturbed geometry
-- [ ] Cliff wall quads — extend high cell lip down to eliminate gaps at cliff edges
-- [ ] Cliff wall colour gradient (top→bottom) for depth
-- [ ] `cliffThreshold` configurable via `ChunkGeometryOptions`
+- [x] Cliff wall quads — extend high cell lip down to eliminate gaps at cliff edges
+- [x] Cliff wall colour gradient (top→bottom) for depth
+- [x] `cliffThreshold` configurable via `ChunkGeometryOptions`
 
 ---
 

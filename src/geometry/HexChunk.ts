@@ -102,6 +102,7 @@ export function buildChunkGeometry(
   const perturbStrength     = opts.perturbStrength      ?? 0.8;
   const elevPerturbStrength = opts.elevPerturbStrength  ?? 0.2;
   const noiseScale          = opts.noiseScale           ?? 0.35;
+  const cliffThreshold      = opts.cliffThreshold       ?? 2;
   const colorMode           = opts.colorMode            ?? 'splat';
   const isSplat             = colorMode === 'splat';
   const edgeDirs  = layout.orientation.edgeDirections;
@@ -839,6 +840,38 @@ export function buildChunkGeometry(
         } else {
           addBridgeEdgeStrip(v1x,v1z, v2x,v2z, bx,bz, ownY,nbY, er,eg,eb, er2,eg2,eb2,
             ownType, nbType, edgeBedOwn, edgeBedNb, hasRoad);
+
+          // Cliff wall — vertical quad hanging down from the higher cell's solid edge.
+          // Each edge is processed from only one cell (i=0..2), so handle both height orderings here.
+          if (et === 2) {
+            const WALL_DARK = 0.3;
+            const diff = ownElev - nbElev;
+            if (diff >= cliffThreshold) {
+              // Own cell is higher: hang from v1/v2 at ownY down to nbY
+              const botR = colorMode === 'splat' ? er : er * WALL_DARK;
+              const botG = colorMode === 'splat' ? eg : eg * WALL_DARK;
+              const botB = colorMode === 'splat' ? eb : eb * WALL_DARK;
+              addQuad(
+                v1x, ownY, v1z, er,   eg,   eb,
+                v2x, ownY, v2z, er,   eg,   eb,
+                v1x, nbY,  v1z, botR, botG, botB,
+                v2x, nbY,  v2z, botR, botG, botB,
+                ownType, ownType, ownType,
+              );
+            } else if (-diff >= cliffThreshold) {
+              // Nb cell is higher: hang from v3/v4 at nbY down to ownY
+              const botR = colorMode === 'splat' ? er2 : er2 * WALL_DARK;
+              const botG = colorMode === 'splat' ? eg2 : eg2 * WALL_DARK;
+              const botB = colorMode === 'splat' ? eb2 : eb2 * WALL_DARK;
+              addQuad(
+                v3x, nbY,  v3z, er2,  eg2,  eb2,
+                v4x, nbY,  v4z, er2,  eg2,  eb2,
+                v3x, ownY, v3z, botR, botG, botB,
+                v4x, ownY, v4z, botR, botG, botB,
+                nbType, nbType, nbType,
+              );
+            }
+          }
         }
 
         // Corner triangles — dirs 0 and 1 only
