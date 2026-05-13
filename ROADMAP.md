@@ -83,11 +83,13 @@ Follows the structure of the [Catlike Coding Hex Map tutorial series](https://ca
 ## Stage 6 — Roads & Terrain Features
 *Tutorial equivalent: Parts 7, 9–11*
 
-- [ ] Road data model (undirected edges)
-- [ ] Road geometry (strip mesh along cell edges)
-- [ ] Feature placement API (forests, cities, landmarks) using `InstancedMesh`
-- [ ] Wall geometry between designated cells
-- [ ] Demo: roads, forests, and walls on terrain
+- [x] Road data model — undirected per-cell edge bits (`roadBits` Uint8Array); full API (`hasRoads`, `hasRoadThroughEdge`, `setRoad`) (Part 7)
+- [x] Road geometry — strip mesh along cell edges with `RoadMaterial`; rendered at `renderOrder=2` above terrain and water (Part 7)
+- [x] Scatter / feature placement API — `HexHashGrid` (seeded mulberry32, 256×256 × 5 floats), `ScatterLayerConfig` (density tier × variant), `buildScatterMeshes` with 7 slots per cell (center + 6 direction triangles), competition logic, `InstancedMesh` per (layer-tier-variant) key (Part 9)
+- [x] Feature layer data — `featureLayerCount` on `HexMap`, `Uint8Array` feature storage, `getFeatureLevel`/`setFeatureLevel` (values 0–3) (Part 9)
+- [x] Demo: pine tree scatter on grassland/desert with 3 density tiers; roads traced on grid avoiding water, rivers, and steep slopes
+- [ ] Wall geometry between designated cells (Part 10)
+- [ ] Wall colour gradient / cliff walls (Part 11)
 
 ---
 
@@ -134,14 +136,101 @@ Follows the structure of the [Catlike Coding Hex Map tutorial series](https://ca
 ---
 
 ## Stage 11 — Procedural Map Generation
-*Tutorial equivalent: Parts 23–27*
+*Tutorial equivalent: Parts 23–26*
 
-- [ ] Land mass generator (configurable island/continent ratio)
-- [ ] Erosion pass (smooth elevation distribution)
-- [ ] Water cycle (river source placement, flow-to-sea)
-- [ ] Biome assignment (temperature + moisture → terrain type)
-- [ ] Wrapping support (toroidal map edges)
-- [ ] Demo: procedurally generated playable map
+### Infrastructure ✅
+- [x] Generator extraction — `src/generators/` with `generateFbmTerrain`, `generateRivers`, `generateRoads`; all params exposed as optional config objects; `offsetNeighbor` added to `HexCoord.ts`
+
+### Plugin Interface (do first, before any Phase A work)
+All generators implement a common interface so the demo (and future games) can swap them via a dropdown without knowing their internal details. Raw generator functions remain exported for library consumers who want fine-grained control.
+
+- [ ] **`MapGeneratorPlugin<TConfig>`** (`src/generators/MapGeneratorPlugin.ts`)
+  - `id: string` — registry key
+  - `name: string` — dropdown label
+  - `defaultConfig: TConfig` — used to populate UI controls and as the starting point for serialization
+  - `generate(map: HexMap, config: TConfig, seed: number): void` — fills the map; caller is responsible for creating the `HexMap` with the right dimensions and `featureLayerCount`
+- [ ] **`FbmPlugin`** — wraps existing `generateFbmTerrain` + `generateRivers` + `generateRoads` with typed `FbmGeneratorConfig`; exported from `FbmTerrainGenerator.ts`
+- [ ] Update demo `main.ts`:
+  - Register `[FbmPlugin, ...]` in an array; active generator selected by index
+  - `seed` displayed in HUD; keyboard shortcut (`R`) regenerates with a new random seed
+  - Dropdown/key cycles through generators (actual HTML dropdown can come later; key-cycling is enough for now)
+
+### Phase A — Chunk Land Generator (Part 23–24)
+Replaces the current FBM elevation pass with a budget-controlled BFS raise/sink algorithm.
+Terrain type is NOT assigned here — elevation only. FBM generator kept as a fast alternative.
+
+- [ ] **`ChunkTerrainGenerator`** (`src/generators/ChunkTerrainGenerator.ts`)
+  - BFS expansion from random seed cells; seeds constrained to spawn regions
+  - `RaiseTerrain(chunkSize, budget)` — expands outward from seed, counts budget per raised cell
+  - `SinkTerrain(chunkSize, budget)` — same but lowers; ensures valleys and ocean variety
+  - `CreateLand` loop: alternate raise/sink per region until `landPercentage` budget is spent; 10 000-iteration guard
+  - Config: `landPercentage` (5–95%), `chunkSizeMin/Max` (20–200), `jitterProbability` (0–0.5), `sinkProbability` (0.2 default), `highElevationFactor`, `elevationMaximum`
+  - Uses seeded PRNG (`seed` param → `mulberry32`) for reproducibility
+- [ ] **`RegionLayout`** (`src/generators/RegionLayout.ts`)
+  - Splits map into 1–4 rectangular spawn regions
+  - Config: `mapBorderX/Z` (water edge buffer), `regionBorder` (gap between regions), `regionCount` (1–4)
+  - 1 region: full map minus border. 2 regions: vertical or horizontal split (random). 3: thirds. 4: quad.
+- [ ] **`ErosionPass`** (`src/generators/ErosionPass.ts`)
+  - Finds all "erodible" cells (any neighbor ≥2 elevation steps lower = cliff)
+  - Erodes by decrementing erodible cell and incrementing a random cliff-base neighbor (conserves landmass)
+  - Bookkeeps erodible set as cells are modified (add newly erodible neighbors, remove cells that are no longer erodible)
+  - Runs until `(1 - erosionPercentage/100)` fraction of original erodible cells remain
+  - Config: `erosionPercentage` (0–100, default 50)
+
+### Phase B — Climate Simulation (Part 25)
+Per-cell moisture derived from a partial water cycle simulation. Runs after elevation is set.
+
+- [ ] **`ClimateSimulator`** (`src/generators/ClimateSimulator.ts`)
+  - Per-cell `ClimateData { clouds: number; moisture: number }`
+  - Simulation loop (configurable cycle count, default 40):
+    1. **Evaporation**: water cells → `moisture = 1`, add `evaporationFactor` to clouds; land cells → convert `moisture * evaporationFactor` to clouds
+    2. **Precipitation**: remove `clouds * precipitationFactor` from clouds, add to moisture
+    3. **Cloud dispersal**: spread clouds equally to all 6 neighbors (lost at map edges)
+    4. **Runoff**: drain `moisture * runoffFactor / 6` to each neighbor that is strictly lower (use view elevation to handle shorelines correctly)
+    5. **Seepage**: a smaller factor spreads moisture to equal-elevation neighbors
+  - Returns `Float32Array` of per-cell moisture values (0–1)
+  - Config: `evaporationFactor` (0.5), `precipitationFactor` (0.25), `runoffFactor` (0.25), `seepageFactor` (0.125), `cycles` (40)
+
+### Phase C — Temperature, Biomes, and Rivers (Part 26)
+Assigns terrain types based on temperature × moisture matrix, then places rivers at high-weight origins.
+
+- [ ] **`TemperatureModel`** (`src/generators/TemperatureModel.ts`)
+  - Latitude-based temperature: `lerp(lowTemp, highTemp, latitude)`
+  - Hemisphere modes: `both` (equator at center), `north`, `south`
+  - Elevation cooling: `temp *= 1 - (elev - waterLevel) / (elevMax - waterLevel + 1)`
+  - Noise jitter: channel from `sampleNoise(pos * 0.1)`, scaled by `temperatureJitter`
+  - Returns `Float32Array` of per-cell temperature values (0–1)
+  - Config: `lowTemperature` (0), `highTemperature` (1), `hemisphere` ('both'), `temperatureJitter` (0.1)
+- [ ] **`BiomeAssigner`** (`src/generators/BiomeAssigner.ts`)
+  - 4×4 biome matrix indexed by temperature band (0.1, 0.3, 0.6) × moisture band (0.12, 0.28, 0.85)
+  - Maps our 6 `TerrainType` values: Water (handled separately), Snow, Rock, Desert, Grassland, Mud (= taiga/tundra)
+  - Default matrix: dry column → Desert; cold rows → Snow/Rock; warm+wet → Grassland; moderate → Mud
+  - Also sets feature layer 0 (tree density) based on biome: wet warm biomes get level 2-3, dry/cold get 0-1
+  - Config: matrix is overridable, temperature and moisture bands are configurable
+- [ ] **Upgrade `RiverGenerator`** to climate-driven placement
+  - Instead of seeding from a coarse elevation grid, build a weighted origin list: weight = `moisture * (elev - waterLevel) / (elevMax - waterLevel)`
+  - Four importance tiers: >0.75 → 4 entries, >0.5 → 3, >0.25 → 2, else skip
+  - River budget: `riverPercentage` of land cells (0–20%, default 10%)
+  - Flow algorithm: BFS downhill with momentum (prefer directions within 120° of previous), triple-weight downhill steps, avoid cells already having incoming rivers
+  - Lake formation when stuck: raise `waterLevel` of stuck cell to min neighbor elevation
+  - Keep-distance rule: disqualify origins adjacent to existing rivers or water
+  - Config: `riverPercentage` (10), `extraLakeProbability` (0.25)
+
+### Phase D — Orchestration & Demo
+- [ ] **`MapGenerator`** (`src/generators/MapGenerator.ts`)
+  - Wires all phases in order: `RegionLayout` → `ChunkTerrainGenerator` → `ErosionPass` → `ClimateSimulator` → `TemperatureModel` → `BiomeAssigner` → upgraded `RiverGenerator` → `RoadGenerator`
+  - Single `MapGeneratorConfig` object with all sub-configs nested
+  - Returns the filled `HexMap` (caller provides the map instance)
+  - `seed` drives all internal PRNG — same seed + same config = same map
+- [ ] Update `main.ts` demo to call `MapGenerator` instead of the three inline generators
+- [ ] Expose `seed` in HUD; add keyboard shortcut to regenerate with a new random seed
+
+### Notes on design decisions
+- `FbmTerrainGenerator` is kept as a lightweight, no-simulation alternative (fast iteration, simple worlds)
+- `ChunkTerrainGenerator` + climate is the "full quality" path
+- Elevation scale: water cells at elev ≤ -1, land at elev ≥ 0 (unchanged from current system)
+- `ClimateSimulator` does NOT use our river data — rivers are placed after simulation
+- Tree feature levels come from `BiomeAssigner` replacing the inline assignment in `FbmTerrainGenerator`
 
 ---
 

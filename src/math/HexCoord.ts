@@ -119,3 +119,8 @@ export function hexLine(a: HexCoord, b: HexCoord): HexCoord[] {
   }
   return results;
 }
+
+/** Returns the offset {col, row} of the neighbour of (col, row) in the given direction (0–5). */
+export function offsetNeighbor(col: number, row: number, direction: number): { col: number; row: number } {
+  return hexToOffset(hexNeighbor(offsetToHex(col, row), direction));
+}
