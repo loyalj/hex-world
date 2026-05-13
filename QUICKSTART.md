@@ -251,6 +251,33 @@ const hasRoad   = map.hasRoads(col, row);
 
 ---
 
+## Save and load
+
+```ts
+import { serializeMap, deserializeMap, serializeMapJSON, deserializeMapJSON } from 'hex-world';
+
+// Binary — compact, fast. Use for file saves, IndexedDB, network transfer.
+const bytes = serializeMap(map);              // Uint8Array (~60 KB for a 100×100 map)
+const restored = deserializeMap(bytes);
+
+// Persist to a file (browser)
+const blob = new Blob([bytes], { type: 'application/octet-stream' });
+const url  = URL.createObjectURL(blob);
+// attach url to an <a download="map.hexmap"> and click it
+
+// Load from a file (browser)
+const file = await fileInput.files[0].arrayBuffer();
+const map  = deserializeMap(new Uint8Array(file));
+
+// JSON — human-readable, good for editor clipboard or debug export.
+const json    = serializeMapJSON(map);        // base64-encoded cell data inside a JSON envelope
+const fromJson = deserializeMapJSON(json);
+```
+
+All map data is preserved: terrain, elevation, flags, rivers, roads, and scatter feature layers.
+
+---
+
 ## What the library does NOT own
 
 Keep these in your game, not in hex-world:

@@ -31,8 +31,8 @@ export class HexMap {
 
   readonly uint8: Uint8Array;
   private readonly int8: Int8Array;
-  private readonly roadBits: Uint8Array;
-  private readonly featureData: Uint8Array | null;
+  readonly roadBits: Uint8Array;
+  readonly featureData: Uint8Array | null;
 
   constructor(options: HexMapOptions) {
     this.width = options.width;
@@ -214,15 +214,4 @@ export class HexMap {
     this.featureData?.fill(0);
   }
 
-  // --- Serialization ---
-
-  toBuffer(): Uint8Array {
-    return this.uint8.slice(0);
-  }
-
-  static fromBuffer(data: Uint8Array, width: number, height: number): HexMap {
-    const map = new HexMap({ width, height });
-    map.uint8.set(data);
-    return map;
-  }
 }
