@@ -1,4 +1,5 @@
 import type { HexMap } from '../map/HexMap.js';
+import { makeRng } from '../math/Random.js';
 import type { MapGeneratorPlugin } from './MapGeneratorPlugin.js';
 import type { FbmTerrainOptions } from './FbmTerrainGenerator.js';
 import type { RiverGeneratorOptions } from './RiverGenerator.js';
@@ -14,15 +15,9 @@ export interface FbmGeneratorConfig {
 }
 
 function seedToNoiseOffset(seed: number): { x: number; z: number } {
-  // mulberry32 — derive two noise-space offsets from the seed
-  let s = seed >>> 0;
-  const next = (): number => {
-    s = Math.imul(s ^ (s >>> 15), s | 1);
-    s ^= s + Math.imul(s ^ (s >>> 7), s | 61);
-    return ((s ^ (s >>> 14)) >>> 0) / 0x100000000;
-  };
-  // Offset by up to ±500 period-units so different seeds produce genuinely different maps
-  return { x: next() * 1000, z: next() * 1000 };
+  const rand = makeRng(seed);
+  // Offset by up to 1000 noise-space units so different seeds look genuinely different
+  return { x: rand() * 1000, z: rand() * 1000 };
 }
 
 const DEFAULT_CONFIG: FbmGeneratorConfig = {};

@@ -153,28 +153,16 @@ All generators implement a common interface so the demo (and future games) can s
 Replaces the current FBM elevation pass with a budget-controlled BFS raise/sink algorithm.
 Terrain type is NOT assigned here — elevation only. FBM generator kept as a fast alternative.
 
-- [ ] **`ChunkTerrainGenerator`** (`src/generators/ChunkTerrainGenerator.ts`)
-  - BFS expansion from random seed cells; seeds constrained to spawn regions
-  - `RaiseTerrain(chunkSize, budget)` — expands outward from seed, counts budget per raised cell
-  - `SinkTerrain(chunkSize, budget)` — same but lowers; ensures valleys and ocean variety
-  - `CreateLand` loop: alternate raise/sink per region until `landPercentage` budget is spent; 10 000-iteration guard
-  - Config: `landPercentage` (5–95%), `chunkSizeMin/Max` (20–200), `jitterProbability` (0–0.5), `sinkProbability` (0.2 default), `highElevationFactor`, `elevationMaximum`
-  - Uses seeded PRNG (`seed` param → `mulberry32`) for reproducibility
-- [ ] **`RegionLayout`** (`src/generators/RegionLayout.ts`)
-  - Splits map into 1–4 rectangular spawn regions
-  - Config: `mapBorderX/Z` (water edge buffer), `regionBorder` (gap between regions), `regionCount` (1–4)
-  - 1 region: full map minus border. 2 regions: vertical or horizontal split (random). 3: thirds. 4: quad.
-- [ ] **`ErosionPass`** (`src/generators/ErosionPass.ts`)
-  - Finds all "erodible" cells (any neighbor ≥2 elevation steps lower = cliff)
-  - Erodes by decrementing erodible cell and incrementing a random cliff-base neighbor (conserves landmass)
-  - Bookkeeps erodible set as cells are modified (add newly erodible neighbors, remove cells that are no longer erodible)
-  - Runs until `(1 - erosionPercentage/100)` fraction of original erodible cells remain
-  - Config: `erosionPercentage` (0–100, default 50)
+- [x] **`ChunkTerrainGenerator`** (`src/generators/ChunkTerrainGenerator.ts`) — bucket-queue BFS raise/sink; module-level `frontier`+`inFrontier` reused across calls; 10 000-iteration guard; all cells start at elev -1
+- [x] **`RegionLayout`** (`src/generators/RegionLayout.ts`) — 1–4 regions; 2-region split orientation chosen randomly from `rand`; degenerate regions filtered out
+- [x] **`ErosionPass`** (`src/generators/ErosionPass.ts`) — O(1) erodible bookkeeping via array + index Map; conserves landmass by raising cliff-base; checks both eroded cell's and target's neighbours
+- [x] **`makeRng`** (`src/math/Random.ts`) — shared mulberry32 PRNG; used by ChunkPlugin and FbmPlugin
+- [x] **`ChunkPlugin`** (`src/generators/ChunkPlugin.ts`) — wires RegionLayout → ChunkTerrain → Erosion → placeholder terrain/feature assignment → Rivers → Roads; registered in demo `GENERATORS` array
 
 ### Phase B — Climate Simulation (Part 25)
 Per-cell moisture derived from a partial water cycle simulation. Runs after elevation is set.
 
-- [ ] **`ClimateSimulator`** (`src/generators/ClimateSimulator.ts`)
+- [x] **`ClimateSimulator`** (`src/generators/ClimateSimulator.ts`)
   - Per-cell `ClimateData { clouds: number; moisture: number }`
   - Simulation loop (configurable cycle count, default 40):
     1. **Evaporation**: water cells → `moisture = 1`, add `evaporationFactor` to clouds; land cells → convert `moisture * evaporationFactor` to clouds
@@ -188,20 +176,20 @@ Per-cell moisture derived from a partial water cycle simulation. Runs after elev
 ### Phase C — Temperature, Biomes, and Rivers (Part 26)
 Assigns terrain types based on temperature × moisture matrix, then places rivers at high-weight origins.
 
-- [ ] **`TemperatureModel`** (`src/generators/TemperatureModel.ts`)
+- [x] **`TemperatureModel`** (`src/generators/TemperatureModel.ts`)
   - Latitude-based temperature: `lerp(lowTemp, highTemp, latitude)`
   - Hemisphere modes: `both` (equator at center), `north`, `south`
   - Elevation cooling: `temp *= 1 - (elev - waterLevel) / (elevMax - waterLevel + 1)`
   - Noise jitter: channel from `sampleNoise(pos * 0.1)`, scaled by `temperatureJitter`
   - Returns `Float32Array` of per-cell temperature values (0–1)
   - Config: `lowTemperature` (0), `highTemperature` (1), `hemisphere` ('both'), `temperatureJitter` (0.1)
-- [ ] **`BiomeAssigner`** (`src/generators/BiomeAssigner.ts`)
+- [x] **`BiomeAssigner`** (`src/generators/BiomeAssigner.ts`)
   - 4×4 biome matrix indexed by temperature band (0.1, 0.3, 0.6) × moisture band (0.12, 0.28, 0.85)
   - Maps our 6 `TerrainType` values: Water (handled separately), Snow, Rock, Desert, Grassland, Mud (= taiga/tundra)
   - Default matrix: dry column → Desert; cold rows → Snow/Rock; warm+wet → Grassland; moderate → Mud
   - Also sets feature layer 0 (tree density) based on biome: wet warm biomes get level 2-3, dry/cold get 0-1
   - Config: matrix is overridable, temperature and moisture bands are configurable
-- [ ] **Upgrade `RiverGenerator`** to climate-driven placement
+- [x] **Upgrade `RiverGenerator`** to climate-driven placement (`generateClimateRivers`)
   - Instead of seeding from a coarse elevation grid, build a weighted origin list: weight = `moisture * (elev - waterLevel) / (elevMax - waterLevel)`
   - Four importance tiers: >0.75 → 4 entries, >0.5 → 3, >0.25 → 2, else skip
   - River budget: `riverPercentage` of land cells (0–20%, default 10%)

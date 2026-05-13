@@ -16,6 +16,7 @@ import { HexHashGrid } from '../geometry/HexHashGrid.js';
 import type { ScatterLayerConfig } from '../geometry/ScatterTypes.js';
 import type { MapGeneratorPlugin } from '../generators/MapGeneratorPlugin.js';
 import { FbmPlugin } from '../generators/FbmPlugin.js';
+import { ChunkPlugin } from '../generators/ChunkPlugin.js';
 
 /** Change this one constant to switch terrain rendering mode. */
 const TERRAIN_COLOR_MODE: TerrainColorMode = 'splat';
@@ -28,7 +29,7 @@ const LOAD_RADIUS = 5;
 
 // --- Generator registry ---
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-const GENERATORS: MapGeneratorPlugin<any>[] = [FbmPlugin];
+const GENERATORS: MapGeneratorPlugin<any>[] = [FbmPlugin, ChunkPlugin];
 let activeGenIndex = 0;
 let seed = Math.floor(Math.random() * 0xffffffff);
 
