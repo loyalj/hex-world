@@ -199,13 +199,13 @@ Assigns terrain types based on temperature × moisture matrix, then places river
   - Config: `riverPercentage` (10), `extraLakeProbability` (0.25)
 
 ### Phase D — Orchestration & Demo
-- [ ] **`MapGenerator`** (`src/generators/MapGenerator.ts`)
+- [x] **`MapGenerator`** (`src/generators/MapGenerator.ts`)
   - Wires all phases in order: `RegionLayout` → `ChunkTerrainGenerator` → `ErosionPass` → `ClimateSimulator` → `TemperatureModel` → `BiomeAssigner` → upgraded `RiverGenerator` → `RoadGenerator`
   - Single `MapGeneratorConfig` object with all sub-configs nested
   - Returns the filled `HexMap` (caller provides the map instance)
   - `seed` drives all internal PRNG — same seed + same config = same map
-- [ ] Update `main.ts` demo to call `MapGenerator` instead of the three inline generators
-- [ ] Expose `seed` in HUD; add keyboard shortcut to regenerate with a new random seed
+- [x] `ChunkPlugin` delegates to `generateMap()` — no duplicate pipeline logic
+- [x] Demo already exposes seed in HUD with `[R]` new seed / `[G]` cycle generator
 
 ### Notes on design decisions
 - `FbmTerrainGenerator` is kept as a lightweight, no-simulation alternative (fast iteration, simple worlds)

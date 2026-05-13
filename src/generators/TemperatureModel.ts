@@ -10,6 +10,8 @@ export interface TemperatureModelOptions {
   hemisphere?:        'both' | 'north' | 'south';
   /** Amount of per-cell noise added to temperature. Default 0.1. */
   temperatureJitter?: number;
+  /** Which noise channel (0–3) to use for jitter — vary per map for uniqueness. Default 0. */
+  jitterChannel?:     number;
   /** Maximum land elevation — used for elevation cooling. Default 12. */
   elevationMax?:      number;
 }
@@ -24,32 +26,32 @@ export function computeTemperature(map: HexMap, opts: TemperatureModelOptions = 
   const highTemp   = opts.highTemperature   ?? 1;
   const hemisphere = opts.hemisphere        ?? 'both';
   const jitter     = opts.temperatureJitter ?? 0.1;
+  const channel    = Math.floor(opts.jitterChannel ?? 0) & 3; // clamp to 0–3
   const elevMax    = opts.elevationMax      ?? 12;
 
   const result = new Float32Array(map.width * map.height);
 
   map.forEach((col, row) => {
-    // Latitude: 0 = pole (cold), 1 = equator (hot)
-    let latitude: number;
+    // Latitude using the tutorial's formula: 0 = pole (cold), 1 = equator (hot)
+    let latitude = row / map.height;
     if (hemisphere === 'both') {
-      latitude = 1 - Math.abs(row / map.height - 0.5) * 2;
+      latitude *= 2;
+      if (latitude > 1) latitude = 2 - latitude;
     } else if (hemisphere === 'north') {
-      latitude = row / map.height;          // 0 at top (pole), 1 at bottom (equator)
-    } else {
-      latitude = 1 - row / map.height;      // 1 at top (equator), 0 at bottom (pole)
+      latitude = 1 - latitude;
     }
+    // 'south' uses latitude as-is (0 at top = pole, 1 at bottom = equator)
 
     let temp = lowTemp + (highTemp - lowTemp) * latitude;
 
-    // Elevation cooling: high land cells are colder
+    // Elevation cooling using view elevation (max(elev, 0) = 0 for water)
     const elev = map.getElevation(col, row);
-    if (elev > 0) {
-      temp *= 1 - elev / (elevMax + 1);
-    }
+    const viewElev = elev < 0 ? 0 : elev;
+    temp *= 1 - viewElev / (elevMax + 1);
 
-    // Symmetric noise jitter
+    // Noise jitter: random channel chosen once per map generation
     const noise = sampleNoise(col * 0.1, row * 0.1);
-    temp += (noise[0] - 0.5) * jitter;
+    temp += (noise[channel] * 2 - 1) * jitter;
 
     result[row * map.width + col] = Math.max(0, Math.min(1, temp));
   });

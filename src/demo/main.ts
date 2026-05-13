@@ -21,8 +21,8 @@ import { ChunkPlugin } from '../generators/ChunkPlugin.js';
 /** Change this one constant to switch terrain rendering mode. */
 const TERRAIN_COLOR_MODE: TerrainColorMode = 'splat';
 
-const MAP_WIDTH   = 100;
-const MAP_HEIGHT  = 100;
+const MAP_WIDTH   = 500;
+const MAP_HEIGHT  = 500;
 const HEX_SIZE    = 1;
 const CHUNK_SIZE  = 32;
 const LOAD_RADIUS = 5;

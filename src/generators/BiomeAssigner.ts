@@ -6,30 +6,32 @@ export interface BiomeAssignerOptions {
   temperatureBands?: [number, number, number];
   /** Three thresholds that divide moisture into 4 bands. Default [0.12, 0.28, 0.85]. */
   moistureBands?:    [number, number, number];
+  /** Maximum land elevation — used for rock-desert and snowcap elevation tweaks. Default 12. */
+  elevationMax?:     number;
   /**
    * 4×4 biome matrix indexed by [temperatureBand][moistureBand].
    * Band 0 = coldest/driest, band 3 = hottest/wettest.
    */
-  biomeMatrix?:      TerrainType[][];
+  biomeMatrix?:       TerrainType[][];
   /** 4×4 tree-density matrix (values 0–3) with the same indexing. */
   treeDensityMatrix?: number[][];
 }
 
-// ---- Defaults ----
+// ---- Defaults (matching Part 26 tutorial) ----
 
+// T0=arctic, T1=cold, T2=temperate, T3=hot  ×  M0=dry, M1=low, M2=moderate, M3=wet
 const DEFAULT_BIOME_MATRIX: TerrainType[][] = [
-  // M0:dry    M1:low     M2:mod       M3:wet
-  [TerrainType.Desert,    TerrainType.Rock,      TerrainType.Rock,      TerrainType.Snow],      // T0: arctic
-  [TerrainType.Desert,    TerrainType.Mud,       TerrainType.Mud,       TerrainType.Snow],       // T1: cold
-  [TerrainType.Desert,    TerrainType.Grassland, TerrainType.Grassland, TerrainType.Mud],        // T2: temperate
-  [TerrainType.Desert,    TerrainType.Desert,    TerrainType.Grassland, TerrainType.Grassland],  // T3: hot
+  [TerrainType.Desert, TerrainType.Snow,      TerrainType.Snow,      TerrainType.Snow],
+  [TerrainType.Desert, TerrainType.Mud,       TerrainType.Mud,       TerrainType.Mud],
+  [TerrainType.Desert, TerrainType.Grassland, TerrainType.Grassland, TerrainType.Grassland],
+  [TerrainType.Desert, TerrainType.Grassland, TerrainType.Grassland, TerrainType.Grassland],
 ];
 
 const DEFAULT_TREE_MATRIX: number[][] = [
-  [0, 0, 0, 0],  // T0: no trees
-  [0, 1, 2, 1],  // T1: sparse taiga
-  [0, 2, 3, 2],  // T2: temperate forest
-  [0, 0, 2, 3],  // T3: tropical
+  [0, 0, 0, 0],
+  [0, 0, 1, 2],
+  [0, 0, 1, 2],
+  [0, 1, 2, 3],
 ];
 
 function bandIndex(value: number, thresholds: [number, number, number]): number {
@@ -40,9 +42,8 @@ function bandIndex(value: number, thresholds: [number, number, number]): number 
 }
 
 /**
- * Assigns terrain types and tree-density feature levels to every land cell
- * based on temperature × moisture biome matrices.
- * Water cells (elev < 0) are left as TerrainType.Water with tree level 0.
+ * Assigns terrain types and tree-density feature levels to every cell
+ * based on temperature × moisture biome matrices, with post-matrix elevation tweaks.
  */
 export function assignBiomes(
   map: HexMap,
@@ -50,25 +51,51 @@ export function assignBiomes(
   moisture: Float32Array,
   opts: BiomeAssignerOptions = {},
 ): void {
-  const tempBands  = opts.temperatureBands  ?? [0.1, 0.3, 0.6];
-  const moistBands = opts.moistureBands     ?? [0.12, 0.28, 0.85];
-  const biomes     = opts.biomeMatrix       ?? DEFAULT_BIOME_MATRIX;
-  const trees      = opts.treeDensityMatrix ?? DEFAULT_TREE_MATRIX;
+  const tempBands = opts.temperatureBands  ?? [0.1, 0.3, 0.6] as [number, number, number];
+  const moistBands = opts.moistureBands    ?? [0.12, 0.28, 0.85] as [number, number, number];
+  const elevMax   = opts.elevationMax      ?? 12;
+  const biomes    = opts.biomeMatrix       ?? DEFAULT_BIOME_MATRIX;
+  const trees     = opts.treeDensityMatrix ?? DEFAULT_TREE_MATRIX;
+
+  // High-elevation desert cells become rock desert above this line
+  const rockDesertElevation = elevMax - Math.floor(elevMax / 2);
 
   map.forEach((col, row) => {
     const elev = map.getElevation(col, row);
+    const i    = row * map.width + col;
 
+    // ---- Underwater cells ----
     if (elev < 0) {
       map.setTerrain(col, row, TerrainType.Water);
       if (map.featureLayerCount > 0) map.setFeatureLevel(col, row, 0, 0);
       return;
     }
 
-    const i  = row * map.width + col;
+    // ---- Land cells: biome lookup ----
     const tb = bandIndex(temperature[i], tempBands);
     const mb = bandIndex(moisture[i],    moistBands);
 
-    map.setTerrain(col, row, biomes[tb][mb]);
-    if (map.featureLayerCount > 0) map.setFeatureLevel(col, row, 0, trees[tb][mb]);
+    let terrain  = biomes[tb][mb];
+    let treeLevel = trees[tb][mb];
+
+    // Post-matrix tweak 1: high-elevation desert → rock desert
+    if (terrain === TerrainType.Desert && elev >= rockDesertElevation) {
+      terrain = TerrainType.Rock;
+    }
+
+    // Post-matrix tweak 2: max-elevation non-desert → forced snowcap
+    if (elev === elevMax && terrain !== TerrainType.Desert) {
+      terrain = TerrainType.Snow;
+    }
+
+    // Plant tweaks: no plants on snow; river adjacency boosts density
+    if (terrain === TerrainType.Snow) {
+      treeLevel = 0;
+    } else if (treeLevel < 3 && map.hasRiver(col, row)) {
+      treeLevel += 1;
+    }
+
+    map.setTerrain(col, row, terrain);
+    if (map.featureLayerCount > 0) map.setFeatureLevel(col, row, 0, treeLevel);
   });
 }

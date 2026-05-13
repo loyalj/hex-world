@@ -179,6 +179,7 @@ export function generateChunkTerrain(
         budget = sinkTerrain(map, region, chunkSize, budget, elevMin, jitterProb, rand);
       } else {
         budget = raiseTerrain(map, region, chunkSize, budget, elevMax, jitterProb, rand);
+        if (budget === 0) return;
       }
     }
   }
