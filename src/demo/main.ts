@@ -21,8 +21,8 @@ import { ChunkPlugin } from '../generators/ChunkPlugin.js';
 /** Change this one constant to switch terrain rendering mode. */
 const TERRAIN_COLOR_MODE: TerrainColorMode = 'splat';
 
-const MAP_WIDTH   = 500;
-const MAP_HEIGHT  = 500;
+const MAP_WIDTH   = 100;
+const MAP_HEIGHT  = 100;
 const HEX_SIZE    = 1;
 const CHUNK_SIZE  = 32;
 const LOAD_RADIUS = 5;
@@ -58,6 +58,8 @@ camera.lookAt(MAP_WIDTH * 0.5, 0, MAP_HEIGHT * 0.5);
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(devicePixelRatio);
 renderer.setSize(innerWidth, innerHeight);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 0.9;
 document.body.appendChild(renderer.domElement);
 
 const controls = new RtsCameraController({
@@ -71,9 +73,9 @@ const controls = new RtsCameraController({
   maxDistance: 80,
 });
 
-// Lighting
-const ambient = new THREE.AmbientLight(0xffffff, 0.5);
-const sun = new THREE.DirectionalLight(0xffffff, 1.4);
+// Lighting — cool sky ambient + warm directional sun
+const ambient = new THREE.AmbientLight(0xd0e0ff, 0.5);
+const sun = new THREE.DirectionalLight(0xfff4d0, 1.4);
 sun.position.set(100, 120, 80);
 scene.add(ambient, sun);
 
@@ -116,8 +118,8 @@ async function start() {
     const terrainTex = await buildTerrainTextureArray();
     terrainMaterial = createTerrainMaterial(terrainTex, {
       lightDir:   new THREE.Vector3(100, 120, 80),
-      lightColor: new THREE.Color(0xffffff).multiplyScalar(0.7),
-      ambient:    new THREE.Color(0xffffff).multiplyScalar(0.45),
+      lightColor: new THREE.Color(0xfff4d0).multiplyScalar(0.7),
+      ambient:    new THREE.Color(0xd0e0ff).multiplyScalar(0.45),
     });
   } else {
     terrainMaterial = new THREE.MeshPhongMaterial({ vertexColors: true, side: THREE.DoubleSide });

@@ -23,6 +23,18 @@ export const TERRAIN_COLORS: Record<TerrainType, THREE.Color> = {
   [TerrainType.Water]:     new THREE.Color(0x4a8fb5),  // mid desaturated blue
 };
 
+type RGB = readonly [number, number, number];
+
+/** Per-terrain road surface color — blended across biome boundaries for natural transitions. */
+const ROAD_COLORS: Record<TerrainType, RGB> = {
+  [TerrainType.Grassland]: [0.50, 0.43, 0.33],  // muted dirt track
+  [TerrainType.Desert]:    [0.54, 0.46, 0.34],  // muted sandy brown
+  [TerrainType.Snow]:      [0.36, 0.41, 0.52],  // blue-grey ice track
+  [TerrainType.Mud]:       [0.35, 0.27, 0.16],  // dark mud
+  [TerrainType.Rock]:      [0.46, 0.46, 0.45],  // neutral stone grey
+  [TerrainType.Water]:     [0.42, 0.46, 0.50],  // fallback (roads shouldn't cross open water)
+};
+
 export interface ChunkBounds {
   colStart: number;
   colEnd: number;
@@ -102,10 +114,11 @@ export function buildChunkGeometry(
   const terrainTypes = isSplat ? new Float32Array(maxVerts * 3) : null;
   let vi = 0, tti = 0;
 
-  // Road geometry — separate position + UV buffers, same perturbation as terrain
+  // Road geometry — separate position + UV + color buffers, same perturbation as terrain
   const maxRoadVerts = hexCount * 300;
   const rPos = new Float32Array(maxRoadVerts * 3);
   const rUV  = new Float32Array(maxRoadVerts * 2);
+  const rCol = new Float32Array(maxRoadVerts * 3);
   let rvi = 0, rui = 0;
 
   // ---- perturbation ----
@@ -187,33 +200,37 @@ export function buildChunkGeometry(
 
   // ---- road vertex emitters ----
 
-  const addRoadVert = (x: number, y: number, z: number, u: number) => {
+  const addRoadVert = (x: number, y: number, z: number, u: number, r: number, g: number, b: number) => {
     const [dx, dz] = perturb(x, z);
     rPos[rvi] = x + dx; rPos[rvi+1] = y; rPos[rvi+2] = z + dz;
     rUV[rui]  = u;       rUV[rui+1]  = 0;
+    rCol[rvi] = r; rCol[rvi+1] = g; rCol[rvi+2] = b;
     rvi += 3; rui += 2;
   };
 
-  // Tutorial winding: (v0,v2,v1),(v1,v2,v3)
+  // Tutorial winding: (v0,v2,v1),(v1,v2,v3). ca = color for vertices 0&1 (own side), cb = 2&3 (nb side).
   const addRoadQuad = (
     x0: number, y0: number, z0: number, u0: number,
     x1: number, y1: number, z1: number, u1: number,
     x2: number, y2: number, z2: number, u2: number,
     x3: number, y3: number, z3: number, u3: number,
+    [ar, ag, ab]: RGB,
+    [br, bg, bb]: RGB,
   ) => {
-    addRoadVert(x0,y0,z0,u0); addRoadVert(x2,y2,z2,u2); addRoadVert(x1,y1,z1,u1);
-    addRoadVert(x1,y1,z1,u1); addRoadVert(x2,y2,z2,u2); addRoadVert(x3,y3,z3,u3);
+    addRoadVert(x0,y0,z0,u0,ar,ag,ab); addRoadVert(x2,y2,z2,u2,br,bg,bb); addRoadVert(x1,y1,z1,u1,ar,ag,ab);
+    addRoadVert(x1,y1,z1,u1,ar,ag,ab); addRoadVert(x2,y2,z2,u2,br,bg,bb); addRoadVert(x3,y3,z3,u3,br,bg,bb);
   };
 
   const addRoadTri = (
     x0: number, y0: number, z0: number, u0: number,
     x1: number, y1: number, z1: number, u1: number,
     x2: number, y2: number, z2: number, u2: number,
+    [r, g, b]: RGB,
   ) => {
-    addRoadVert(x0,y0,z0,u0); addRoadVert(x1,y1,z1,u1); addRoadVert(x2,y2,z2,u2);
+    addRoadVert(x0,y0,z0,u0,r,g,b); addRoadVert(x1,y1,z1,u1,r,g,b); addRoadVert(x2,y2,z2,u2,r,g,b);
   };
 
-  // v1-v3 = inner edge row, v4-v6 = outer edge row; U=1 at v2/v5 (center), U=0 at sides
+  // v1-v3 = inner edge row (own cell), v4-v6 = outer edge row (neighbor); gradient across strip
   const triangulateRoadSegment = (
     v1x: number, v1y: number, v1z: number,
     v2x: number, v2y: number, v2z: number,
@@ -221,9 +238,10 @@ export function buildChunkGeometry(
     v4x: number, v4y: number, v4z: number,
     v5x: number, v5y: number, v5z: number,
     v6x: number, v6y: number, v6z: number,
+    ownColor: RGB, nbColor: RGB,
   ) => {
-    addRoadQuad(v1x,v1y,v1z,0, v2x,v2y,v2z,1, v4x,v4y,v4z,0, v5x,v5y,v5z,1);
-    addRoadQuad(v2x,v2y,v2z,1, v3x,v3y,v3z,0, v5x,v5y,v5z,1, v6x,v6y,v6z,0);
+    addRoadQuad(v1x,v1y,v1z,0, v2x,v2y,v2z,1, v4x,v4y,v4z,0, v5x,v5y,v5z,1, ownColor, nbColor);
+    addRoadQuad(v2x,v2y,v2z,1, v3x,v3y,v3z,0, v5x,v5y,v5z,1, v6x,v6y,v6z,0, ownColor, nbColor);
   };
 
   // Single triangle fill for road edge (center is at road middle, mL/mR at sides)
@@ -231,8 +249,9 @@ export function buildChunkGeometry(
     cx: number, cy: number, cz: number,
     mLx: number, mLy: number, mLz: number,
     mRx: number, mRy: number, mRz: number,
+    ownColor: RGB,
   ) => {
-    addRoadTri(cx,cy,cz,1, mLx,mLy,mLz,0, mRx,mRy,mRz,0);
+    addRoadTri(cx,cy,cz,1, mLx,mLy,mLz,0, mRx,mRy,mRz,0, ownColor);
   };
 
   // Full road wedge from roadCenter toward edge (or just an edge fill if no road through edge)
@@ -244,14 +263,18 @@ export function buildChunkGeometry(
     e3x: number, e3y: number, e3z: number,
     e4x: number, e4y: number, e4z: number,
     hasRoadThroughEdge: boolean,
+    ownColor: RGB, nbColor: RGB,
   ) => {
     if (hasRoadThroughEdge) {
       const mCx = (mLx + mRx) * 0.5, mCy = (mLy + mRy) * 0.5, mCz = (mLz + mRz) * 0.5;
-      triangulateRoadSegment(mLx,mLy,mLz, mCx,mCy,mCz, mRx,mRy,mRz, e2x,e2y,e2z, e3x,e3y,e3z, e4x,e4y,e4z);
-      addRoadTri(rcx,rcy,rcz,1, mLx,mLy,mLz,0, mCx,mCy,mCz,1);
-      addRoadTri(rcx,rcy,rcz,1, mCx,mCy,mCz,1, mRx,mRy,mRz,0);
+      // Edge vertices meet at the midpoint so both cells agree on the boundary color,
+      // producing one smooth gradient instead of two mirror fades.
+      const edgeColor: RGB = [(ownColor[0]+nbColor[0])*0.5, (ownColor[1]+nbColor[1])*0.5, (ownColor[2]+nbColor[2])*0.5];
+      triangulateRoadSegment(mLx,mLy,mLz, mCx,mCy,mCz, mRx,mRy,mRz, e2x,e2y,e2z, e3x,e3y,e3z, e4x,e4y,e4z, ownColor, edgeColor);
+      addRoadTri(rcx,rcy,rcz,1, mLx,mLy,mLz,0, mCx,mCy,mCz,1, ownColor);
+      addRoadTri(rcx,rcy,rcz,1, mCx,mCy,mCz,1, mRx,mRy,mRz,0, ownColor);
     } else {
-      triangulateRoadEdge(rcx,rcy,rcz, mLx,mLy,mLz, mRx,mRy,mRz);
+      triangulateRoadEdge(rcx,rcy,rcz, mLx,mLy,mLz, mRx,mRy,mRz, ownColor);
     }
   };
 
@@ -440,6 +463,7 @@ export function buildChunkGeometry(
       triangulateRoadSegment(
         ie2x, ownY,    ie2z,  ie3x, ownBedY, ie3z,  ie4x, ownY,    ie4z,
         oe2x, nbY,     oe2z,  oe3x, nbBedY,  oe3z,  oe4x, nbY,     oe4z,
+        ROAD_COLORS[type1 as TerrainType], ROAD_COLORS[type2 as TerrainType],
       );
     }
   };
@@ -469,6 +493,9 @@ export function buildChunkGeometry(
     let p5x = ie5x, p5z = ie5z;
     let py = lowerY, p3y = lowerBedY, pr = lr, pg = lg, pb = lb;
 
+    const rc1 = ROAD_COLORS[type1 as TerrainType];
+    const rc2 = ROAD_COLORS[type2 as TerrainType];
+
     for (let step = 1; step <= TERRACE_STEPS; step++) {
       const h   = step * H_STEP;
       const v   = Math.floor((step + 1) / 2) * V_STEP;
@@ -489,9 +516,13 @@ export function buildChunkGeometry(
       addQuad(p4x, py,  p4z, pr,pg,pb,  p5x, py,  p5z, pr,pg,pb,
               n4x, ny,  n4z, ncr,ncg,ncb, n5x, ny,  n5z, ncr,ncg,ncb, tx,ty,tz);
       if (hasRoad) {
+        const hPrev = (step - 1) * H_STEP;
+        const stepOwnColor: RGB = [rc1[0] + (rc2[0]-rc1[0])*hPrev, rc1[1] + (rc2[1]-rc1[1])*hPrev, rc1[2] + (rc2[2]-rc1[2])*hPrev];
+        const stepNbColor:  RGB = [rc1[0] + (rc2[0]-rc1[0])*h,     rc1[1] + (rc2[1]-rc1[1])*h,     rc1[2] + (rc2[2]-rc1[2])*h];
         triangulateRoadSegment(
           p2x, py,  p2z,  p3x, p3y, p3z,  p4x, py,  p4z,
           n2x, ny,  n2z,  n3x, n3y, n3z,  n4x, ny,  n4z,
+          stepOwnColor, stepNbColor,
         );
       }
       p1x = n1x; p1z = n1z;
@@ -571,6 +602,8 @@ export function buildChunkGeometry(
             const interp = getRoadInterpolators(col, row, i);
             const mLx = center.x + (e1x - center.x) * interp.l, mLz = center.z + (e1z - center.z) * interp.l;
             const mRx = center.x + (e5x - center.x) * interp.r, mRz = center.z + (e5z - center.z) * interp.r;
+            const nbI = nbOffset(col, row, edgeDirs[i]);
+            const nbRoadColor = ROAD_COLORS[map.inBounds(nbI.col, nbI.row) ? map.getTerrain(nbI.col, nbI.row) : ownTerrain];
             triangulateRoad(
               center.x, ownY, center.z,
               mLx, ownY, mLz,
@@ -579,6 +612,7 @@ export function buildChunkGeometry(
               e3x, ownY, e3z,
               e4x, ownY, e4z,
               map.hasRoadThroughEdge(col, row, i),
+              ROAD_COLORS[ownTerrain], nbRoadColor,
             );
           }
 
@@ -674,10 +708,13 @@ export function buildChunkGeometry(
 
             const mLx = rcx + (e1x - rcx) * interp.l, mLz = rcz + (e1z - rcz) * interp.l;
             const mRx = rcx + (e5x - rcx) * interp.r, mRz = rcz + (e5z - rcz) * interp.r;
+            const nbI = nbOffset(col, row, edgeDirs[i]);
+            const nbRoadColor = ROAD_COLORS[map.inBounds(nbI.col, nbI.row) ? map.getTerrain(nbI.col, nbI.row) : ownTerrain];
             triangulateRoad(rcx,ownY,rcz, mLx,ownY,mLz, mRx,ownY,mRz,
-              e2x,ownY,e2z, e3x,ownY,e3z, e4x,ownY,e4z, hasRoadThrough);
-            if (previousHasRiver) triangulateRoadEdge(rcx,ownY,rcz, cx,ownY,cz, mLx,ownY,mLz);
-            if (nextHasRiver)     triangulateRoadEdge(rcx,ownY,rcz, mRx,ownY,mRz, cx,ownY,cz);
+              e2x,ownY,e2z, e3x,ownY,e3z, e4x,ownY,e4z, hasRoadThrough,
+              ROAD_COLORS[ownTerrain], nbRoadColor);
+            if (previousHasRiver) triangulateRoadEdge(rcx,ownY,rcz, cx,ownY,cz, mLx,ownY,mLz, ROAD_COLORS[ownTerrain]);
+            if (nextHasRiver)     triangulateRoadEdge(rcx,ownY,rcz, mRx,ownY,mRz, cx,ownY,cz, ROAD_COLORS[ownTerrain]);
           })();
 
         } else if (map.hasRiverBeginOrEnd(col, row)) {
@@ -880,6 +917,7 @@ export function buildChunkGeometry(
     roadsGeo = new THREE.BufferGeometry();
     roadsGeo.setAttribute('position', new THREE.BufferAttribute(rPos.subarray(0, rvi), 3));
     roadsGeo.setAttribute('uv',       new THREE.BufferAttribute(rUV.subarray(0, rui), 2));
+    roadsGeo.setAttribute('color',    new THREE.BufferAttribute(rCol.subarray(0, rvi), 3));
     roadsGeo.computeVertexNormals();
   }
 

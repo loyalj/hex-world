@@ -3,8 +3,10 @@ import * as THREE from 'three';
 const vertexShader = /* glsl */`
   varying vec2 vUv;
   varying vec2 vWorldXZ;
+  varying vec3 vColor;
   void main() {
     vUv = uv;
+    vColor = color;
     vec4 worldPos = modelMatrix * vec4(position, 1.0);
     vWorldXZ = worldPos.xz;
     gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
@@ -14,6 +16,7 @@ const vertexShader = /* glsl */`
 const fragmentShader = /* glsl */`
   varying vec2 vUv;
   varying vec2 vWorldXZ;
+  varying vec3 vColor;
 
   float hash(vec2 p) {
     p = fract(p * vec2(127.1, 311.7));
@@ -32,17 +35,21 @@ const fragmentShader = /* glsl */`
   }
 
   void main() {
-    float blend = smoothstep(0.4, 0.7, vUv.x);
-    if (blend < 0.01) discard;
-
-    // Three-octave noise for dirt/gravel variation
+    // Three-octave noise for dirt/gravel color variation
     float n = vnoise(vWorldXZ * 3.5)  * 0.6
             + vnoise(vWorldXZ * 10.0) * 0.3
             + vnoise(vWorldXZ * 26.0) * 0.1;
     float variation = (n - 0.5) * 0.18;
 
-    vec3 base = vec3(0.78, 0.64, 0.46);
-    gl_FragColor = vec4(clamp(base + variation, 0.0, 1.0), blend);
+    // Low-frequency cloud noise: rough edges + subtle opacity patches
+    float cloud = vnoise(vWorldXZ * 0.9) * 0.65
+                + vnoise(vWorldXZ * 2.4) * 0.35;
+    float edgeJitter = (cloud - 0.5) * 0.14;
+    float blend = smoothstep(0.4 + edgeJitter, 0.68 + edgeJitter, vUv.x);
+    blend *= 0.84 + cloud * 0.20;
+    if (blend < 0.01) discard;
+
+    gl_FragColor = vec4(clamp(vColor + variation, 0.0, 1.0), clamp(blend, 0.0, 1.0));
   }
 `;
 
@@ -50,6 +57,7 @@ export function createRoadMaterial(): THREE.ShaderMaterial {
   return new THREE.ShaderMaterial({
     vertexShader,
     fragmentShader,
+    vertexColors: true,
     transparent: true,
     depthWrite: false,
     side: THREE.DoubleSide,

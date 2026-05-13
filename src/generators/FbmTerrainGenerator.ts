@@ -15,6 +15,8 @@ export interface FbmTerrainOptions {
   waterThreshold?: number;
   /** FBM threshold above which cells become Desert (and below waterThreshold). Default -0.38. */
   desertThreshold?: number;
+  /** FBM threshold above which cells become Mud (thin band between desert and grassland). Default -0.28. */
+  mudThreshold?: number;
   /** FBM threshold above which cells become Rock (below snowThreshold). Default 0.42. */
   rockThreshold?: number;
   /** FBM threshold above which cells become Snow. Default 0.72. */
@@ -37,6 +39,7 @@ export function generateFbmTerrain(map: HexMap, opts: FbmTerrainOptions = {}): v
   const elevOffset     = opts.elevOffset     ?? 4;
   const waterThreshold  = opts.waterThreshold  ?? -0.55;
   const desertThreshold = opts.desertThreshold ?? -0.38;
+  const mudThreshold    = opts.mudThreshold    ?? -0.28;
   const rockThreshold   = opts.rockThreshold   ?? 0.42;
   const snowThreshold   = opts.snowThreshold   ?? 0.72;
   const noiseOffsetX   = opts.noiseOffsetX   ?? 0;
@@ -50,13 +53,14 @@ export function generateFbmTerrain(map: HexMap, opts: FbmTerrainOptions = {}): v
     else if (n > rockThreshold)   map.setTerrain(col, row, TerrainType.Rock);
     else if (isWater)             map.setTerrain(col, row, TerrainType.Water);
     else if (n < desertThreshold) map.setTerrain(col, row, TerrainType.Desert);
+    else if (n < mudThreshold)    map.setTerrain(col, row, TerrainType.Mud);
     else                          map.setTerrain(col, row, TerrainType.Grassland);
 
     const elev = Math.round(n * 10) + elevOffset;
     map.setElevation(col, row, isWater ? Math.min(elev, -1) : Math.max(elev, 0));
 
     if (map.featureLayerCount > 0) {
-      const treeLevel = isWater || n > rockThreshold ? 0 : n >= desertThreshold ? 2 : 1;
+      const treeLevel = isWater || n > rockThreshold ? 0 : n >= mudThreshold ? 2 : n >= desertThreshold ? 1 : 0;
       map.setFeatureLevel(col, row, 0, treeLevel);
     }
   });
