@@ -1,4 +1,5 @@
 export * from './HexGeometry.js';
+export type { WaterGeometryOptions } from './WaterChunk.js';
 export * from './HexPicking.js';
 export * from './HexChunk.js';
 export * from './ChunkManager.js';

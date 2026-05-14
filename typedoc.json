@@ -1,0 +1,11 @@
+{
+  "entryPoints": ["src/index.ts"],
+  "out": "docs",
+  "name": "hex-world",
+  "readme": "QUICKSTART.md",
+  "excludePrivate": true,
+  "excludeInternal": true,
+  "categorizeByGroup": true,
+  "sort": ["source-order"],
+  "tsconfig": "tsconfig.json"
+}

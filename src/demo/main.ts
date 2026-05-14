@@ -22,7 +22,8 @@ import { hexToWorld, hexCorners } from '../math/HexLayout.js';
 import { offsetToHex } from '../math/HexCoord.js';
 import { TerrainType } from '../map/HexCell.js';
 import { FogData } from '../geometry/FogData.js';
-import { findPath, getMovementRange, getVisibleCells, type MoveCostFn } from '../pathfinding/Pathfinding.js';
+import { findPath, getMovementRange, getVisibleCells, hasLineOfSight, type MoveCostFn } from '../pathfinding/Pathfinding.js';
+import { smoothPath } from '../pathfinding/PathSmoothing.js';
 import { hexToOffset } from '../math/HexCoord.js';
 import { serializeMapJSON, deserializeMapJSON } from '../map/MapSerializer.js';
 import { HexUnit } from '../units/HexUnit.js';
@@ -200,11 +201,8 @@ async function start() {
   rangeMesh.visible = false;
   scene.add(rangeMesh);
 
-  const pathMat = new THREE.MeshBasicMaterial({
-    color: 0xffaa22, transparent: true, opacity: 0.55,
-    depthWrite: false, depthTest: false, side: THREE.DoubleSide,
-  });
-  const pathOverlay = new THREE.Mesh(new THREE.BufferGeometry(), pathMat);
+  const pathLineMat = new THREE.LineBasicMaterial({ color: 0xffaa22, depthTest: false });
+  const pathOverlay = new THREE.Line(new THREE.BufferGeometry(), pathLineMat);
   pathOverlay.renderOrder = 7;
   pathOverlay.visible = false;
   scene.add(pathOverlay);
@@ -242,7 +240,16 @@ async function start() {
     const path = findPath(offsetToHex(selectedUnit.col, selectedUnit.row), offsetToHex(target.col, target.row), moveCost, map);
     pathOverlay.geometry.dispose();
     if (path && path.length > 1) {
-      pathOverlay.geometry = buildHighlightGeo(path.map(h => hexToOffset(h)), 0.06);
+      const pts = smoothPath(path, layout, map);
+      const positions = new Float32Array(pts.length * 3);
+      for (let i = 0; i < pts.length; i++) {
+        positions[i * 3]     = pts[i].x;
+        positions[i * 3 + 1] = pts[i].y + 0.15;
+        positions[i * 3 + 2] = pts[i].z;
+      }
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+      pathOverlay.geometry = geo;
       pathOverlay.visible = true;
     } else {
       pathOverlay.geometry = new THREE.BufferGeometry();
@@ -542,10 +549,13 @@ async function start() {
     }
 
     const gen = GENERATORS[activeGenIndex];
+    const losStr = (selectedUnit && hoverCell)
+      ? '  LOS: ' + (hasLineOfSight(offsetToHex(selectedUnit.col, selectedUnit.row), offsetToHex(hoverCell.col, hoverCell.row), map) ? 'yes' : 'blocked')
+      : '';
     const hoverLine = hoverCell
       ? `Hover:     [${hoverCell.col}, ${hoverCell.row}]  ` +
         `${TERRAIN_NAMES[map.getTerrain(hoverCell.col, hoverCell.row)] ?? '?'}  ` +
-        `elev ${map.getElevation(hoverCell.col, hoverCell.row)}`
+        `elev ${map.getElevation(hoverCell.col, hoverCell.row)}${losStr}`
       : `Hover:     —`;
     const unitLine = selectedUnit
       ? `Unit:      [${selectedUnit.col}, ${selectedUnit.row}]  ${selectedUnit.isMoving ? 'moving' : 'selected — click to move'}  [Esc] deselect  [C] focus`

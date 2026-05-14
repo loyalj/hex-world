@@ -19,7 +19,10 @@
       "Bash(curl -s \"https://catlikecoding.com/unity/tutorials/hex-map/part-25/\")",
       "Bash(curl -s \"https://catlikecoding.com/unity/tutorials/hex-map/part-26/\")",
       "Bash(curl -s \"https://catlikecoding.com/unity/tutorials/hex-map/part-20/\")",
-      "Bash(curl -s \"https://catlikecoding.com/unity/tutorials/hex-map/part-21/\")"
+      "Bash(curl -s \"https://catlikecoding.com/unity/tutorials/hex-map/part-21/\")",
+      "Bash(npm install *)",
+      "Bash(npx typedoc *)",
+      "Bash(npm run *)"
     ],
     "additionalDirectories": [
       "C:\\Users\\loyal\\.claude\\projects\\d--Coding-hex-world\\ef551f1b-c5cb-4cf2-8696-3be1d9fe7853\\tool-results"

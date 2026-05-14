@@ -103,14 +103,14 @@ Follows the structure of the [Catlike Coding Hex Map tutorial series](https://ca
 
 ---
 
-## Stage 8 — Distances & Pathfinding
+## Stage 8 — Distances & Pathfinding ✅
 *Tutorial equivalent: Parts 15–17*
 
 - [x] Hex distance, neighbors, range, line — already in `HexCoord.ts`
 - [x] A* pathfinding — `findPath(from, to, costFn, map)` returns `HexCoord[] | null`; game supplies `MoveCostFn`, return `Infinity` for impassable
 - [x] Movement range — `getMovementRange(center, budget, costFn, map)` returns all reachable cells; Dijkstra flood-fill, budget in cost units
-- [ ] Path smoothing helper
-- [ ] Demo: click-to-pathfind with movement range highlight
+- [x] Path smoothing — `smoothPath(path, layout, map, samplesPerSegment?)` returns dense `{x,y,z}[]` along a Catmull-Rom spline through cell centres; use for curved path preview lines
+- [x] Demo: path preview uses smooth spline `THREE.Line`; movement range highlight rebuilds on cell enter
 
 ---
 
@@ -136,7 +136,7 @@ Follows the structure of the [Catlike Coding Hex Map tutorial series](https://ca
 - [x] `ChunkManager` integration — `fogData?: FogData` option, `applyFog()` helper sets uniforms on all ShaderMaterials, `update()` calls `fogData.update()` each frame, `setFogData(fog|null)` for runtime toggle
 - [x] `getVisibleCells(center, range, map)` in pathfinding module — BFS, no cost function, returns all cells within `range` steps
 - [x] Demo: `[F]` toggles fog; click to reveal cells (range 3 BFS) around hovered hex; initial reveal seeded from map center
-- [ ] Line-of-sight blocking (elevation-aware raycasting)
+- [x] Line-of-sight blocking — `hasLineOfSight(from, to, map, eyeHeight?)` traces the hex line and checks whether any intermediate cell's elevation rises above the sight line; `eyeHeight` defaults to 1.5 world units above terrain surface; demo shows `LOS: yes/blocked` in HUD when a unit is selected and a cell is hovered
 - [ ] Exploration reveal animation (smooth fade-in)
 
 ---

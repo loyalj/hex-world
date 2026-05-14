@@ -1,4 +1,6 @@
-import { type HexCoord, hexDistance, hexNeighbors, hexEquals, hexToOffset } from '../math/HexCoord.js';
+import { type HexCoord, hexDistance, hexNeighbors, hexEquals, hexToOffset, hexLine } from '../math/HexCoord.js';
+
+const LOS_ELEV_SCALE = 0.5;
 
 /**
  * Cost function supplied by the game. Called for each candidate move.
@@ -262,4 +264,55 @@ export function getVisibleCells(
   }
 
   return visible;
+}
+
+// ---------------------------------------------------------------------------
+// Line-of-sight (elevation-aware)
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns `true` if there is an unobstructed line of sight from `from` to `to`.
+ *
+ * Traces the hex line between the two cells and checks whether any intermediate
+ * cell's terrain elevation pokes above the straight sight line. Both observer
+ * and target are assumed to have their eyes at `eyeHeight` world units above
+ * the terrain surface.
+ *
+ * Uses the same elevation scale (0.5 world units per elevation step) as the
+ * terrain geometry.
+ *
+ * @param eyeHeight - Observer/target eye height above terrain, in world units. Default 1.5.
+ *
+ * @example
+ * const canSee = hasLineOfSight(
+ *   offsetToHex(unitCol, unitRow),
+ *   offsetToHex(targetCol, targetRow),
+ *   map,
+ * );
+ */
+export function hasLineOfSight(
+  from: HexCoord,
+  to:   HexCoord,
+  map:  { getElevation(col: number, row: number): number; width: number; height: number },
+  eyeHeight = 1.5,
+): boolean {
+  const n = hexDistance(from, to);
+  if (n <= 1) return true;
+
+  const line    = hexLine(from, to);
+  const fromOff = hexToOffset(from);
+  const toOff   = hexToOffset(to);
+  const fromY   = map.getElevation(fromOff.col, fromOff.row) * LOS_ELEV_SCALE + eyeHeight;
+  const toY     = map.getElevation(toOff.col,   toOff.row)   * LOS_ELEV_SCALE + eyeHeight;
+
+  for (let i = 1; i < line.length - 1; i++) {
+    const t   = i / n;
+    const off = hexToOffset(line[i]);
+    if (off.col < 0 || off.col >= map.width || off.row < 0 || off.row >= map.height) continue;
+    const cellY  = map.getElevation(off.col, off.row) * LOS_ELEV_SCALE;
+    const sightY = fromY + (toY - fromY) * t;
+    if (cellY > sightY) return false;
+  }
+
+  return true;
 }

@@ -10,10 +10,13 @@
       "types": "./dist/types/index.d.ts"
     }
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "dev": "vite",
-    "build": "vite build && tsc --emitDeclarationOnly"
+    "build": "vite build && tsc --emitDeclarationOnly",
+    "docs": "typedoc"
   },
   "keywords": [],
   "author": "",
@@ -23,8 +26,9 @@
     "three": ">=0.150.0"
   },
   "devDependencies": {
-    "three": "^0.184.0",
     "@types/three": "^0.184.1",
+    "three": "^0.184.0",
+    "typedoc": "^0.28.19",
     "typescript": "^6.0.3",
     "vite": "^8.0.11"
   }

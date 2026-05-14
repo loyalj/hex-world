@@ -281,7 +281,8 @@ The library provides the algorithms. Your game supplies a `MoveCostFn` that clos
 
 ```ts
 import {
-  findPath, getMovementRange, getVisibleCells,
+  findPath, getMovementRange, getVisibleCells, hasLineOfSight,
+  smoothPath,
   offsetToHex, hexToOffset,
   type MoveCostFn,
 } from 'hex-world';
@@ -312,6 +313,28 @@ const reachable = getMovementRange(
 
 // BFS visibility radius — all cells within N steps (no cost function)
 const visible = getVisibleCells(offsetToHex(col, row), 3, map);
+
+// Line-of-sight — true if no terrain blocks the straight line between two cells.
+// eyeHeight (default 1.5 world units) is added to both endpoints before checking.
+const canSee = hasLineOfSight(offsetToHex(unitCol, unitRow), offsetToHex(targetCol, targetRow), map);
+const canSeeCustom = hasLineOfSight(from, to, map, 2.0);  // taller observer
+
+// Path smoothing — Catmull-Rom spline through cell centres, sampled densely.
+// Returns { x, y, z }[] world-space points. Use for a curved path preview line.
+const pts = smoothPath(path, layout, map);          // default 8 samples per segment
+const fine = smoothPath(path, layout, map, 16);     // smoother curve
+
+// Feed into a THREE.Line:
+const positions = new Float32Array(pts.length * 3);
+pts.forEach((p, i) => {
+  positions[i * 3]     = p.x;
+  positions[i * 3 + 1] = p.y + 0.15;   // float above terrain
+  positions[i * 3 + 2] = p.z;
+});
+const geo = new THREE.BufferGeometry();
+geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+const line = new THREE.Line(geo, new THREE.LineBasicMaterial({ color: 0xffaa22, depthTest: false }));
+scene.add(line);
 ```
 
 Costs must be non-negative. Return `Infinity` to mark a transition as impassable.
@@ -443,6 +466,4 @@ Keep these in your game, not in hex-world:
 
 ## What's coming to the library
 
-- Line-of-sight blocking (elevation-aware raycasting)
 - Exploration reveal animation (smooth fade-in on first sight)
-- Wall geometry between designated cells
