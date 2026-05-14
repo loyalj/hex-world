@@ -141,35 +141,44 @@ The library also exports the raw generator functions (`generateFbmTerrain`, `gen
 
 ## Scatter features
 
-Scatter layers place instanced meshes (trees, rocks, buildings) using cell feature levels (0–3).
+Scatter layers place instanced meshes (trees, rocks, buildings) using cell feature levels (0–3). Each definition owns a named `layerIndex` slot in `featureData`, so saves are stable regardless of registration order.
 
 ```ts
 import { HexHashGrid, ChunkManager } from 'hex-world';
-import type { ScatterLayerConfig } from 'hex-world';
+import type { ScatterDefinition } from 'hex-world';
 
+// Map must have featureLayerCount >= the highest layerIndex + 1
+const map = new HexMap({ width: 100, height: 100, featureLayerCount: 1 });
 const hashGrid = new HexHashGrid(seed);
 
 const treeMat = new THREE.MeshLambertMaterial({ color: 0x4a7c2a });
-const pineLayer: ScatterLayerConfig = [
-  // tier 0 (density 3): large trees
-  [{ geometry: new THREE.ConeGeometry(0.42, 2.0, 7), material: treeMat, yOffset: 1.0 }],
-  // tier 1 (density 2): medium trees
-  [{ geometry: new THREE.ConeGeometry(0.33, 1.5, 7), material: treeMat, yOffset: 0.75 }],
-  // tier 2 (density 1): small trees
-  [{ geometry: new THREE.ConeGeometry(0.24, 1.0, 7), material: treeMat, yOffset: 0.5 }],
-];
+const pineDefinition: ScatterDefinition = {
+  id:         'pine-tree',
+  name:       'Pine Tree',
+  layerIndex: 0,           // reads feature layer 0 for density
+  tiers: [
+    // tier 0 (density 3): large trees
+    [{ geometry: new THREE.ConeGeometry(0.42, 2.0, 7), material: treeMat, yOffset: 1.0 }],
+    // tier 1 (density 2): medium trees
+    [{ geometry: new THREE.ConeGeometry(0.33, 1.5, 7), material: treeMat, yOffset: 0.75 }],
+    // tier 2 (density 1): small trees
+    [{ geometry: new THREE.ConeGeometry(0.24, 1.0, 7), material: treeMat, yOffset: 0.5 }],
+  ],
+  allowedTerrains: [TerrainType.Grassland, TerrainType.Mud],  // optional whitelist
+  tiltStrength:    0,      // optional random X/Z lean in radians; 0 = upright
+};
 
 const chunks = new ChunkManager({
   // ...other options...
   hashGrid,
-  scatterLayers: [pineLayer],   // add as many layers as you need
+  scatterDefinitions: [pineDefinition],   // add as many definitions as you need
 });
 
 // Set per-cell density in map data (0 = none, 3 = dense)
 map.setFeatureLevel(col, row, 0, 3);   // layer 0, density tier 3
 ```
 
-Each scatter layer is fully game-defined — geometry, material, density curve. The library handles placement, instancing, and chunk streaming.
+Each scatter definition is fully game-defined — geometry, material, terrain filter, density curve. The library handles placement, instancing, and chunk streaming. Pass any `THREE.Material` subclass including custom `onBeforeCompile` materials.
 
 ---
 
@@ -378,7 +387,15 @@ chunks.setDimExplored(true);     // dim cells seen but not currently visible
 fog.reset();
 ```
 
-The fog texture stores two independent values per cell: **R** = currently visible (0 or 255) and **G** = ever explored (0 or 255, never decreases). Both are driven by integer reference counts — multiple overlapping visibility grants are handled automatically.
+The fog texture stores three values per cell: **R** = currently visible (0 or 255), **G** = ever explored (0 or 255, never decreases), **B** = reveal animation progress (0→255 over `revealDuration` seconds on first exploration). R and G are driven by integer reference counts — multiple overlapping visibility grants are handled automatically.
+
+Pass an optional third argument to control the fade-in speed:
+
+```ts
+const fog = new FogData(map.width, map.height, 0.8);  // 0.8 s reveal (default 0.5)
+```
+
+Call `chunks.update(camera, dt)` (with elapsed seconds) each frame so the animation advances. Pass `0` or omit `dt` if you don't need the reveal animation.
 
 If you use `UnitManager` with `fogRevealRange > 0`, it manages all `increaseVisibility`/`decreaseVisibility` calls for you automatically.
 
@@ -417,6 +434,7 @@ if (path) unit.travel(path);
 unit.stop();
 
 // In your render loop (dt = elapsed seconds):
+chunks.update(camera, dt);   // dt drives fog reveal animation
 manager.update(dt);
 ```
 
@@ -466,4 +484,5 @@ Keep these in your game, not in hex-world:
 
 ## What's coming to the library
 
-- Exploration reveal animation (smooth fade-in on first sight)
+- LOD system for distant chunk geometry
+- Worker-thread chunk mesh generation

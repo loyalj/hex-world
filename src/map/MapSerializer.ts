@@ -1,4 +1,5 @@
 import { HexMap } from './HexMap.js';
+import type { ScatterDescriptor } from '../geometry/ScatterTypes.js';
 
 const MAGIC   = [0x48, 0x58, 0x4d, 0x50]; // "HXMP"
 const VERSION = 1;
@@ -11,10 +12,11 @@ export interface MapMetadata {
   generatorId?: string;
 }
 
-/** Result of deserializing a JSON map — includes the map and any stored metadata. */
+/** Result of deserializing a JSON map — includes the map, metadata, and any scatter definitions. */
 export interface DeserializedMap {
-  map:      HexMap;
-  metadata: MapMetadata;
+  map:                HexMap;
+  metadata:           MapMetadata;
+  scatterDescriptors: ScatterDescriptor[];
 }
 
 // --- Binary ---
@@ -86,9 +88,10 @@ interface MapJSON {
   cells: string;
   roads: string;
   features: string;
-  name?:        string;
-  seed?:        number;
-  generatorId?: string;
+  name?:               string;
+  seed?:               number;
+  generatorId?:        string;
+  scatterDescriptors?: ScatterDescriptor[];
 }
 
 function uint8ToBase64(data: Uint8Array): string {
@@ -112,7 +115,11 @@ function base64ToUint8(b64: string): Uint8Array {
  * Suitable for clipboard, editor state, or human-readable export.
  * Pair with `deserializeMapJSON`.
  */
-export function serializeMapJSON(map: HexMap, metadata: MapMetadata = {}): string {
+export function serializeMapJSON(
+  map: HexMap,
+  metadata: MapMetadata = {},
+  scatterDescriptors?: ScatterDescriptor[],
+): string {
   const payload: MapJSON = {
     version:           VERSION,
     width:             map.width,
@@ -122,6 +129,7 @@ export function serializeMapJSON(map: HexMap, metadata: MapMetadata = {}): strin
     roads:    uint8ToBase64(map.roadBits),
     features: map.featureData ? uint8ToBase64(map.featureData) : '',
     ...metadata,
+    ...(scatterDescriptors && scatterDescriptors.length > 0 ? { scatterDescriptors } : {}),
   };
   return JSON.stringify(payload);
 }
@@ -144,6 +152,7 @@ export function deserializeMapJSON(json: string): DeserializedMap {
   }
   return {
     map,
-    metadata: { name: p.name, seed: p.seed, generatorId: p.generatorId },
+    metadata:           { name: p.name, seed: p.seed, generatorId: p.generatorId },
+    scatterDescriptors: p.scatterDescriptors ?? [],
   };
 }

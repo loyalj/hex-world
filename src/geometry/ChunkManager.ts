@@ -9,7 +9,7 @@ import { buildShoreGeometry } from './WaterShoreChunk.js';
 import { buildEstuaryGeometry } from './EstuaryChunk.js';
 import { buildScatterMeshes } from './ScatterBuilder.js';
 import type { HexHashGrid } from './HexHashGrid.js';
-import type { ScatterLayerConfig } from './ScatterTypes.js';
+import type { ScatterDefinition } from './ScatterTypes.js';
 import type { FogData } from './FogData.js';
 
 export interface ChunkManagerOptions {
@@ -35,10 +35,10 @@ export interface ChunkManagerOptions {
   roadMaterial?: THREE.Material;
   /** Passed through to the water geometry builder. */
   waterGeometryOptions?: WaterGeometryOptions;
-  /** Hash grid for deterministic scatter placement. Required when scatterLayers is provided. */
+  /** Hash grid for deterministic scatter placement. Required when scatterDefinitions is provided. */
   hashGrid?: HexHashGrid;
-  /** One config per feature layer defined on the map. */
-  scatterLayers?: ScatterLayerConfig[];
+  /** One definition per scatter layer. Each definition declares its own layerIndex. */
+  scatterDefinitions?: ScatterDefinition[];
   /** If provided, fog-of-war uniforms are set on all shader materials. */
   fogData?: FogData;
 }
@@ -66,7 +66,7 @@ export class ChunkManager {
   private readonly riverMaterial:   THREE.Material | null;
   private readonly roadMaterial:    THREE.Material | null;
   private readonly hashGrid:        HexHashGrid | null;
-  private readonly scatterLayers:   ScatterLayerConfig[] | null;
+  private readonly scatterDefinitions: ScatterDefinition[] | null;
   private fogData:                  FogData | null;
   private hideUnexplored            = true;
   private dimExplored               = true;
@@ -100,7 +100,7 @@ export class ChunkManager {
     this.riverMaterial   = opts.riverMaterial   ?? null;
     this.roadMaterial    = opts.roadMaterial    ?? null;
     this.hashGrid        = opts.hashGrid        ?? null;
-    this.scatterLayers   = opts.scatterLayers   ?? null;
+    this.scatterDefinitions = opts.scatterDefinitions ?? null;
     this.fogData         = opts.fogData         ?? null;
     this.geoOptions      = opts.geometryOptions      ?? {};
     this.waterGeoOptions = opts.waterGeometryOptions ?? {};
@@ -124,7 +124,8 @@ export class ChunkManager {
         const r = raw[ci[i] * 4]     / 255;
         const b = raw[ci[i] * 4 + 2] / 255; // B channel = reveal animation progress 0→1
         const hidden = this.hideUnexplored && b < 0.01;
-        const brightness = hidden ? 0 : b * (this.dimExplored ? (0.25 + 0.75 * r) : 1.0);
+        const revealFactor = this.hideUnexplored ? b : 1.0;
+        const brightness = hidden ? 0 : revealFactor * (this.dimExplored ? (0.25 + 0.75 * r) : 1.0);
         color.setScalar(brightness);
         mesh.setColorAt(i, color);
         if (orig) {
@@ -238,8 +239,8 @@ export class ChunkManager {
       this.roadChunks.set(k, rdMesh);
     }
 
-    if (this.hashGrid && this.scatterLayers && this.scatterLayers.length > 0) {
-      const scMeshes = buildScatterMeshes(this.map, this.layout, b, this.hashGrid, this.scatterLayers);
+    if (this.hashGrid && this.scatterDefinitions && this.scatterDefinitions.length > 0) {
+      const scMeshes = buildScatterMeshes(this.map, this.layout, b, this.hashGrid, this.scatterDefinitions);
       if (scMeshes.length > 0) {
         for (const m of scMeshes) this.scene.add(m);
         this.scatterChunks.set(k, scMeshes);
@@ -369,6 +370,16 @@ export class ChunkManager {
           this.scene.remove(rMesh);
           this.riverChunks.delete(k);
         }
+      } else if (this.riverMaterial) {
+        const rGeo = buildRiverGeometry(this.map, this.layout, b, this.waterGeoOptions);
+        if (rGeo) {
+          this.applyFog(this.riverMaterial);
+          const newRMesh = new THREE.Mesh(rGeo, this.riverMaterial);
+          newRMesh.frustumCulled = true;
+          newRMesh.renderOrder = 1;
+          this.scene.add(newRMesh);
+          this.riverChunks.set(k, newRMesh);
+        }
       }
 
       const rdMesh = this.roadChunks.get(k);
@@ -393,8 +404,8 @@ export class ChunkManager {
         for (const m of oldScMeshes) { this.scene.remove(m); m.dispose(); }
         this.scatterChunks.delete(k);
       }
-      if (this.hashGrid && this.scatterLayers && this.scatterLayers.length > 0) {
-        const newScMeshes = buildScatterMeshes(this.map, this.layout, b, this.hashGrid, this.scatterLayers);
+      if (this.hashGrid && this.scatterDefinitions && this.scatterDefinitions.length > 0) {
+        const newScMeshes = buildScatterMeshes(this.map, this.layout, b, this.hashGrid, this.scatterDefinitions);
         if (newScMeshes.length > 0) {
           for (const m of newScMeshes) this.scene.add(m);
           this.scatterChunks.set(k, newScMeshes);

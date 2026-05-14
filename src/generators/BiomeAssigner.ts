@@ -97,5 +97,9 @@ export function assignBiomes(
 
     map.setTerrain(col, row, terrain);
     if (map.featureLayerCount > 0) map.setFeatureLevel(col, row, 0, treeLevel);
+    if (map.featureLayerCount > 1) {
+      const rockLevel = terrain === TerrainType.Rock ? 1 : 0;
+      map.setFeatureLevel(col, row, 1, rockLevel);
+    }
   });
 }

@@ -13,7 +13,8 @@ import { buildTerrainTextureArray } from '../geometry/TerrainTextures.js';
 import { createTerrainMaterial } from '../geometry/TerrainMaterial.js';
 import type { TerrainColorMode } from '../geometry/ChunkManager.js';
 import { HexHashGrid } from '../geometry/HexHashGrid.js';
-import type { ScatterLayerConfig } from '../geometry/ScatterTypes.js';
+import type { ScatterDefinition } from '../geometry/ScatterTypes.js';
+import { createRockMaterial } from '../geometry/RockMaterial.js';
 import type { MapGeneratorPlugin } from '../generators/MapGeneratorPlugin.js';
 import { FbmPlugin } from '../generators/FbmPlugin.js';
 import { ChunkPlugin } from '../generators/ChunkPlugin.js';
@@ -54,7 +55,7 @@ let activeGenIndex = 0;
 let seed = Math.floor(Math.random() * 0xffffffff);
 
 // --- Map ---
-const map = new HexMap({ width: MAP_WIDTH, height: MAP_HEIGHT, featureLayerCount: 1 });
+const map = new HexMap({ width: MAP_WIDTH, height: MAP_HEIGHT, featureLayerCount: 2 });
 
 function runGenerator(): void {
   const gen = GENERATORS[activeGenIndex];
@@ -172,11 +173,30 @@ async function start() {
   const hashGrid = new HexHashGrid(1234);
 
   const treeMat = new THREE.MeshLambertMaterial({ color: 0x5e8c2a });
-  const pineLayer: ScatterLayerConfig = [
-    [{ geometry: new THREE.ConeGeometry(0.42, 2.0, 7), material: treeMat, yOffset: 1.0 }],
-    [{ geometry: new THREE.ConeGeometry(0.33, 1.5, 7), material: treeMat, yOffset: 0.75 }],
-    [{ geometry: new THREE.ConeGeometry(0.24, 1.0, 7), material: treeMat, yOffset: 0.5 }],
-  ];
+  const pineDefinition: ScatterDefinition = {
+    id:         'pine-tree',
+    name:       'Pine Tree',
+    layerIndex: 0,
+    tiers: [
+      [{ geometry: new THREE.ConeGeometry(0.42, 2.0, 7), material: treeMat, yOffset: 1.0 }],
+      [{ geometry: new THREE.ConeGeometry(0.33, 1.5, 7), material: treeMat, yOffset: 0.75 }],
+      [{ geometry: new THREE.ConeGeometry(0.24, 1.0, 7), material: treeMat, yOffset: 0.5 }],
+    ],
+  };
+
+  const rockMat = createRockMaterial();
+  const rockDefinition: ScatterDefinition = {
+    id:             'rock',
+    name:           'Rock',
+    layerIndex:     1,
+    allowedTerrains: [TerrainType.Rock],
+    tiltStrength:   0.35,
+    tiers: [
+      [{ geometry: new THREE.DodecahedronGeometry(0.28, 0), material: rockMat, yOffset: 0.14 }],
+      [{ geometry: new THREE.DodecahedronGeometry(0.20, 0), material: rockMat, yOffset: 0.10 }],
+      [{ geometry: new THREE.DodecahedronGeometry(0.13, 0), material: rockMat, yOffset: 0.06 }],
+    ],
+  };
 
   // --- Pathfinding overlay ---
   const MOVE_BUDGET = 4;
@@ -332,7 +352,7 @@ async function start() {
     waterGeometryOptions: waterGeoOptions,
     roadMaterial,
     hashGrid,
-    scatterLayers: [pineLayer],
+    scatterDefinitions: [pineDefinition, rockDefinition],
     fogData,
   });
 

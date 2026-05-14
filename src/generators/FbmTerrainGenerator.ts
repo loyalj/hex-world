@@ -66,5 +66,10 @@ export function generateFbmTerrain(map: HexMap, opts: FbmTerrainOptions = {}): v
       const treeLevel = isWater || n > rockThreshold ? 0 : n >= mudThreshold ? 2 : n >= desertThreshold ? 1 : 0;
       map.setFeatureLevel(col, row, 0, treeLevel);
     }
+    if (map.featureLayerCount > 1) {
+      const t = map.getTerrain(col, row);
+      const rockLevel = t === TerrainType.Rock ? 1 : 0;
+      map.setFeatureLevel(col, row, 1, rockLevel);
+    }
   });
 }
