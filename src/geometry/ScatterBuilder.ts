@@ -74,10 +74,12 @@ function addSlot(
   worldY: number,
   col: number,
   row: number,
+  mapWidth: number,
   map: HexMap,
   layers: ScatterLayerConfig[],
   hashGrid: HexHashGrid,
   accumulator: Map<string, THREE.Matrix4[]>,
+  cellAccumulator: Map<string, number[]>,
   collectionRef: Map<string, { layerIdx: number; tierIdx: number; variantIdx: number }>,
 ): void {
   const hash = hashGrid.sample(rawX, rawZ);
@@ -114,9 +116,11 @@ function addSlot(
 
   if (!accumulator.has(winnerKey)) {
     accumulator.set(winnerKey, []);
+    cellAccumulator.set(winnerKey, []);
     collectionRef.set(winnerKey, { layerIdx: winnerLayer, tierIdx: winnerTier, variantIdx: winnerVariant });
   }
   accumulator.get(winnerKey)!.push(_mat.clone());
+  cellAccumulator.get(winnerKey)!.push(row * mapWidth + col);
 }
 
 export function buildScatterMeshes(
@@ -130,7 +134,8 @@ export function buildScatterMeshes(
 
   const { colStart, colEnd, rowStart, rowEnd } = bounds;
 
-  const accumulator  = new Map<string, THREE.Matrix4[]>();
+  const accumulator   = new Map<string, THREE.Matrix4[]>();
+  const cellAccumulator = new Map<string, number[]>();
   const collectionRef = new Map<string, { layerIdx: number; tierIdx: number; variantIdx: number }>();
 
   for (let row = rowStart; row < rowEnd; row++) {
@@ -145,7 +150,7 @@ export function buildScatterMeshes(
 
       // Center slot — skip if river or any road through the cell
       if (!map.hasRiver(col, row) && !map.hasRoads(col, row)) {
-        addSlot(center.x, center.z, worldY, col, row, map, layers, hashGrid, accumulator, collectionRef);
+        addSlot(center.x, center.z, worldY, col, row, map.width, map, layers, hashGrid, accumulator, cellAccumulator, collectionRef);
       }
 
       // 6 direction slots — skip if river or road through that edge (i = face index 0-5)
@@ -157,7 +162,7 @@ export function buildScatterMeshes(
         const fx = (center.x + corners[i].x + corners[i1].x) / 3;
         const fz = (center.z + corners[i].z + corners[i1].z) / 3;
 
-        addSlot(fx, fz, worldY, col, row, map, layers, hashGrid, accumulator, collectionRef);
+        addSlot(fx, fz, worldY, col, row, map.width, map, layers, hashGrid, accumulator, cellAccumulator, collectionRef);
       }
     }
   }
@@ -173,6 +178,12 @@ export function buildScatterMeshes(
       mesh.setMatrixAt(i, matrices[i]);
     }
     mesh.instanceMatrix.needsUpdate = true;
+    mesh.userData.fogCellIndices = new Int32Array(cellAccumulator.get(key)!);
+    // Store a flat copy of all instance matrices so fog can zero-scale unexplored instances
+    // and restore them when they become explored.
+    const origMatrices = new Float32Array(matrices.length * 16);
+    for (let i = 0; i < matrices.length; i++) matrices[i].toArray(origMatrices, i * 16);
+    mesh.userData.originalMatrices = origMatrices;
     meshes.push(mesh);
   }
 

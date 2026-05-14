@@ -1,18 +1,22 @@
 import * as THREE from 'three';
 import { WATER_GLSL } from './WaterMaterial.js';
+import { FOG_VERT_DECL, FOG_VERT_BODY, FOG_FRAG_DECL, fogUniforms } from './FogGLSL.js';
 
 const vertexShader = /* glsl */`
+  ${FOG_VERT_DECL}
   varying vec2 vUv;
   varying vec2 vWorldXZ;
   void main() {
     vUv = uv;
     vec4 worldPos = modelMatrix * vec4(position, 1.0);
     vWorldXZ = worldPos.xz;
+    ${FOG_VERT_BODY}
     gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
   }
 `;
 
 const fragmentShader = /* glsl */`
+  ${FOG_FRAG_DECL}
   uniform float uTime;
   varying vec2 vUv;
   varying vec2 vWorldXZ;
@@ -32,13 +36,13 @@ const fragmentShader = /* glsl */`
 
     vec3 color = mix(waterColor, foamCol, foam);
 
-    gl_FragColor = vec4(color, 0.82);
+    gl_FragColor = vec4(color * vVisibility, 0.82 * vExplored);
   }
 `;
 
 export function createWaterShoreMaterial(): THREE.ShaderMaterial {
   return new THREE.ShaderMaterial({
-    uniforms: { uTime: { value: 0 } },
+    uniforms: { uTime: { value: 0 }, ...fogUniforms() },
     vertexShader,
     fragmentShader,
     transparent: true,

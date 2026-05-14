@@ -124,14 +124,20 @@ Follows the structure of the [Catlike Coding Hex Map tutorial series](https://ca
 
 ---
 
-## Stage 10 — Fog of War & Exploration
+## Stage 10 — Fog of War & Exploration ✅
 *Tutorial equivalent: Parts 20–22*
 
-- [ ] Per-cell visibility state (unseen / seen / visible)
-- [ ] Line-of-sight calculation (hex raycasting with elevation)
-- [ ] Fog of war overlay mesh / shader
-- [ ] Exploration reveal animation
-- [ ] Demo: units revealing fog as they move
+- [x] `FogData` class — `DataTexture` (R=visible, G=explored), integer visibility counts per cell, dirty-flag GPU upload, `increaseVisibility` / `decreaseVisibility` / `reset` / `dispose`
+- [x] `cellIndex` attribute on all geometry builders — flat `row * width + col` index stored per vertex so shaders can sample the fog texture without geometry rebuilds
+  - Terrain (`HexChunk`): `vec3 cellIndex` (3-cell blend, averaged visibility at corners/terraces/bridges)
+  - Water, river, shore, estuary, road: `float cellIndex` (own water/road cell)
+- [x] Fog uniforms on all shader materials — `uFogData` (sampler2D), `uFogDataSize` (vec2), `uFogEnabled` (float); all shaders multiply final color by `vVisibility`; dummy 1×1 texture bound when fog is off
+- [x] `FogGLSL.ts` — shared GLSL1 snippet constants and `fogUniforms()` factory used by all water/road materials
+- [x] `ChunkManager` integration — `fogData?: FogData` option, `applyFog()` helper sets uniforms on all ShaderMaterials, `update()` calls `fogData.update()` each frame, `setFogData(fog|null)` for runtime toggle
+- [x] `getVisibleCells(center, range, map)` in pathfinding module — BFS, no cost function, returns all cells within `range` steps
+- [x] Demo: `[F]` toggles fog; click to reveal cells (range 3 BFS) around hovered hex; initial reveal seeded from map center
+- [ ] Line-of-sight blocking (elevation-aware raycasting)
+- [ ] Exploration reveal animation (smooth fade-in)
 
 ---
 

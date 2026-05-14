@@ -1,6 +1,8 @@
 import * as THREE from 'three';
+import { FOG_VERT_DECL, FOG_VERT_BODY, FOG_FRAG_DECL, fogUniforms } from './FogGLSL.js';
 
 const vertexShader = /* glsl */`
+  ${FOG_VERT_DECL}
   varying vec2 vUv;
   varying vec2 vWorldXZ;
   varying vec3 vColor;
@@ -9,11 +11,13 @@ const vertexShader = /* glsl */`
     vColor = color;
     vec4 worldPos = modelMatrix * vec4(position, 1.0);
     vWorldXZ = worldPos.xz;
+    ${FOG_VERT_BODY}
     gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
   }
 `;
 
 const fragmentShader = /* glsl */`
+  ${FOG_FRAG_DECL}
   varying vec2 vUv;
   varying vec2 vWorldXZ;
   varying vec3 vColor;
@@ -49,12 +53,13 @@ const fragmentShader = /* glsl */`
     blend *= 0.84 + cloud * 0.20;
     if (blend < 0.01) discard;
 
-    gl_FragColor = vec4(clamp(vColor + variation, 0.0, 1.0), clamp(blend, 0.0, 1.0));
+    gl_FragColor = vec4(clamp(vColor + variation, 0.0, 1.0) * vVisibility, clamp(blend, 0.0, 1.0) * vExplored);
   }
 `;
 
 export function createRoadMaterial(): THREE.ShaderMaterial {
   return new THREE.ShaderMaterial({
+    uniforms: { ...fogUniforms() },
     vertexShader,
     fragmentShader,
     vertexColors: true,

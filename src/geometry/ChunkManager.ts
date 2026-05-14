@@ -10,6 +10,7 @@ import { buildEstuaryGeometry } from './EstuaryChunk.js';
 import { buildScatterMeshes } from './ScatterBuilder.js';
 import type { HexHashGrid } from './HexHashGrid.js';
 import type { ScatterLayerConfig } from './ScatterTypes.js';
+import type { FogData } from './FogData.js';
 
 export interface ChunkManagerOptions {
   map: HexMap;
@@ -38,6 +39,8 @@ export interface ChunkManagerOptions {
   hashGrid?: HexHashGrid;
   /** One config per feature layer defined on the map. */
   scatterLayers?: ScatterLayerConfig[];
+  /** If provided, fog-of-war uniforms are set on all shader materials. */
+  fogData?: FogData;
 }
 
 export class ChunkManager {
@@ -52,6 +55,9 @@ export class ChunkManager {
   private readonly roadMaterial:    THREE.Material | null;
   private readonly hashGrid:        HexHashGrid | null;
   private readonly scatterLayers:   ScatterLayerConfig[] | null;
+  private fogData:                  FogData | null;
+  private hideUnexplored            = true;
+  private dimExplored               = true;
   private readonly geoOptions: ChunkGeometryOptions;
   private readonly waterGeoOptions: WaterGeometryOptions;
   readonly chunkSize: number;
@@ -83,12 +89,61 @@ export class ChunkManager {
     this.roadMaterial    = opts.roadMaterial    ?? null;
     this.hashGrid        = opts.hashGrid        ?? null;
     this.scatterLayers   = opts.scatterLayers   ?? null;
+    this.fogData         = opts.fogData         ?? null;
     this.geoOptions      = opts.geometryOptions      ?? {};
     this.waterGeoOptions = opts.waterGeometryOptions ?? {};
     this.chunkSize  = opts.chunkSize  ?? 32;
     this.loadRadius = opts.loadRadius ?? 4;
     this.chunksX    = Math.ceil(opts.map.width  / this.chunkSize);
     this.chunksY    = Math.ceil(opts.map.height / this.chunkSize);
+  }
+
+  private applyFogToScatterMeshes(meshes: THREE.InstancedMesh[]): void {
+    if (!this.fogData) return;
+    const raw   = this.fogData.rawData;
+    const color = new THREE.Color();
+    const mat   = new THREE.Matrix4();
+    const ZERO  = new THREE.Matrix4().set(0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,1);
+    for (const mesh of meshes) {
+      const ci   = mesh.userData.fogCellIndices   as Int32Array   | undefined;
+      const orig = mesh.userData.originalMatrices as Float32Array | undefined;
+      if (!ci) continue;
+      for (let i = 0; i < ci.length; i++) {
+        const r = raw[ci[i] * 4]     / 255;
+        const e = raw[ci[i] * 4 + 1] / 255;
+        const hidden = this.hideUnexplored && e < 0.5;
+        const brightness = hidden ? 0 : (this.dimExplored ? (0.25 + 0.75 * r) : 1.0);
+        color.setScalar(brightness);
+        mesh.setColorAt(i, color);
+        if (orig) {
+          if (hidden) {
+            mesh.setMatrixAt(i, ZERO);
+          } else {
+            mat.fromArray(orig, i * 16);
+            mesh.setMatrixAt(i, mat);
+          }
+        }
+      }
+      if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+      if (orig) mesh.instanceMatrix.needsUpdate = true;
+    }
+  }
+
+  /** Update instance colors on all loaded scatter chunks to reflect current fog. */
+  private updateScatterFog(): void {
+    for (const meshes of this.scatterChunks.values()) {
+      this.applyFogToScatterMeshes(meshes);
+    }
+  }
+
+  /** Push fog-of-war uniforms onto a ShaderMaterial that supports them. */
+  private applyFog(mat: THREE.Material | null): void {
+    if (!mat || !this.fogData || !(mat instanceof THREE.ShaderMaterial)) return;
+    const u = mat.uniforms;
+    if (!u || !('uFogEnabled' in u)) return;
+    u.uFogData.value     = this.fogData.texture;
+    u.uFogDataSize.value = new THREE.Vector2(this.map.width, this.map.height);
+    u.uFogEnabled.value  = 1;
   }
 
   private key(cx: number, cy: number): string {
@@ -111,12 +166,14 @@ export class ChunkManager {
 
     const b    = this.bounds(cx, cy);
     const { terrain: geo, roads: roadsGeo } = buildChunkGeometry(this.map, this.layout, b, this.geoOptions);
+    this.applyFog(this.material);
     const mesh = new THREE.Mesh(geo, this.material);
     mesh.frustumCulled = true;
     this.scene.add(mesh);
     this.chunks.set(k, mesh);
 
     if (this.waterMaterial) {
+      this.applyFog(this.waterMaterial);
       const wGeo = buildWaterGeometry(this.map, this.layout, b, this.waterGeoOptions);
       if (wGeo) {
         const wMesh = new THREE.Mesh(wGeo, this.waterMaterial);
@@ -127,6 +184,7 @@ export class ChunkManager {
     }
 
     if (this.shoreMaterial) {
+      this.applyFog(this.shoreMaterial);
       const sGeo = buildShoreGeometry(this.map, this.layout, b, this.waterGeoOptions);
       if (sGeo) {
         const sMesh = new THREE.Mesh(sGeo, this.shoreMaterial);
@@ -137,6 +195,7 @@ export class ChunkManager {
     }
 
     if (this.estuaryMaterial) {
+      this.applyFog(this.estuaryMaterial);
       const eGeo = buildEstuaryGeometry(this.map, this.layout, b, this.waterGeoOptions);
       if (eGeo) {
         const eMesh = new THREE.Mesh(eGeo, this.estuaryMaterial);
@@ -147,6 +206,7 @@ export class ChunkManager {
     }
 
     if (this.riverMaterial) {
+      this.applyFog(this.riverMaterial);
       const rGeo = buildRiverGeometry(this.map, this.layout, b, this.waterGeoOptions);
       if (rGeo) {
         const rMesh = new THREE.Mesh(rGeo, this.riverMaterial);
@@ -158,6 +218,7 @@ export class ChunkManager {
     }
 
     if (this.roadMaterial && roadsGeo) {
+      this.applyFog(this.roadMaterial);
       const rdMesh = new THREE.Mesh(roadsGeo, this.roadMaterial);
       rdMesh.frustumCulled = true;
       rdMesh.renderOrder = 2; // draw on top of terrain and water
@@ -170,6 +231,7 @@ export class ChunkManager {
       if (scMeshes.length > 0) {
         for (const m of scMeshes) this.scene.add(m);
         this.scatterChunks.set(k, scMeshes);
+        if (this.fogData) this.applyFogToScatterMeshes(scMeshes);
       }
     }
   }
@@ -233,6 +295,12 @@ export class ChunkManager {
    * Loads chunks within loadRadius, unloads those outside.
    */
   update(camera: THREE.Camera): void {
+    if (this.fogData) {
+      const scatterNeedsUpdate = this.fogData.needsUpdate;
+      this.fogData.update();
+      if (scatterNeedsUpdate) this.updateScatterFog();
+    }
+
     // Rebuild any dirty chunks first
     for (const k of this.dirty) {
       const mesh = this.chunks.get(k);
@@ -318,6 +386,7 @@ export class ChunkManager {
         if (newScMeshes.length > 0) {
           for (const m of newScMeshes) this.scene.add(m);
           this.scatterChunks.set(k, newScMeshes);
+          if (this.fogData) this.applyFogToScatterMeshes(newScMeshes);
         }
       }
 
@@ -375,6 +444,85 @@ export class ChunkManager {
       for (let cx = 0; cx < this.chunksX; cx++) {
         this.loadChunk(cx, cy);
       }
+    }
+  }
+
+  /**
+   * Attach or detach fog-of-war at runtime.
+   * Pass `null` to disable (vVisibility → 1.0 everywhere).
+   */
+  setFogData(fog: FogData | null): void {
+    this.fogData = fog;
+    const mats = [
+      this.material,
+      this.waterMaterial,
+      this.shoreMaterial,
+      this.estuaryMaterial,
+      this.riverMaterial,
+      this.roadMaterial,
+    ];
+    for (const mat of mats) {
+      if (!mat || !(mat instanceof THREE.ShaderMaterial)) continue;
+      const u = mat.uniforms;
+      if (!u || !('uFogEnabled' in u)) continue;
+      if (fog) {
+        u.uFogData.value     = fog.texture;
+        u.uFogDataSize.value = new THREE.Vector2(this.map.width, this.map.height);
+        u.uFogEnabled.value  = 1;
+      } else {
+        u.uFogEnabled.value = 0;
+      }
+    }
+
+    if (fog) {
+      this.updateScatterFog();
+    } else {
+      // Fog disabled: restore all instances to white + original matrices.
+      const white = new THREE.Color(1, 1, 1);
+      const mat   = new THREE.Matrix4();
+      for (const meshes of this.scatterChunks.values()) {
+        for (const mesh of meshes) {
+          const ci   = mesh.userData.fogCellIndices   as Int32Array   | undefined;
+          const orig = mesh.userData.originalMatrices as Float32Array | undefined;
+          if (!ci) continue;
+          for (let i = 0; i < ci.length; i++) {
+            mesh.setColorAt(i, white);
+            if (orig) { mat.fromArray(orig, i * 16); mesh.setMatrixAt(i, mat); }
+          }
+          if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+          if (orig) mesh.instanceMatrix.needsUpdate = true;
+        }
+      }
+    }
+  }
+
+  /** Toggle whether unexplored cells are hidden. Independent of dimming. */
+  setHideUnexplored(enabled: boolean): void {
+    this.hideUnexplored = enabled;
+    this._pushFogUniform('uHideUnexplored', enabled ? 1 : 0);
+    if (this.fogData) this.updateScatterFog();
+  }
+
+  /** Toggle whether explored-but-not-visible cells are dimmed. Independent of hide. */
+  setDimExplored(enabled: boolean): void {
+    this.dimExplored = enabled;
+    this._pushFogUniform('uDimExplored', enabled ? 1 : 0);
+    if (this.fogData) this.updateScatterFog();
+  }
+
+  private _pushFogUniform(name: string, value: number): void {
+    const mats = [
+      this.material,
+      this.waterMaterial,
+      this.shoreMaterial,
+      this.estuaryMaterial,
+      this.riverMaterial,
+      this.roadMaterial,
+    ];
+    for (const mat of mats) {
+      if (!mat || !(mat instanceof THREE.ShaderMaterial)) continue;
+      const u = mat.uniforms;
+      if (u && name in u) u[name].value = value;
     }
   }
 

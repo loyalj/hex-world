@@ -216,3 +216,50 @@ export function getMovementRange(
 
   return reachable;
 }
+
+// ---------------------------------------------------------------------------
+// Visibility range (fog-of-war BFS)
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns all cells visible from `center` within `range` steps.
+ *
+ * Simple BFS with no cost function — every step counts as 1. Cells beyond
+ * `range` steps are excluded. The center cell is always included (at distance 0).
+ * No line-of-sight blocking is applied; add that by filtering the result.
+ *
+ * @example
+ * const visible = getVisibleCells(
+ *   offsetToHex(unitCol, unitRow),
+ *   2,
+ *   map,
+ * );
+ */
+export function getVisibleCells(
+  center: HexCoord,
+  range: number,
+  map: { width: number; height: number },
+): HexCoord[] {
+  const visited  = new Set<string>();
+  const visible: HexCoord[] = [];
+  const queue: Array<{ node: HexCoord; dist: number }> = [{ node: center, dist: 0 }];
+
+  visited.add(key(center));
+
+  while (queue.length > 0) {
+    const { node, dist } = queue.shift()!;
+    visible.push(node);
+
+    if (dist >= range) continue;
+
+    for (const nb of hexNeighbors(node)) {
+      if (!inBounds(nb, map)) continue;
+      const nbk = key(nb);
+      if (visited.has(nbk)) continue;
+      visited.add(nbk);
+      queue.push({ node: nb, dist: dist + 1 });
+    }
+  }
+
+  return visible;
+}

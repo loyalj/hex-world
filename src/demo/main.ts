@@ -21,6 +21,9 @@ import { pickHexFromMeshes } from '../geometry/HexPicking.js';
 import { hexToWorld, hexCorners } from '../math/HexLayout.js';
 import { offsetToHex } from '../math/HexCoord.js';
 import { TerrainType } from '../map/HexCell.js';
+import { FogData } from '../geometry/FogData.js';
+import { getVisibleCells, findPath, getMovementRange, type MoveCostFn } from '../pathfinding/Pathfinding.js';
+import { hexToOffset } from '../math/HexCoord.js';
 
 /** Change this one constant to switch terrain rendering mode. */
 const TERRAIN_COLOR_MODE: TerrainColorMode = 'splat';
@@ -171,6 +174,142 @@ async function start() {
     [{ geometry: new THREE.ConeGeometry(0.24, 1.0, 7), material: treeMat, yOffset: 0.5 }],
   ];
 
+  // --- Pathfinding overlay ---
+  const MOVE_BUDGET = 4;
+
+  const moveCost: MoveCostFn = (_from, to) => {
+    const { col, row } = hexToOffset(to);
+    if (!map.inBounds(col, row)) return Infinity;
+    // When unexplored cells are hidden, treat them as impassable.
+    if (hideUnexplored && fogData.rawData[(row * MAP_WIDTH + col) * 4 + 1] === 0) return Infinity;
+    if (map.getTerrain(col, row) === TerrainType.Water) return Infinity;
+    return 1;
+  };
+
+  let selectedCell: { col: number; row: number } | null = null;
+  let lastHoveredForPath: { col: number; row: number } | null = null;
+
+  const rangeMat = new THREE.MeshBasicMaterial({
+    color: 0x4488ff, transparent: true, opacity: 0.25,
+    depthWrite: false, depthTest: false, side: THREE.DoubleSide,
+  });
+  const rangeMesh = new THREE.Mesh(new THREE.BufferGeometry(), rangeMat);
+  rangeMesh.renderOrder = 6;
+  rangeMesh.visible = false;
+  scene.add(rangeMesh);
+
+  const pathMat = new THREE.MeshBasicMaterial({
+    color: 0xffaa22, transparent: true, opacity: 0.55,
+    depthWrite: false, depthTest: false, side: THREE.DoubleSide,
+  });
+  const pathOverlay = new THREE.Mesh(new THREE.BufferGeometry(), pathMat);
+  pathOverlay.renderOrder = 7;
+  pathOverlay.visible = false;
+  scene.add(pathOverlay);
+
+  const selectedMat = new THREE.MeshBasicMaterial({
+    color: 0x88ff44, transparent: true, opacity: 0.6,
+    depthWrite: false, depthTest: false, side: THREE.DoubleSide,
+  });
+  const selectedMesh = new THREE.Mesh(indicatorGeo.clone(), selectedMat);
+  selectedMesh.renderOrder = 8;
+  selectedMesh.visible = false;
+  scene.add(selectedMesh);
+
+  function buildHighlightGeo(cells: { col: number; row: number }[], yOffset = 0.05): THREE.BufferGeometry {
+    const verts: number[] = [];
+    for (const { col, row } of cells) {
+      const hex = offsetToHex(col, row);
+      const wp  = hexToWorld(layout, hex);
+      const y   = map.getElevation(col, row) * 0.5 + yOffset;
+      const cs  = hexCorners(layout, hex);
+      for (let i = 0; i < 6; i++) {
+        const c1 = cs[i], c2 = cs[(i + 1) % 6];
+        verts.push(wp.x, y, wp.z, c1.x, y, c1.z, c2.x, y, c2.z);
+      }
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(verts), 3));
+    return geo;
+  }
+
+  function selectCell(cell: { col: number; row: number }): void {
+    selectedCell = cell;
+    const hex = offsetToHex(cell.col, cell.row);
+    const wp  = hexToWorld(layout, hex);
+    selectedMesh.position.set(wp.x, map.getElevation(cell.col, cell.row) * 0.5 + 0.03, wp.z);
+    selectedMesh.visible = true;
+
+    const reachable = getMovementRange(hex, MOVE_BUDGET, moveCost, map);
+    rangeMesh.geometry.dispose();
+    rangeMesh.geometry = buildHighlightGeo(reachable.map(h => hexToOffset(h)), 0.04);
+    rangeMesh.visible = true;
+
+    pathOverlay.geometry.dispose();
+    pathOverlay.geometry = new THREE.BufferGeometry();
+    pathOverlay.visible = false;
+    lastHoveredForPath = null;
+  }
+
+  function clearSelection(): void {
+    selectedCell = null;
+    selectedMesh.visible = false;
+    rangeMesh.geometry.dispose();
+    rangeMesh.geometry = new THREE.BufferGeometry();
+    rangeMesh.visible = false;
+    pathOverlay.geometry.dispose();
+    pathOverlay.geometry = new THREE.BufferGeometry();
+    pathOverlay.visible = false;
+    lastHoveredForPath = null;
+  }
+
+  function updatePathPreview(target: { col: number; row: number }): void {
+    if (!selectedCell) return;
+    if (lastHoveredForPath?.col === target.col && lastHoveredForPath?.row === target.row) return;
+    lastHoveredForPath = target;
+    const path = findPath(offsetToHex(selectedCell.col, selectedCell.row), offsetToHex(target.col, target.row), moveCost, map);
+    pathOverlay.geometry.dispose();
+    if (path && path.length > 1) {
+      pathOverlay.geometry = buildHighlightGeo(path.map(h => hexToOffset(h)), 0.06);
+      pathOverlay.visible = true;
+    } else {
+      pathOverlay.geometry = new THREE.BufferGeometry();
+      pathOverlay.visible = false;
+    }
+  }
+
+  // --- Fog of war ---
+  const fogData = new FogData(MAP_WIDTH, MAP_HEIGHT);
+  let hideUnexplored = true;  // E: whether unexplored cells are hidden
+  let dimExplored    = true;  // F: whether explored cells are dimmed
+
+  const FOG_REVEAL_RANGE = 3;
+
+  // Cells currently granting visibility (the "unit's" position).
+  // Tracked so we can decrease visibility when the unit moves.
+  let visibleCells: { col: number; row: number }[] = [];
+
+  function revealAt(col: number, row: number): void {
+    // Remove visibility from previous position.
+    for (const { col: oc, row: or } of visibleCells) {
+      fogData.decreaseVisibility(oc, or);
+    }
+    // Grant visibility at new position.
+    const cells = getVisibleCells(offsetToHex(col, row), FOG_REVEAL_RANGE, map);
+    visibleCells = [];
+    for (const c of cells) {
+      const nc = c.q + (c.r - (c.r & 1)) / 2;
+      const nr = c.r;
+      if (map.inBounds(nc, nr)) {
+        fogData.increaseVisibility(nc, nr);
+        visibleCells.push({ col: nc, row: nr });
+      }
+    }
+  }
+
+  // Seed initial visibility from map center
+  revealAt(Math.floor(MAP_WIDTH / 2), Math.floor(MAP_HEIGHT / 2));
+
   const chunkManager = new ChunkManager({
     map,
     layout,
@@ -187,20 +326,49 @@ async function start() {
     roadMaterial,
     hashGrid,
     scatterLayers: [pineLayer],
+    fogData,
   });
+
+  const resetFog = () => {
+    visibleCells = [];  // prevent decreaseVisibility against stale indices after reset
+    fogData.reset();
+    revealAt(Math.floor(MAP_WIDTH / 2), Math.floor(MAP_HEIGHT / 2));
+  };
 
   // --- Keyboard shortcuts ---
   window.addEventListener('keydown', (e) => {
-    if (e.key === 'r' || e.key === 'R') {
-      // New random seed, same generator
+    if (e.key === 'Escape') {
+      clearSelection();
+    } else if (e.key === 'r' || e.key === 'R') {
       seed = Math.floor(Math.random() * 0xffffffff);
       runGenerator();
+      resetFog();
+      clearSelection();
       chunkManager.dispose();
     } else if (e.key === 'g' || e.key === 'G') {
-      // Cycle to next generator, keep same seed
       activeGenIndex = (activeGenIndex + 1) % GENERATORS.length;
       runGenerator();
+      resetFog();
+      clearSelection();
       chunkManager.dispose();
+    } else if (e.key === 'e' || e.key === 'E') {
+      hideUnexplored = !hideUnexplored;
+      chunkManager.setHideUnexplored(hideUnexplored);
+    } else if (e.key === 'f' || e.key === 'F') {
+      dimExplored = !dimExplored;
+      chunkManager.setDimExplored(dimExplored);
+    }
+  });
+
+  renderer.domElement.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0 || !hoverCell) return;
+    revealAt(hoverCell.col, hoverCell.row);
+    if (map.getTerrain(hoverCell.col, hoverCell.row) === TerrainType.Water) {
+      clearSelection();
+    } else if (selectedCell?.col === hoverCell.col && selectedCell?.row === hoverCell.row) {
+      clearSelection();
+    } else {
+      selectCell(hoverCell);
     }
   });
 
@@ -232,6 +400,7 @@ async function start() {
       const wp = hexToWorld(layout, offsetToHex(picked.col, picked.row));
       hoverMesh.position.set(wp.x, map.getElevation(picked.col, picked.row) * 0.5 + 0.02, wp.z);
       hoverMesh.visible = true;
+      if (selectedCell) updatePathPreview(picked);
     } else {
       hoverMesh.visible = false;
     }
@@ -242,6 +411,9 @@ async function start() {
         `${TERRAIN_NAMES[map.getTerrain(hoverCell.col, hoverCell.row)] ?? '?'}  ` +
         `elev ${map.getElevation(hoverCell.col, hoverCell.row)}`
       : `Hover:     —`;
+    const selLine = selectedCell
+      ? `Selected:  [${selectedCell.col}, ${selectedCell.row}]  budget ${MOVE_BUDGET}  [Esc] clear`
+      : `Selected:  — (click land to select)`;
     hud.textContent =
       `FPS:       ${fps}\n` +
       `Generator: ${gen.name}  [G] cycle\n` +
@@ -251,7 +423,9 @@ async function start() {
       `Total:     ${chunkManager.chunksX * chunkManager.chunksY} chunks in map\n` +
       `Zoom:      ${controls.currentDistance.toFixed(1)}  (min ${controls.minDist} / max ${controls.maxDist})\n` +
       `Tilt:      ${controls.currentPitchDeg.toFixed(1)}°  (min ${controls.minPitchDeg}° / max ${controls.maxPitchDeg}°)\n` +
-      `\n${hoverLine}`;
+      `Hide unexplored: ${hideUnexplored ? 'ON  [E] toggle' : 'OFF  [E] toggle'}\n` +
+      `Dim explored:    ${dimExplored    ? 'ON  [F] toggle' : 'OFF  [F] toggle'}\n` +
+      `\n${selLine}\n${hoverLine}`;
 
     renderer.render(scene, camera);
   }

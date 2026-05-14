@@ -46,9 +46,11 @@ export function buildShoreGeometry(
   const hexCount = (colEnd - colStart) * (rowEnd - rowStart);
   const maxVerts = hexCount * 60;
 
-  const positions = new Float32Array(maxVerts * 3);
-  const uvs       = new Float32Array(maxVerts * 2);
-  let vi = 0, uvi = 0;
+  const positions   = new Float32Array(maxVerts * 3);
+  const uvs         = new Float32Array(maxVerts * 2);
+  const cellIndices = new Float32Array(maxVerts);
+  let vi = 0, uvi = 0, cii = 0;
+  let curCi = 0;
 
   const perturbSample = (x: number, z: number) =>
     sampleNoise(x * noiseScale, z * noiseScale);
@@ -74,6 +76,7 @@ export function buildShoreGeometry(
     positions[vi++] = z + dz;
     uvs[uvi++] = u;
     uvs[uvi++] = v;
+    cellIndices[cii++] = curCi;
   };
 
   const addTri = (
@@ -109,6 +112,7 @@ export function buildShoreGeometry(
       if (!map.inBounds(col, row)) continue;
       if (map.getTerrain(col, row) !== TerrainType.Water) continue;
 
+      curCi = row * map.width + col;
       const q      = col - (row - (row & 1)) / 2;
       const center = hexToWorld(layout, { q, r: row });
 
@@ -192,7 +196,8 @@ export function buildShoreGeometry(
 
   const n   = vi / 3;
   const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.BufferAttribute(positions.subarray(0, n * 3), 3));
-  geo.setAttribute('uv',       new THREE.BufferAttribute(uvs.subarray(0, n * 2), 2));
+  geo.setAttribute('position',  new THREE.BufferAttribute(positions.subarray(0, n * 3), 3));
+  geo.setAttribute('uv',        new THREE.BufferAttribute(uvs.subarray(0, n * 2), 2));
+  geo.setAttribute('cellIndex', new THREE.BufferAttribute(cellIndices.subarray(0, n), 1));
   return geo;
 }

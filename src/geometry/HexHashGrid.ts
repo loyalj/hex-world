@@ -2,43 +2,38 @@ export interface HexHash {
   a: number; b: number; c: number; d: number; e: number;
 }
 
-const GRID_SIZE  = 256;
-const GRID_SCALE = 0.25;
-
-function mulberry32(seed: number): () => number {
-  let s = seed >>> 0;
-  return () => {
-    s += 0x6D2B79F5;
-    let t = s;
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-
+/**
+ * Deterministic per-position hash sampler.
+ *
+ * Positions are quantized to 1/8 world-unit cells before hashing, which is
+ * fine enough that every scatter slot gets a unique hash (minimum slot spacing
+ * is ~0.58 world units) while remaining fully stable across chunk boundaries.
+ *
+ * Replaces the old 256×256 pre-allocated grid, which quantized at 4 world
+ * units and produced visible checkerboard block patterns in scatter placement.
+ */
 export class HexHashGrid {
-  private readonly data: Float32Array;
+  private readonly seed: number;
 
   constructor(seed: number) {
-    this.data = new Float32Array(GRID_SIZE * GRID_SIZE * 5);
-    const rand = mulberry32(seed);
-    for (let i = 0; i < this.data.length; i++) {
-      this.data[i] = rand() * 0.999;
-    }
+    this.seed = seed >>> 0;
   }
 
   sample(worldX: number, worldZ: number): HexHash {
-    let x = Math.floor(worldX * GRID_SCALE) % GRID_SIZE;
-    let z = Math.floor(worldZ * GRID_SCALE) % GRID_SIZE;
-    if (x < 0) x += GRID_SIZE;
-    if (z < 0) z += GRID_SIZE;
-    const i = (z * GRID_SIZE + x) * 5;
+    const xi = Math.floor(worldX * 8) | 0;
+    const zi = Math.floor(worldZ * 8) | 0;
     return {
-      a: this.data[i],
-      b: this.data[i + 1],
-      c: this.data[i + 2],
-      d: this.data[i + 3],
-      e: this.data[i + 4],
+      a: this._hash(xi, zi, 0),
+      b: this._hash(xi, zi, 1),
+      c: this._hash(xi, zi, 2),
+      d: this._hash(xi, zi, 3),
+      e: this._hash(xi, zi, 4),
     };
+  }
+
+  private _hash(x: number, z: number, channel: number): number {
+    let h = (Math.imul(x, 374761393) + Math.imul(z, 668265263) + Math.imul(this.seed ^ (channel * 2246822519 | 0), 2654435761)) | 0;
+    h = Math.imul(h ^ (h >>> 13), 1274126177);
+    return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
   }
 }

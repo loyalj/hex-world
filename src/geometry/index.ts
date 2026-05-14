@@ -2,6 +2,7 @@ export * from './HexGeometry.js';
 export * from './HexPicking.js';
 export * from './HexChunk.js';
 export * from './ChunkManager.js';
+export * from './FogData.js';
 export * from './WaterMaterial.js';
 export * from './WaterShoreMaterial.js';
 export * from './EstuaryMaterial.js';
