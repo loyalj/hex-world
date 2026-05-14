@@ -137,7 +137,7 @@ Follows the structure of the [Catlike Coding Hex Map tutorial series](https://ca
 - [x] `getVisibleCells(center, range, map)` in pathfinding module — BFS, no cost function, returns all cells within `range` steps
 - [x] Demo: `[F]` toggles fog; click to reveal cells (range 3 BFS) around hovered hex; initial reveal seeded from map center
 - [x] Line-of-sight blocking — `hasLineOfSight(from, to, map, eyeHeight?)` traces the hex line and checks whether any intermediate cell's elevation rises above the sight line; `eyeHeight` defaults to 1.5 world units above terrain surface; demo shows `LOS: yes/blocked` in HUD when a unit is selected and a cell is hovered
-- [ ] Exploration reveal animation (smooth fade-in)
+- [x] Exploration reveal animation (smooth fade-in)
 
 ---
 

@@ -43,6 +43,18 @@ export interface ChunkManagerOptions {
   fogData?: FogData;
 }
 
+/**
+ * Manages the Three.js meshes for a `HexMap` using a chunk-based streaming system.
+ *
+ * The map is divided into NxN cell chunks. `update(camera)` loads chunks within
+ * `loadRadius` of the camera each frame and unloads those that have moved out of
+ * range. Each chunk is a single merged `BufferGeometry` draw call for terrain,
+ * with optional separate meshes for water, shore, estuary, rivers, roads, and
+ * scatter features.
+ *
+ * Call `markDirty(col, row)` after modifying map data to trigger a geometry rebuild
+ * for the affected chunk on the next `update()`.
+ */
 export class ChunkManager {
   private readonly map: HexMap;
   private readonly layout: HexLayout;
@@ -110,9 +122,9 @@ export class ChunkManager {
       if (!ci) continue;
       for (let i = 0; i < ci.length; i++) {
         const r = raw[ci[i] * 4]     / 255;
-        const e = raw[ci[i] * 4 + 1] / 255;
-        const hidden = this.hideUnexplored && e < 0.5;
-        const brightness = hidden ? 0 : (this.dimExplored ? (0.25 + 0.75 * r) : 1.0);
+        const b = raw[ci[i] * 4 + 2] / 255; // B channel = reveal animation progress 0→1
+        const hidden = this.hideUnexplored && b < 0.01;
+        const brightness = hidden ? 0 : b * (this.dimExplored ? (0.25 + 0.75 * r) : 1.0);
         color.setScalar(brightness);
         mesh.setColorAt(i, color);
         if (orig) {
@@ -294,11 +306,11 @@ export class ChunkManager {
    * Call every frame with the current camera.
    * Loads chunks within loadRadius, unloads those outside.
    */
-  update(camera: THREE.Camera): void {
+  update(camera: THREE.Camera, dt = 0): void {
     if (this.fogData) {
-      const scatterNeedsUpdate = this.fogData.needsUpdate;
-      this.fogData.update();
-      if (scatterNeedsUpdate) this.updateScatterFog();
+      const scatterNeedsRefresh = this.fogData.needsUpdate || this.fogData.isAnimating;
+      this.fogData.update(dt);
+      if (scatterNeedsRefresh) this.updateScatterFog();
     }
 
     // Rebuild any dirty chunks first
@@ -555,6 +567,7 @@ export class ChunkManager {
     return this.waterChunks.size;
   }
 
+  /** Number of shore foam meshes currently in the scene. */
   get loadedShoreChunkCount(): number {
     return this.shoreChunks.size;
   }

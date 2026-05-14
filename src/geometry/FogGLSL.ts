@@ -18,7 +18,7 @@ export const FOG_VERT_BODY = /* glsl */`
     float _fx = mod(cellIndex, uFogDataSize.x);
     float _fy = floor(cellIndex / uFogDataSize.x);
     vec4 _fd = texture2D(uFogData, (vec2(_fx, _fy) + 0.5) / uFogDataSize);
-    vExplored   = uHideUnexplored > 0.5 ? _fd.g : 1.0;
+    vExplored   = uHideUnexplored > 0.5 ? _fd.b : 1.0;
     vVisibility = uDimExplored    > 0.5 ? mix(0.25, 1.0, _fd.r) : 1.0;
   } else {
     vVisibility = 1.0;

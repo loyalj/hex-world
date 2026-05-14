@@ -1,3 +1,7 @@
+/**
+ * Built-in terrain types stored as `Uint8` values (0–5).
+ * Values 6–255 are available for custom terrain — supply a shader that handles them.
+ */
 export const enum TerrainType {
   Grassland = 0,
   Desert    = 1,

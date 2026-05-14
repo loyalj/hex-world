@@ -506,7 +506,7 @@ async function start() {
 
     controls.update();
     unitManager.update(dt);
-    chunkManager.update(camera);
+    chunkManager.update(camera, dt);
 
     const t = now / 1000;
     waterMaterial.uniforms.uTime.value   = t;

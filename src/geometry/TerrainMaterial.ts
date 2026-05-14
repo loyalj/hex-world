@@ -35,7 +35,7 @@ const vertexShader = /* glsl */`
       vec4 fd0 = texture(uFogData, fogCellUV(cellIndex.x));
       vec4 fd1 = texture(uFogData, fogCellUV(cellIndex.y));
       vec4 fd2 = texture(uFogData, fogCellUV(cellIndex.z));
-      float explored = (fd0.g + fd1.g + fd2.g) / 3.0;
+      float explored = (fd0.b + fd1.b + fd2.b) / 3.0;
       float vis      = (fd0.r + fd1.r + fd2.r) / 3.0;
       vExplored   = uHideUnexplored > 0.5 ? explored : 1.0;
       vVisibility = uDimExplored    > 0.5 ? mix(0.25, 1.0, vis) : 1.0;
@@ -107,8 +107,8 @@ const fragmentShader = /* glsl */`
     float cliff = 1.0 - abs(n.y);
     c.rgb *= 1.0 - cliff * 0.125;
 
-    if (vExplored < 0.5) discard;
-    fragColor = vec4(c.rgb * light * vVisibility, 1.0);
+    if (vExplored < 0.01) discard;
+    fragColor = vec4(c.rgb * light * vVisibility * vExplored, 1.0);
   }
 `;
 

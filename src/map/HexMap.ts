@@ -53,10 +53,12 @@ export class HexMap {
     }
   }
 
+  /** Total number of cells (`width × height`). */
   get cellCount(): number {
     return this.width * this.height;
   }
 
+  /** Returns `true` if (col, row) is within the map boundaries. */
   inBounds(col: number, row: number): boolean {
     return col >= 0 && col < this.width && row >= 0 && row < this.height;
   }
@@ -67,11 +69,19 @@ export class HexMap {
 
   // --- Feature layers ---
 
+  /**
+   * Returns the feature density level (0–3) for the given cell and scatter layer.
+   * Returns 0 if the layer index is out of range or no feature layers were allocated.
+   */
   getFeatureLevel(col: number, row: number, layer: number): number {
     if (!this.featureData || layer >= this.featureLayerCount) return 0;
     return this.featureData[(row * this.width + col) * this.featureLayerCount + layer];
   }
 
+  /**
+   * Sets the feature density level for the given cell and scatter layer.
+   * `value` is clamped to 0–3 (2-bit). No-op if the layer index is out of range.
+   */
   setFeatureLevel(col: number, row: number, layer: number, value: number): void {
     if (!this.featureData || layer >= this.featureLayerCount) return;
     this.featureData[(row * this.width + col) * this.featureLayerCount + layer] = value & 3;
@@ -99,18 +109,22 @@ export class HexMap {
 
   // --- Flags ---
 
+  /** Returns the raw flag bitmask for a cell. Use `hasFlag` for individual flag checks. */
   getFlags(col: number, row: number): number {
     return this.uint8[this.index(col, row) + OFFSET_FLAGS];
   }
 
+  /** Sets one or more flag bits on a cell (OR). */
   setFlag(col: number, row: number, flag: number): void {
     this.uint8[this.index(col, row) + OFFSET_FLAGS] |= flag;
   }
 
+  /** Clears one or more flag bits on a cell (AND NOT). */
   clearFlag(col: number, row: number, flag: number): void {
     this.uint8[this.index(col, row) + OFFSET_FLAGS] &= ~flag;
   }
 
+  /** Returns `true` if all bits in `flag` are set on the cell. */
   hasFlag(col: number, row: number, flag: number): boolean {
     return (this.uint8[this.index(col, row) + OFFSET_FLAGS] & flag) !== 0;
   }
@@ -122,18 +136,22 @@ export class HexMap {
     return this.uint8[this.index(col, row) + OFFSET_RIVER_DIR];
   }
 
+  /** Returns `true` if the cell has any river data (incoming or outgoing). */
   hasRiver(col: number, row: number): boolean {
     return this.riverByte(col, row) !== 0;
   }
 
+  /** Returns `true` if a river flows *into* this cell from a neighbour. */
   hasIncomingRiver(col: number, row: number): boolean {
     return (this.riverByte(col, row) & 0x07) !== 0;
   }
 
+  /** Returns `true` if a river flows *out of* this cell to a neighbour. */
   hasOutgoingRiver(col: number, row: number): boolean {
     return (this.riverByte(col, row) & 0x38) !== 0;
   }
 
+  /** Returns `true` if the cell is a river source or terminus (has exactly one of incoming/outgoing). */
   hasRiverBeginOrEnd(col: number, row: number): boolean {
     const b = this.riverByte(col, row);
     return ((b & 0x07) !== 0) !== ((b & 0x38) !== 0);
@@ -177,10 +195,12 @@ export class HexMap {
   // --- Roads ---
   // One bit per edge direction (0–5) packed into a single byte per cell.
 
+  /** Returns `true` if a road passes through the given edge (0–5) of the cell. */
   hasRoadThroughEdge(col: number, row: number, edgeIndex: number): boolean {
     return (this.roadBits[row * this.width + col] & (1 << edgeIndex)) !== 0;
   }
 
+  /** Returns `true` if the cell has a road on any edge. */
   hasRoads(col: number, row: number): boolean {
     return this.roadBits[row * this.width + col] !== 0;
   }
@@ -197,6 +217,7 @@ export class HexMap {
 
   // --- Iteration ---
 
+  /** Iterates over every cell in row-major order, calling `cb(col, row)` for each. */
   forEach(cb: (col: number, row: number) => void): void {
     for (let row = 0; row < this.height; row++) {
       for (let col = 0; col < this.width; col++) {

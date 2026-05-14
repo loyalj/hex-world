@@ -1,3 +1,8 @@
+/**
+ * Five independent pseudo-random values in [0, 1) for a world-space position.
+ * Used by the scatter system to decide whether to place a feature and which
+ * variant/tier to pick. Each channel is uncorrelated from the others.
+ */
 export interface HexHash {
   a: number; b: number; c: number; d: number; e: number;
 }
@@ -19,6 +24,11 @@ export class HexHashGrid {
     this.seed = seed >>> 0;
   }
 
+  /**
+   * Returns five independent hash values for the given world-space position.
+   * Results are stable across frames and chunk boundaries — the same (x, z)
+   * always produces the same hash for a given seed.
+   */
   sample(worldX: number, worldZ: number): HexHash {
     const xi = Math.floor(worldX * 8) | 0;
     const zi = Math.floor(worldZ * 8) | 0;

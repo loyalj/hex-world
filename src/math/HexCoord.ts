@@ -1,12 +1,15 @@
 /**
- * Cube coordinates: q + r + s === 0 always.
- * s is derived (-q - r) and not stored to save memory.
+ * A position in cube (axial) coordinates. The third axis `s = -q - r` is derived
+ * and not stored. All hex math functions operate on this type.
+ *
+ * Convert to/from offset grid coordinates with {@link offsetToHex} / {@link hexToOffset}.
  */
 export interface HexCoord {
   readonly q: number;
   readonly r: number;
 }
 
+/** Creates a `HexCoord` from axial `q` and `r` components. */
 export function hexCoord(q: number, r: number): HexCoord {
   return { q, r };
 }
@@ -15,26 +18,32 @@ export function s(h: HexCoord): number {
   return -h.q - h.r;
 }
 
+/** Returns the vector sum `a + b`. */
 export function hexAdd(a: HexCoord, b: HexCoord): HexCoord {
   return { q: a.q + b.q, r: a.r + b.r };
 }
 
+/** Returns the vector difference `a - b`. */
 export function hexSubtract(a: HexCoord, b: HexCoord): HexCoord {
   return { q: a.q - b.q, r: a.r - b.r };
 }
 
+/** Returns `h` scaled by `factor`. */
 export function hexScale(h: HexCoord, factor: number): HexCoord {
   return { q: h.q * factor, r: h.r * factor };
 }
 
+/** Returns the distance from the origin to `h` in cells (hex Manhattan distance). */
 export function hexLength(h: HexCoord): number {
   return (Math.abs(h.q) + Math.abs(h.r) + Math.abs(s(h))) / 2;
 }
 
+/** Returns the distance between `a` and `b` in cells (steps along hex edges). */
 export function hexDistance(a: HexCoord, b: HexCoord): number {
   return hexLength(hexSubtract(a, b));
 }
 
+/** Returns `true` if `a` and `b` refer to the same cell. */
 export function hexEquals(a: HexCoord, b: HexCoord): boolean {
   return a.q === b.q && a.r === b.r;
 }
@@ -49,15 +58,21 @@ export const HEX_DIRECTIONS: readonly HexCoord[] = [
   { q: 0,  r: 1  },
 ];
 
+/** Returns the neighbour of `h` in the given direction (0–5, clockwise from East). */
 export function hexNeighbor(h: HexCoord, direction: number): HexCoord {
   return hexAdd(h, HEX_DIRECTIONS[((direction % 6) + 6) % 6]);
 }
 
+/** Returns all 6 neighbours of `h`. */
 export function hexNeighbors(h: HexCoord): HexCoord[] {
   return HEX_DIRECTIONS.map(d => hexAdd(h, d));
 }
 
-// All hexes within a given radius (inclusive)
+/**
+ * Returns all cells within `radius` steps of `center` (inclusive).
+ * The center cell is always included (at radius 0).
+ * Result count: `3 * radius * (radius + 1) + 1`.
+ */
 export function hexRange(center: HexCoord, radius: number): HexCoord[] {
   const results: HexCoord[] = [];
   for (let q = -radius; q <= radius; q++) {
@@ -70,13 +85,20 @@ export function hexRange(center: HexCoord, radius: number): HexCoord[] {
   return results;
 }
 
-// Offset coordinate conversions (odd-r offset, pointy-top)
+/**
+ * Converts offset (col, row) grid coordinates to cube coordinates.
+ * Uses odd-row offset layout (pointy-top hexes).
+ */
 export function offsetToHex(col: number, row: number): HexCoord {
   const q = col - (row - (row & 1)) / 2;
   const r = row;
   return { q, r };
 }
 
+/**
+ * Converts cube coordinates back to offset (col, row) grid coordinates.
+ * Uses odd-row offset layout (pointy-top hexes).
+ */
 export function hexToOffset(h: HexCoord): { col: number; row: number } {
   const col = h.q + (h.r - (h.r & 1)) / 2;
   const row = h.r;
@@ -110,6 +132,11 @@ export function hexLerp(a: HexCoord, b: HexCoord, t: number): { q: number; r: nu
   };
 }
 
+/**
+ * Returns all cells on the straight line from `a` to `b`, inclusive.
+ * Uses fractional hex lerp + rounding, so the result follows the natural hex grid line.
+ * Result length: `hexDistance(a, b) + 1`.
+ */
 export function hexLine(a: HexCoord, b: HexCoord): HexCoord[] {
   const n = hexDistance(a, b);
   const results: HexCoord[] = [];

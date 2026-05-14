@@ -36,6 +36,14 @@ export function fbm(x: number, z: number, octaves: number): number {
   return value / maxValue;
 }
 
+/**
+ * Samples smooth 2D value noise at (x, z) and returns four independent channels,
+ * each in [0, 1]. Scale coordinates by a noise frequency before passing:
+ * `sampleNoise(worldX * 0.05, worldZ * 0.05)`.
+ *
+ * Channels are used separately by the terrain builder for XZ perturbation (channels
+ * 0–1), per-cell Y offset (channel 2), and texture blend weights (channel 3).
+ */
 export function sampleNoise(x: number, z: number): [number, number, number, number] {
   const ix = Math.floor(x);
   const iz = Math.floor(z);

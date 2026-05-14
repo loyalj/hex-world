@@ -12,31 +12,18 @@ const _coplanar  = new THREE.Vector3();
 const _hits:     THREE.Intersection[] = [];
 
 /**
- * Converts a mouse position to a hex cell (col, row) by raycasting against a
- * horizontal plane at `planeY` (default 0).
- *
- * Returns null if the ray misses the plane or the hit is outside the map bounds.
- *
- * Safe to call on every mousemove — no heap allocation.
- *
- * @example
- * canvas.addEventListener('pointermove', e => {
- *   const cell = pickHex(e.clientX, e.clientY, renderer.domElement, camera, layout, map);
- *   if (cell) highlight(cell.col, cell.row);
- * });
- */
-/**
  * Picks a hex cell by raycasting against the actual terrain meshes.
- * More accurate than pickHex (especially at low camera angles and over elevated terrain)
+ * More accurate than `pickHex` — especially at low camera angles and over elevated terrain —
  * because it hits the real geometry rather than a flat plane.
  *
- * Pass `chunkManager.terrainMeshes` as the meshes argument.
- * Returns null if the ray misses all meshes or the hit is outside the map bounds.
+ * Pass `chunkManager.terrainMeshes` as the `meshes` argument.
+ * Returns `null` if the ray misses all meshes or the hit is outside the map bounds.
  *
- * Safe to call on every frame — uses a pre-allocated hit buffer.
+ * Safe to call every frame — uses a pre-allocated intersection buffer.
  *
  * @example
  * const cell = pickHexFromMeshes(e.clientX, e.clientY, renderer.domElement, camera, layout, map, chunkManager.terrainMeshes);
+ * if (cell) console.log(cell.col, cell.row);
  */
 export function pickHexFromMeshes(
   clientX: number,
@@ -68,6 +55,20 @@ export function pickHexFromMeshes(
   return { col, row };
 }
 
+/**
+ * Picks a hex cell by raycasting against a horizontal plane at `planeY` (default 0).
+ *
+ * Faster than `pickHexFromMeshes` but drifts at low camera angles over elevated terrain.
+ * Useful for flat maps or water surfaces where geometry accuracy isn't critical.
+ *
+ * Returns `null` if the ray misses the plane or the hit is outside the map bounds.
+ *
+ * @example
+ * canvas.addEventListener('pointermove', e => {
+ *   const cell = pickHex(e.clientX, e.clientY, renderer.domElement, camera, layout, map);
+ *   if (cell) highlight(cell.col, cell.row);
+ * });
+ */
 export function pickHex(
   clientX: number,
   clientY: number,
