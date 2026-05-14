@@ -238,7 +238,8 @@ async function start() {
   function updatePathPreview(target: { col: number; row: number }): void {
     if (lastHoveredForPath?.col === target.col && lastHoveredForPath?.row === target.row) return;
     lastHoveredForPath = target;
-    const path = findPath(offsetToHex(unit.col, unit.row), offsetToHex(target.col, target.row), moveCost, map);
+    if (!selectedUnit) return;
+    const path = findPath(offsetToHex(selectedUnit.col, selectedUnit.row), offsetToHex(target.col, target.row), moveCost, map);
     pathOverlay.geometry.dispose();
     if (path && path.length > 1) {
       pathOverlay.geometry = buildHighlightGeo(path.map(h => hexToOffset(h)), 0.06);
@@ -328,10 +329,8 @@ async function start() {
     fogData,
   });
 
-  // --- Unit ---
-  // Demo uses a simple capsule. Real consumers attach a loaded GLTF Object3D instead.
-  const unitMat  = new THREE.MeshLambertMaterial({ color: 0x44aaff });
-  const unitMesh = new THREE.Mesh(new THREE.CapsuleGeometry(0.25, 0.7, 4, 8), unitMat);
+  // --- Units ---
+  // Demo uses simple capsules. Real consumers attach loaded GLTF Object3Ds instead.
 
   /** BFS outward from (col, row) to find the nearest non-water cell. */
   function findSpawnCell(col: number, row: number): { col: number; row: number } {
@@ -344,44 +343,54 @@ async function start() {
     return { col, row };
   }
 
-  const spawnCell = findSpawnCell(Math.floor(MAP_WIDTH / 2), Math.floor(MAP_HEIGHT / 2));
-  const unit = new HexUnit({
-    col:            spawnCell.col,
-    row:            spawnCell.row,
-    travelSpeed:    4,
-    heightOffset:   0.6,
-    fogRevealRange: FOG_REVEAL_RANGE,
-  });
+  // Each entry: preferred spawn (quadrant centre) + idle color.
+  const UNIT_DEFS = [
+    { col: Math.floor(MAP_WIDTH * 0.50), row: Math.floor(MAP_HEIGHT * 0.50), color: 0x4488ff },
+    { col: Math.floor(MAP_WIDTH * 0.25), row: Math.floor(MAP_HEIGHT * 0.25), color: 0xff6622 },
+    { col: Math.floor(MAP_WIDTH * 0.75), row: Math.floor(MAP_HEIGHT * 0.25), color: 0xaa44ff },
+    { col: Math.floor(MAP_WIDTH * 0.25), row: Math.floor(MAP_HEIGHT * 0.75), color: 0x22ddaa },
+  ];
 
-  // Callbacks: real consumers would toggle GLTF AnimationMixer clips here.
-  unit.onMoveStart = () => unitMat.color.set(0x44ffaa);
-  unit.onMoveEnd   = () => {
-    unitMat.color.set(0x44aaff);
-    rangeNeedsUpdate = true;
-    lastHoveredForPath = null;
-  };
-  unit.onCellEnter = (_col, _row) => {
-    rangeNeedsUpdate = true;
-    lastHoveredForPath = null;
-  };
-
+  const units: HexUnit[] = [];
+  const unitMeshes: THREE.Mesh[] = [];
   const unitManager = new UnitManager({ scene, map, layout, fogData });
-  unitManager.addUnit(unit, unitMesh);
 
-  // Focus camera on the unit's actual spawn position immediately so the
-  // first frame renders on terrain rather than empty sky.
-  controls.snapTo(unit.worldX, unit.worldZ);
+  for (const def of UNIT_DEFS) {
+    const mat   = new THREE.MeshLambertMaterial({ color: def.color });
+    const mesh  = new THREE.Mesh(new THREE.CapsuleGeometry(0.25, 0.7, 4, 8), mat);
+    const spawn = findSpawnCell(def.col, def.row);
+    const u = new HexUnit({ col: spawn.col, row: spawn.row, travelSpeed: 4, heightOffset: 0.6, fogRevealRange: FOG_REVEAL_RANGE });
+
+    // Callbacks: real consumers toggle GLTF AnimationMixer clips here.
+    const idleColor = def.color;
+    u.onMoveStart = () => mat.color.setHex(0xffffff);
+    u.onMoveEnd   = () => {
+      mat.color.setHex(idleColor);
+      if (selectedUnit === u) { rangeNeedsUpdate = true; lastHoveredForPath = null; }
+    };
+    u.onCellEnter = () => {
+      if (selectedUnit === u) { rangeNeedsUpdate = true; lastHoveredForPath = null; }
+    };
+
+    units.push(u);
+    unitMeshes.push(mesh);
+    unitManager.addUnit(u, mesh);
+  }
+
+  // Focus camera on the first unit's actual spawn position so the first frame
+  // renders on terrain rather than empty sky.
+  controls.snapTo(units[0].worldX, units[0].worldZ);
 
   let rangeNeedsUpdate = true;
-  let unitSelected = false;
+  let selectedUnit: HexUnit | null = null;
 
-  function selectUnit(): void {
-    unitSelected = true;
+  function selectUnit(u: HexUnit): void {
+    selectedUnit = u;
     rangeNeedsUpdate = true;
   }
 
   function deselectUnit(): void {
-    unitSelected = false;
+    selectedUnit = null;
     rangeMesh.geometry.dispose();
     rangeMesh.geometry = new THREE.BufferGeometry();
     rangeMesh.visible  = false;
@@ -397,15 +406,17 @@ async function start() {
     unitManager.reapplyFog();
   }
 
-  function resetUnit(): void {
-    unit.stop();
-    const spawn = findSpawnCell(Math.floor(MAP_WIDTH / 2), Math.floor(MAP_HEIGHT / 2));
-    unit.col = spawn.col;
-    unit.row = spawn.row;
-    unit.update(0, map, layout);
-    unitMesh.position.set(unit.worldX, unit.worldY, unit.worldZ);
+  function resetUnits(): void {
+    for (let i = 0; i < units.length; i++) {
+      const u = units[i];
+      u.stop();
+      const spawn = findSpawnCell(UNIT_DEFS[i].col, UNIT_DEFS[i].row);
+      u.col = spawn.col;
+      u.row = spawn.row;
+      u.update(0, map, layout);
+      unitMeshes[i].position.set(u.worldX, u.worldY, u.worldZ);
+    }
     deselectUnit();
-    lastHoveredForPath = null;
   }
 
   // --- Keyboard shortcuts ---
@@ -415,13 +426,13 @@ async function start() {
     } else if (e.key === 'r' || e.key === 'R') {
       seed = Math.floor(Math.random() * 0xffffffff);
       runGenerator();
-      resetUnit();
+      resetUnits();
       resetFog();
       chunkManager.dispose();
     } else if (e.key === 'g' || e.key === 'G') {
       activeGenIndex = (activeGenIndex + 1) % GENERATORS.length;
       runGenerator();
-      resetUnit();
+      resetUnits();
       resetFog();
       chunkManager.dispose();
     } else if (e.key === 'e' || e.key === 'E') {
@@ -431,7 +442,7 @@ async function start() {
       dimExplored = !dimExplored;
       chunkManager.setDimExplored(dimExplored);
     } else if (e.key === 'c' || e.key === 'C') {
-      controls.panTo(unit.worldX, unit.worldZ);
+      if (selectedUnit) controls.panTo(selectedUnit.worldX, selectedUnit.worldZ);
     } else if (e.key === 's' || e.key === 'S') {
       saveMap();
     } else if (e.key === 'l' || e.key === 'L') {
@@ -442,7 +453,7 @@ async function start() {
   // Capture-phase handler runs before the camera controller's bubble-phase pan handler,
   // so we can consume the right-click and prevent a pan from starting.
   renderer.domElement.addEventListener('mousedown', (e) => {
-    if (e.button === 2 && unitSelected) {
+    if (e.button === 2 && selectedUnit) {
       deselectUnit();
       e.stopImmediatePropagation();
       e.preventDefault();
@@ -453,21 +464,22 @@ async function start() {
     if (e.button !== 0 || !hoverCell) return;
     if (map.getTerrain(hoverCell.col, hoverCell.row) === TerrainType.Water) return;
 
-    if (hoverCell.col === unit.col && hoverCell.row === unit.row) {
-      // Click the unit's cell: toggle selection.
-      if (unitSelected) deselectUnit(); else selectUnit();
+    const cell = hoverCell;
+    const clickedUnit = units.find(u => u.col === cell.col && u.row === cell.row);
+    if (clickedUnit) {
+      if (selectedUnit === clickedUnit) deselectUnit(); else selectUnit(clickedUnit);
       return;
     }
 
-    if (!unitSelected) return;
+    if (!selectedUnit) return;
 
     const path = findPath(
-      offsetToHex(unit.col, unit.row),
+      offsetToHex(selectedUnit.col, selectedUnit.row),
       offsetToHex(hoverCell.col, hoverCell.row),
       moveCost, map,
     );
     if (path && path.length > 1) {
-      unit.travel(path);
+      selectedUnit.travel(path);
       pathOverlay.geometry.dispose();
       pathOverlay.geometry = new THREE.BufferGeometry();
       pathOverlay.visible  = false;
@@ -503,15 +515,15 @@ async function start() {
       lastFpsTime = now;
     }
 
-    // Lazy-rebuild movement-range highlight when unit enters a new cell (selected only).
-    if (rangeNeedsUpdate && unitSelected) {
-      const reachable = getMovementRange(offsetToHex(unit.col, unit.row), MOVE_BUDGET, moveCost, map);
+    // Lazy-rebuild movement-range highlight when selected unit enters a new cell.
+    if (rangeNeedsUpdate && selectedUnit) {
+      const reachable = getMovementRange(offsetToHex(selectedUnit.col, selectedUnit.row), MOVE_BUDGET, moveCost, map);
       rangeMesh.geometry.dispose();
       rangeMesh.geometry = buildHighlightGeo(reachable.map(h => hexToOffset(h)), 0.04);
       rangeMesh.visible  = true;
 
-      const uwp = hexToWorld(layout, offsetToHex(unit.col, unit.row));
-      selectedMesh.position.set(uwp.x, map.getElevation(unit.col, unit.row) * 0.5 + 0.03, uwp.z);
+      const uwp = hexToWorld(layout, offsetToHex(selectedUnit.col, selectedUnit.row));
+      selectedMesh.position.set(uwp.x, map.getElevation(selectedUnit.col, selectedUnit.row) * 0.5 + 0.03, uwp.z);
       selectedMesh.visible = true;
 
       rangeNeedsUpdate = false;
@@ -524,7 +536,7 @@ async function start() {
       const wp = hexToWorld(layout, offsetToHex(picked.col, picked.row));
       hoverMesh.position.set(wp.x, map.getElevation(picked.col, picked.row) * 0.5 + 0.02, wp.z);
       hoverMesh.visible = true;
-      if (unitSelected && !unit.isMoving) updatePathPreview(picked);
+      if (selectedUnit && !selectedUnit.isMoving) updatePathPreview(picked);
     } else {
       hoverMesh.visible = false;
     }
@@ -535,9 +547,9 @@ async function start() {
         `${TERRAIN_NAMES[map.getTerrain(hoverCell.col, hoverCell.row)] ?? '?'}  ` +
         `elev ${map.getElevation(hoverCell.col, hoverCell.row)}`
       : `Hover:     —`;
-    const unitLine = unitSelected
-      ? `Unit:      [${unit.col}, ${unit.row}]  ${unit.isMoving ? 'moving' : 'selected — click to move'}  [Esc] deselect  [C] focus`
-      : `Unit:      [${unit.col}, ${unit.row}]  click unit to select  [C] focus`;
+    const unitLine = selectedUnit
+      ? `Unit:      [${selectedUnit.col}, ${selectedUnit.row}]  ${selectedUnit.isMoving ? 'moving' : 'selected — click to move'}  [Esc] deselect  [C] focus`
+      : `Units:     ${units.length} on map — click one to select`;
     hud.textContent =
       `FPS:       ${fps}\n` +
       `Generator: ${gen.name}  [G] cycle\n` +

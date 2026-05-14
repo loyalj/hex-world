@@ -1,6 +1,6 @@
 # hex-world — Quick Start
 
-A Three.js hex grid library for strategy and exploration games. Handles map data, chunk-based rendering, terrain, water, roads, scatter features, and map generation. Your game owns the UI, game logic, and unit definitions.
+A Three.js hex grid library for strategy and exploration games. Handles map data, chunk-based rendering, terrain, water, roads, scatter features, fog of war, units, and map generation. Your game owns the UI, game logic, and unit models.
 
 ---
 
@@ -229,24 +229,16 @@ controls.update();
 
 Right-drag pans, scroll zooms toward cursor, middle-drag tilts. All configurable.
 
----
-
-## Reading map data
+### Focusing the camera
 
 ```ts
-// Coordinate helpers
-import { HexCoord, hexDistance, hexNeighbors, hexRange } from 'hex-world';
+// Instant reposition — use at startup so the first frame renders on terrain,
+// not empty sky. Sets both current and goal position (no animation).
+controls.snapTo(x, z);
 
-const coord = HexCoord.fromOffset(col, row);
-const neighbors = hexNeighbors(coord);
-const dist = hexDistance(a, b);
-const ring = hexRange(center, 3);   // all cells within distance 3
-
-// Cell data
-const terrain   = map.getTerrain(col, row);     // TerrainType (number)
-const elevation = map.getElevation(col, row);   // Int8
-const hasRiver  = map.hasRiver(col, row);
-const hasRoad   = map.hasRoads(col, row);
+// Smooth pan — sets the goal position and lets the damping lerp do the rest.
+// Call each frame to track a moving target.
+controls.panTo(x, z);
 ```
 
 ---
@@ -257,21 +249,26 @@ const hasRoad   = map.hasRoads(col, row);
 import { serializeMap, deserializeMap, serializeMapJSON, deserializeMapJSON } from 'hex-world';
 
 // Binary — compact, fast. Use for file saves, IndexedDB, network transfer.
-const bytes = serializeMap(map);              // Uint8Array (~60 KB for a 100×100 map)
-const restored = deserializeMap(bytes);
+const bytes    = serializeMap(map);              // Uint8Array (~60 KB for a 100×100 map)
+const restored = deserializeMap(bytes);          // returns HexMap
 
 // Persist to a file (browser)
 const blob = new Blob([bytes], { type: 'application/octet-stream' });
 const url  = URL.createObjectURL(blob);
-// attach url to an <a download="map.hexmap"> and click it
+// attach url to an <a download="map.hxmp"> and click it
 
 // Load from a file (browser)
 const file = await fileInput.files[0].arrayBuffer();
 const map  = deserializeMap(new Uint8Array(file));
 
-// JSON — human-readable, good for editor clipboard or debug export.
-const json    = serializeMapJSON(map);        // base64-encoded cell data inside a JSON envelope
-const fromJson = deserializeMapJSON(json);
+// JSON with metadata — suitable for localStorage, editor clipboard, or debug export.
+const json = serializeMapJSON(map, {
+  name:        'My World',
+  seed:        12345,
+  generatorId: 'chunk',
+});
+const { map: loaded, metadata } = deserializeMapJSON(json);
+console.log(metadata.name, metadata.seed, metadata.generatorId);
 ```
 
 All map data is preserved: terrain, elevation, flags, rivers, roads, and scatter feature layers.
@@ -284,7 +281,7 @@ The library provides the algorithms. Your game supplies a `MoveCostFn` that clos
 
 ```ts
 import {
-  findPath, getMovementRange,
+  findPath, getMovementRange, getVisibleCells,
   offsetToHex, hexToOffset,
   type MoveCostFn,
 } from 'hex-world';
@@ -304,12 +301,6 @@ const path = findPath(
   cost,
   map,
 );
-if (path) {
-  for (const hex of path) {
-    const { col, row } = hexToOffset(hex);
-    console.log(col, row);
-  }
-}
 
 // Flood-fill — all cells reachable within a movement budget
 const reachable = getMovementRange(
@@ -318,10 +309,122 @@ const reachable = getMovementRange(
   cost,
   map,
 );
-// reachable includes the unit's own cell (cost 0)
+
+// BFS visibility radius — all cells within N steps (no cost function)
+const visible = getVisibleCells(offsetToHex(col, row), 3, map);
 ```
 
-Costs must be non-negative. Return `Infinity` (or any non-finite value) to mark a transition as impassable — the algorithms skip those edges automatically.
+Costs must be non-negative. Return `Infinity` to mark a transition as impassable.
+
+---
+
+## Fog of war
+
+```ts
+import { FogData } from 'hex-world';
+
+// Create fog state and pass it to ChunkManager
+const fog = new FogData(map.width, map.height);
+const chunks = new ChunkManager({ ..., fogData: fog });
+
+// Reveal cells — typically called when a unit moves
+import { getVisibleCells, hexToOffset, offsetToHex } from 'hex-world';
+
+function revealAround(col: number, row: number, range: number): void {
+  const cells = getVisibleCells(offsetToHex(col, row), range, map);
+  for (const c of cells) {
+    const oc = hexToOffset(c);
+    if (map.inBounds(oc.col, oc.row)) fog.increaseVisibility(oc.col, oc.row);
+  }
+}
+
+// When a unit leaves a position, decrease visibility there
+function hideAround(col: number, row: number, range: number): void {
+  const cells = getVisibleCells(offsetToHex(col, row), range, map);
+  for (const c of cells) {
+    const oc = hexToOffset(c);
+    if (map.inBounds(oc.col, oc.row)) fog.decreaseVisibility(oc.col, oc.row);
+  }
+}
+
+// Toggle visibility behaviour at runtime
+chunks.setHideUnexplored(true);  // hide cells that have never been seen
+chunks.setDimExplored(true);     // dim cells seen but not currently visible
+
+// Reset all fog state (e.g. new game)
+fog.reset();
+```
+
+The fog texture stores two independent values per cell: **R** = currently visible (0 or 255) and **G** = ever explored (0 or 255, never decreases). Both are driven by integer reference counts — multiple overlapping visibility grants are handled automatically.
+
+If you use `UnitManager` with `fogRevealRange > 0`, it manages all `increaseVisibility`/`decreaseVisibility` calls for you automatically.
+
+---
+
+## Units
+
+The library handles position, path-following, facing, and fog reveal. You supply the `Object3D` (loaded GLTF, instanced mesh, or any Three.js object) and wire your animation system to the provided callbacks.
+
+```ts
+import { HexUnit, UnitManager } from 'hex-world';
+
+// Create unit state
+const unit = new HexUnit({
+  col:            10,
+  row:            10,
+  travelSpeed:    4,    // cells per second
+  heightOffset:   0.5,  // Y above terrain; set to half model height for centre-pivot models
+  fogRevealRange: 3,    // BFS radius revealed as the unit moves; 0 = no fog reveal
+});
+
+// Wire your animation system to the callbacks
+unit.onMoveStart = () => mixer.clipAction(walkClip).play();
+unit.onMoveEnd   = () => mixer.clipAction(idleClip).play();
+unit.onCellEnter = (col, row) => console.log('entered', col, row);
+
+// Create manager and register the unit with its Object3D
+const manager = new UnitManager({ scene, map, layout, fogData });
+manager.addUnit(unit, gltf.scene);   // or any THREE.Object3D
+
+// Move along an A* path
+const path = findPath(offsetToHex(unit.col, unit.row), offsetToHex(goalCol, goalRow), cost, map);
+if (path) unit.travel(path);
+
+// Stop immediately (cancels movement)
+unit.stop();
+
+// In your render loop (dt = elapsed seconds):
+manager.update(dt);
+```
+
+`UnitManager` updates `object3D.position` and `object3D.rotation.y` each frame. When `fogRevealRange > 0`, it also calls `fog.increaseVisibility` / `fog.decreaseVisibility` automatically as the unit moves between cells.
+
+After a `fogData.reset()` call, re-apply all unit fog contributions:
+
+```ts
+fog.reset();
+manager.reapplyFog();
+```
+
+---
+
+## Reading map data
+
+```ts
+// Coordinate helpers
+import { hexDistance, hexNeighbors, hexRange, offsetToHex, hexToOffset } from 'hex-world';
+
+const hex       = offsetToHex(col, row);
+const neighbors = hexNeighbors(hex);
+const dist      = hexDistance(a, b);
+const ring      = hexRange(center, 3);   // all cells within distance 3
+
+// Cell data
+const terrain   = map.getTerrain(col, row);     // TerrainType (number)
+const elevation = map.getElevation(col, row);   // Int8
+const hasRiver  = map.hasRiver(col, row);
+const hasRoad   = map.hasRoads(col, row);
+```
 
 ---
 
@@ -331,13 +434,15 @@ Keep these in your game, not in hex-world:
 
 - **UI** — menus, HUDs, tooltips, cell inspector panels
 - **Turn structure** — action points, whose turn it is
-- **Unit definitions** — stats, movement rules, combat
+- **Unit definitions** — stats, combat, abilities
+- **Unit models** — geometry, materials, animations (pass your `Object3D` to `UnitManager`)
 - **Game rules** — win conditions, resource costs
-- **Pathfinding cost functions** — the library will provide A* and flood-fill algorithms; your game supplies the cost callback that knows what terrain costs mean for your units
+- **Pathfinding cost functions** — the library provides A* and flood-fill; your game supplies the cost callback
 
 ---
 
 ## What's coming to the library
 
-- Fog of war — per-cell visibility state + LOS calculation
-- Unit position / visibility hooks
+- Line-of-sight blocking (elevation-aware raycasting)
+- Exploration reveal animation (smooth fade-in on first sight)
+- Wall geometry between designated cells
