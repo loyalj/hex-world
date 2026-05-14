@@ -92,6 +92,26 @@ export class RtsCameraController {
   get minPitchDeg(): number      { return this.minPitch / DEG2RAD; }
   get maxPitchDeg(): number      { return this.maxPitch / DEG2RAD; }
 
+  /**
+   * Instantly reposition the camera to look at the given world-space XZ position
+   * with no animation. Use at startup or after teleporting so the first frame
+   * renders at the correct location rather than sliding in from somewhere else.
+   */
+  snapTo(x: number, z: number): void {
+    this.target.set(x, 0, z);
+    this.targetGoal.set(x, 0, z);
+    this.applyToCamera();
+  }
+
+  /**
+   * Smoothly pan the camera to look at the given world-space XZ position.
+   * The camera will glide there over the next several frames using the
+   * existing damping. Call each frame to track a moving target.
+   */
+  panTo(x: number, z: number): void {
+    this.targetGoal.set(x, 0, z);
+  }
+
   update(): void {
     this.target.lerp(this.targetGoal, this.damping);
     this.distance += (this.distanceGoal - this.distance) * this.damping;

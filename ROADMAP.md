@@ -114,13 +114,13 @@ Follows the structure of the [Catlike Coding Hex Map tutorial series](https://ca
 
 ---
 
-## Stage 9 — Units & Animated Movement
+## Stage 9 — Units & Animated Movement ✅
 *Tutorial equivalent: Parts 18–19*
 
-- [ ] `HexUnit` entity (position, facing, stats)
-- [ ] Unit renderer (instanced or individual mesh)
-- [ ] Path-following animation along hex path
-- [ ] Demo: multiple units moving across map
+- [x] `HexUnit` entity — col/row position, smooth worldX/Y/Z interpolation, facing angle, `travelSpeed`, `heightOffset`, `fogRevealRange`; `travel(path)` / `stop()` / `update(dt, map, layout)` API; `onMoveStart` / `onCellEnter` / `onMoveEnd` callbacks for consumer animation control
+- [x] `UnitManager` — Three.js bridge; maps each `HexUnit` to a consumer-supplied `Object3D`; updates position + rotation each frame; manages per-unit fog reveal via `FogData` (increase on enter, decrease on leave); `addUnit` / `removeUnit` / `update` / `reapplyFog` / `dispose`
+- [x] Path-following animation — smooth lerp between cells, facing updated per segment, deltaTime-capped movement, multi-cell per frame handled with while loop
+- [x] Demo: single capsule unit; click land to move via A*; path preview on hover; movement-range highlight rebuilds on cell enter; fog reveals as unit walks; `[Esc]` stops movement; color changes on move/idle to demonstrate callback hooks
 
 ---
 
