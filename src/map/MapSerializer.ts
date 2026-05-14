@@ -4,6 +4,19 @@ const MAGIC   = [0x48, 0x58, 0x4d, 0x50]; // "HXMP"
 const VERSION = 1;
 const HEADER_SIZE = 14; // 4 magic + 1 version + 4 width + 4 height + 1 featureLayerCount
 
+/** Optional metadata attached to a saved map (name, generator, seed). */
+export interface MapMetadata {
+  name?:        string;
+  seed?:        number;
+  generatorId?: string;
+}
+
+/** Result of deserializing a JSON map — includes the map and any stored metadata. */
+export interface DeserializedMap {
+  map:      HexMap;
+  metadata: MapMetadata;
+}
+
 // --- Binary ---
 
 /**
@@ -73,6 +86,9 @@ interface MapJSON {
   cells: string;
   roads: string;
   features: string;
+  name?:        string;
+  seed?:        number;
+  generatorId?: string;
 }
 
 function uint8ToBase64(data: Uint8Array): string {
@@ -96,7 +112,7 @@ function base64ToUint8(b64: string): Uint8Array {
  * Suitable for clipboard, editor state, or human-readable export.
  * Pair with `deserializeMapJSON`.
  */
-export function serializeMapJSON(map: HexMap): string {
+export function serializeMapJSON(map: HexMap, metadata: MapMetadata = {}): string {
   const payload: MapJSON = {
     version:           VERSION,
     width:             map.width,
@@ -105,15 +121,17 @@ export function serializeMapJSON(map: HexMap): string {
     cells:    uint8ToBase64(map.uint8),
     roads:    uint8ToBase64(map.roadBits),
     features: map.featureData ? uint8ToBase64(map.featureData) : '',
+    ...metadata,
   };
   return JSON.stringify(payload);
 }
 
 /**
  * Deserializes a HexMap from a JSON string produced by `serializeMapJSON`.
+ * Returns the map and any metadata that was stored with it.
  * Throws if the version is unrecognised.
  */
-export function deserializeMapJSON(json: string): HexMap {
+export function deserializeMapJSON(json: string): DeserializedMap {
   const p = JSON.parse(json) as MapJSON;
   if (p.version !== VERSION) {
     throw new Error(`deserializeMapJSON: unsupported version ${p.version} (expected ${VERSION})`);
@@ -124,5 +142,8 @@ export function deserializeMapJSON(json: string): HexMap {
   if (map.featureData && p.features) {
     map.featureData.set(base64ToUint8(p.features));
   }
-  return map;
+  return {
+    map,
+    metadata: { name: p.name, seed: p.seed, generatorId: p.generatorId },
+  };
 }

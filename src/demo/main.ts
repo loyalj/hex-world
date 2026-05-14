@@ -24,6 +24,7 @@ import { TerrainType } from '../map/HexCell.js';
 import { FogData } from '../geometry/FogData.js';
 import { getVisibleCells, findPath, getMovementRange, type MoveCostFn } from '../pathfinding/Pathfinding.js';
 import { hexToOffset } from '../math/HexCoord.js';
+import { serializeMapJSON, deserializeMapJSON } from '../map/MapSerializer.js';
 
 /** Change this one constant to switch terrain rendering mode. */
 const TERRAIN_COLOR_MODE: TerrainColorMode = 'splat';
@@ -278,6 +279,56 @@ async function start() {
     }
   }
 
+  // --- Save / Load ---
+  const SAVE_KEY = 'hexworld-save';
+  let saveStatus = localStorage.getItem(SAVE_KEY)
+    ? 'Saved map available  [L] load'
+    : 'No saved map';
+
+  function saveMap(): void {
+    const gen = GENERATORS[activeGenIndex];
+    try {
+      const json = serializeMapJSON(map, {
+        name:        `${gen.name} — ${seed >>> 0}`,
+        seed,
+        generatorId: gen.id,
+      });
+      localStorage.setItem(SAVE_KEY, json);
+      const t = new Date();
+      saveStatus = `Saved at ${t.toLocaleTimeString()}  [L] load`;
+    } catch (e) {
+      console.error('Save failed:', e);
+      saveStatus = 'Save failed';
+    }
+  }
+
+  function loadMap(): void {
+    const json = localStorage.getItem(SAVE_KEY);
+    if (!json) { saveStatus = 'No saved map'; return; }
+    try {
+      const { map: loaded, metadata } = deserializeMapJSON(json);
+      if (loaded.width !== MAP_WIDTH || loaded.height !== MAP_HEIGHT) {
+        saveStatus = `Load failed: map size mismatch (${loaded.width}×${loaded.height})`;
+        return;
+      }
+      map.uint8.set(loaded.uint8);
+      map.roadBits.set(loaded.roadBits);
+      if (map.featureData && loaded.featureData) map.featureData.set(loaded.featureData);
+      if (metadata.seed !== undefined) seed = metadata.seed;
+      if (metadata.generatorId) {
+        const idx = GENERATORS.findIndex(g => g.id === metadata.generatorId);
+        if (idx >= 0) activeGenIndex = idx;
+      }
+      resetFog();
+      clearSelection();
+      chunkManager.dispose();
+      saveStatus = `Loaded: ${metadata.name ?? 'map'}`;
+    } catch (e) {
+      console.error('Load failed:', e);
+      saveStatus = 'Load failed';
+    }
+  }
+
   // --- Fog of war ---
   const fogData = new FogData(MAP_WIDTH, MAP_HEIGHT);
   let hideUnexplored = true;  // E: whether unexplored cells are hidden
@@ -357,6 +408,10 @@ async function start() {
     } else if (e.key === 'f' || e.key === 'F') {
       dimExplored = !dimExplored;
       chunkManager.setDimExplored(dimExplored);
+    } else if (e.key === 's' || e.key === 'S') {
+      saveMap();
+    } else if (e.key === 'l' || e.key === 'L') {
+      loadMap();
     }
   });
 
@@ -425,6 +480,7 @@ async function start() {
       `Tilt:      ${controls.currentPitchDeg.toFixed(1)}°  (min ${controls.minPitchDeg}° / max ${controls.maxPitchDeg}°)\n` +
       `Hide unexplored: ${hideUnexplored ? 'ON  [E] toggle' : 'OFF  [E] toggle'}\n` +
       `Dim explored:    ${dimExplored    ? 'ON  [F] toggle' : 'OFF  [F] toggle'}\n` +
+      `Save: [S]  Load: [L]  ${saveStatus}\n` +
       `\n${selLine}\n${hoverLine}`;
 
     renderer.render(scene, camera);

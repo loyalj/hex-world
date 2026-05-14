@@ -98,8 +98,8 @@ Follows the structure of the [Catlike Coding Hex Map tutorial series](https://ca
 
 - [x] Binary serialization format for `HexMap` data — `HXMP` magic, version byte, uint32 dimensions, three packed data sections
 - [x] Save/load API — `serializeMap` / `deserializeMap` (binary `Uint8Array`), `serializeMapJSON` / `deserializeMapJSON` (base64 JSON envelope)
-- [ ] Map metadata (name, size, seed)
-- [ ] Demo: save and reload a map in-browser
+- [x] Map metadata (`MapMetadata` interface: name, seed, generatorId) — optional second arg to `serializeMapJSON`, returned in `DeserializedMap` from `deserializeMapJSON`
+- [x] Demo: `[S]` saves current map + metadata to localStorage; `[L]` loads and restores generator selection, seed, and cell data; status shown in HUD
 
 ---
 
