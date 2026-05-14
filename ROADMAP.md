@@ -85,9 +85,10 @@ Follows the structure of the [Catlike Coding Hex Map tutorial series](https://ca
 
 - [x] Road data model — undirected per-cell edge bits (`roadBits` Uint8Array); full API (`hasRoads`, `hasRoadThroughEdge`, `setRoad`) (Part 7)
 - [x] Road geometry — strip mesh along cell edges with `RoadMaterial`; rendered at `renderOrder=2` above terrain and water (Part 7)
-- [x] Scatter / feature placement API — `HexHashGrid` (seeded mulberry32, 256×256 × 5 floats), `ScatterLayerConfig` (density tier × variant), `buildScatterMeshes` with 7 slots per cell (center + 6 direction triangles), competition logic, `InstancedMesh` per (layer-tier-variant) key (Part 9)
+- [x] Scatter / feature placement API — `HexHashGrid` (seeded mulberry32, 256×256 × 5 floats), `buildScatterMeshes` with 7 slots per cell (center + 6 direction triangles), competition logic, `InstancedMesh` per (layer-tier-variant) key (Part 9)
+- [x] Modular scatter definitions — `ScatterDefinition` (id, name, layerIndex, tiers, allowedTerrains, canSpawnAt, tiltStrength); serializable `ScatterDescriptor` + `ScatterAssetRegistry` for save/load; multiple definitions compete per slot, winner chosen by lowest spawn hash; `ChunkManager` takes `scatterDefinitions`
 - [x] Feature layer data — `featureLayerCount` on `HexMap`, `Uint8Array` feature storage, `getFeatureLevel`/`setFeatureLevel` (values 0–3) (Part 9)
-- [x] Demo: pine tree scatter on grassland/desert with 3 density tiers; roads traced on grid avoiding water, rivers, and steep slopes
+- [x] Demo: pine tree scatter (layer 0, grassland/mud) and rock scatter (layer 1, rock terrain only) with 3 density tiers, per-instance shader shape variation, and random tilt; roads traced on grid avoiding water, rivers, and steep slopes
 - [ ] Wall geometry between designated cells (Part 10)
 - [ ] Wall colour gradient / cliff walls (Part 11)
 
@@ -127,7 +128,7 @@ Follows the structure of the [Catlike Coding Hex Map tutorial series](https://ca
 ## Stage 10 — Fog of War & Exploration ✅
 *Tutorial equivalent: Parts 20–22*
 
-- [x] `FogData` class — `DataTexture` (R=visible, G=explored), integer visibility counts per cell, dirty-flag GPU upload, `increaseVisibility` / `decreaseVisibility` / `reset` / `dispose`
+- [x] `FogData` class — `DataTexture` (R=currently visible, G=ever explored, B=reveal animation progress 0→255), integer visibility counts per cell, dirty-flag GPU upload, `increaseVisibility` / `decreaseVisibility` / `reset` / `dispose`; optional `revealDuration` constructor arg (default 0.5 s)
 - [x] `cellIndex` attribute on all geometry builders — flat `row * width + col` index stored per vertex so shaders can sample the fog texture without geometry rebuilds
   - Terrain (`HexChunk`): `vec3 cellIndex` (3-cell blend, averaged visibility at corners/terraces/bridges)
   - Water, river, shore, estuary, road: `float cellIndex` (own water/road cell)
@@ -225,11 +226,8 @@ Assigns terrain types based on temperature × moisture matrix, then places river
 ## Stage 12 — Performance & Polish
 *Tutorial equivalent: Modern project updates (v2.0.0–v5.2.0)*
 
-- [ ] LOD system (simplified chunk geometry at distance)
-- [ ] Worker-thread chunk mesh generation (off main thread)
-- [ ] Map streaming (unload distant chunks, stream new ones)
-- [ ] TypeScript API documentation
-- [ ] Published example scene with all features
+- [ ] LOD system (simplified chunk geometry at distance — no terraces, no edge subdivision)
+- [ ] Worker-thread chunk mesh generation (geometry builders return raw typed arrays; main thread assembles `BufferGeometry` from transferred result)
 
 ---
 
