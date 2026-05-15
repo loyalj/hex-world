@@ -51,7 +51,7 @@ chunks.markDirty(col + 1, row);   // neighbor may be in the adjacent chunk
 Roads are undirected edge flags. Each edge is shared between two cells, so you must set it on **both sides** to get a consistent road through that boundary:
 
 ```ts
-import { POINTY_TOP, offsetNeighbor } from 'hex-world';
+import { POINTY_TOP, offsetNeighbor } from '@loyalj/hex-world';
 
 const EDGE_DIRS = POINTY_TOP.edgeDirections;
 
@@ -90,7 +90,7 @@ for (let face = 0; face < 6; face++) {
 Rivers are **directed** — each edge stores which face a river enters and which face it exits. Setting a river requires coordinating two cells per edge: the outgoing side of the upstream cell and the incoming side of the downstream cell.
 
 ```ts
-import { POINTY_TOP, offsetNeighbor } from 'hex-world';
+import { POINTY_TOP, offsetNeighbor } from '@loyalj/hex-world';
 
 const EDGE_DIRS = POINTY_TOP.edgeDirections;
 

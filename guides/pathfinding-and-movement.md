@@ -7,8 +7,8 @@ The library provides A*, flood-fill movement range, BFS visibility, line-of-sigh
 ## The `MoveCostFn` contract
 
 ```ts
-import type { MoveCostFn } from 'hex-world';
-import { hexToOffset } from 'hex-world';
+import type { MoveCostFn } from '@loyalj/hex-world';
+import { hexToOffset } from '@loyalj/hex-world';
 
 const cost: MoveCostFn = (from, to) => {
   // `from` and `to` are cube HexCoords — convert to offset to read map data
@@ -33,7 +33,7 @@ const cost: MoveCostFn = (from, to) => {
 ## A* pathfinding
 
 ```ts
-import { findPath, offsetToHex } from 'hex-world';
+import { findPath, offsetToHex } from '@loyalj/hex-world';
 
 const path = findPath(
   offsetToHex(startCol, startRow),
@@ -107,7 +107,7 @@ const riverCrossingCost: MoveCostFn = (from, to) => {
 Returns every cell reachable within a movement budget. Uses Dijkstra — each reachable cell is settled at its minimum cost, so it handles non-uniform costs correctly.
 
 ```ts
-import { getMovementRange, offsetToHex } from 'hex-world';
+import { getMovementRange, offsetToHex } from '@loyalj/hex-world';
 
 const reachable = getMovementRange(
   offsetToHex(unitCol, unitRow),
@@ -163,7 +163,7 @@ renderer.domElement.addEventListener('click', e => {
 `getVisibleCells` is a simple hop count — it doesn't use a cost function. Every step from the center counts as 1, regardless of terrain. Use it to decide which cells a unit can "see" for fog of war, detection range, or ability targeting.
 
 ```ts
-import { getVisibleCells, offsetToHex, hexToOffset } from 'hex-world';
+import { getVisibleCells, offsetToHex, hexToOffset } from '@loyalj/hex-world';
 
 const visible = getVisibleCells(offsetToHex(col, row), 3, map);
 
@@ -182,7 +182,7 @@ The center cell is always included. Cells that fall outside the map boundary are
 `hasLineOfSight` traces the hex line between two cells and checks whether any intermediate cell's terrain elevation pokes above the straight sight line. It uses the same 0.5-world-units-per-elevation-step scale as the terrain geometry.
 
 ```ts
-import { hasLineOfSight, offsetToHex } from 'hex-world';
+import { hasLineOfSight, offsetToHex } from '@loyalj/hex-world';
 
 const canSee = hasLineOfSight(
   offsetToHex(unitCol,   unitRow),
@@ -214,7 +214,7 @@ const trueVisible = inRange.filter(hex =>
 `smoothPath` generates a dense array of world-space points along a Catmull-Rom spline through the cell centers of a path. Use it for a curved path preview line or an animated projectile curve.
 
 ```ts
-import { smoothPath } from 'hex-world';
+import { smoothPath } from '@loyalj/hex-world';
 
 // Returns { x, y, z }[] — world-space positions along the spline
 const pts = smoothPath(path, layout, map);          // 8 samples per segment (default)
@@ -267,7 +267,7 @@ function updatePathLine(path: HexCoord[] | null): void {
 The pathfinding functions use cube `HexCoord` (`{ q, r }`). Map data uses offset `(col, row)`. Convert between them with:
 
 ```ts
-import { offsetToHex, hexToOffset } from 'hex-world';
+import { offsetToHex, hexToOffset } from '@loyalj/hex-world';
 
 const hex = offsetToHex(col, row);   // HexCoord for pathfinding
 const off = hexToOffset(hex);        // { col, row } for map API

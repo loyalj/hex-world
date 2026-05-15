@@ -26,7 +26,7 @@ Indices 0–5 match the library defaults (`TerrainType.Grassland` through `Terra
 ## 2. Write `TerrainDescriptor` entries
 
 ```ts
-import type { TerrainDescriptor } from 'hex-world';
+import type { TerrainDescriptor } from '@loyalj/hex-world';
 
 const MY_TERRAIN_DESCRIPTORS: TerrainDescriptor[] = [
   // Procedural noise texture — generated from `color`
@@ -101,7 +101,7 @@ Indices do not need to be contiguous. The atlas is sized to `max(index) + 1`, so
 For any descriptor with `texture.type: 'image'`, map the `assetId` to a URL or preloaded image before building the texture atlas:
 
 ```ts
-import type { TerrainAssetRegistry } from 'hex-world';
+import type { TerrainAssetRegistry } from '@loyalj/hex-world';
 
 const registry: TerrainAssetRegistry = new Map([
   ['terrain/volcano', '/assets/textures/volcano.jpg'],
@@ -118,7 +118,7 @@ const registry: TerrainAssetRegistry = new Map([
 import {
   buildTerrainTextureArray, createTerrainMaterial,
   resolveTerrainDefinitions,
-} from 'hex-world';
+} from '@loyalj/hex-world';
 
 // Builds a DataArrayTexture — one slice per terrain index.
 // Pass registry even if empty; it's only consulted for 'image' descriptors.
@@ -134,7 +134,7 @@ const definitions = resolveTerrainDefinitions(MY_TERRAIN_DESCRIPTORS);
 ## 5. Pass definitions to `ChunkManager`
 
 ```ts
-import { ChunkManager } from 'hex-world';
+import { ChunkManager } from '@loyalj/hex-world';
 
 const chunks = new ChunkManager({
   map, layout, scene,
@@ -157,7 +157,7 @@ The chunk manager uses `terrainDefinitions` to resolve vertex colors and road co
 Built-in generators need to know your water terrain index so they know where to stop tracing rivers, where to set lake terrain, and what to avoid when placing roads:
 
 ```ts
-import { BiomeAssigner, generateClimateRivers, generateRoads } from 'hex-world';
+import { BiomeAssigner, generateClimateRivers, generateRoads } from '@loyalj/hex-world';
 
 const WATER_IDX = MY_TERRAIN.OCEAN;
 
@@ -199,7 +199,7 @@ Chunks are rebuilt when marked dirty via `ChunkManager`. If you change terrain a
 If you want to keep the six default types and add more on top:
 
 ```ts
-import { DEFAULT_TERRAIN_DESCRIPTORS } from 'hex-world';
+import { DEFAULT_TERRAIN_DESCRIPTORS } from '@loyalj/hex-world';
 
 const MY_TERRAIN_DESCRIPTORS: TerrainDescriptor[] = [
   ...DEFAULT_TERRAIN_DESCRIPTORS,
@@ -222,7 +222,7 @@ Indices 0–5 continue to work exactly as before; the atlas gains a 7th slice at
 `TerrainDescriptor` is JSON-safe and can travel in the map's JSON envelope so the loading side doesn't need to hard-code the same definitions:
 
 ```ts
-import { serializeMapJSON, deserializeMapJSON, resolveTerrainDefinitions } from 'hex-world';
+import { serializeMapJSON, deserializeMapJSON, resolveTerrainDefinitions } from '@loyalj/hex-world';
 
 // Save
 const json = serializeMapJSON(map, metadata, scatterDescriptors, MY_TERRAIN_DESCRIPTORS);

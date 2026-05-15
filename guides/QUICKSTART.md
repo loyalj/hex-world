@@ -1,4 +1,4 @@
-# hex-world — Quick Start
+# @loyalj/hex-world — Quick Start
 
 A Three.js hex grid library for strategy and exploration games. Handles map data, chunk-based rendering, terrain, water, roads, scatter features, fog of war, units, and map generation. Your game owns the UI, game logic, and unit models.
 
@@ -11,7 +11,7 @@ A Three.js hex grid library for strategy and exploration games. Handles map data
 npm link ../hex-world
 
 # Later, when published:
-npm install hex-world
+npm install @loyalj/hex-world
 ```
 
 Three.js is a peer dependency — your project brings it:
@@ -33,7 +33,7 @@ import {
   createEstuaryMaterial, createRiverMaterial, createRoadMaterial,
   buildTerrainTextureArray, createTerrainMaterial,
   DEFAULT_TERRAIN_DESCRIPTORS, DEFAULT_TERRAIN_DEFINITIONS,
-} from 'hex-world';
+} from '@loyalj/hex-world';
 
 // 1. Map data
 const map = new HexMap({ width: 100, height: 100, featureLayerCount: 1 });
@@ -89,7 +89,7 @@ import {
   TerrainType,
   DEFAULT_TERRAIN_DESCRIPTORS, DEFAULT_TERRAIN_DEFINITIONS,
   buildTerrainTextureArray, createTerrainMaterial, ChunkManager,
-} from 'hex-world';
+} from '@loyalj/hex-world';
 
 const terrainTex = await buildTerrainTextureArray(DEFAULT_TERRAIN_DESCRIPTORS);
 const terrainMaterial = createTerrainMaterial(terrainTex);
@@ -109,12 +109,12 @@ map.setElevation(col, row, 3);                      // Int8, -128–127; negativ
 Define your own descriptor array and pass it through the library at startup:
 
 ```ts
-import type { TerrainDescriptor } from 'hex-world';
+import type { TerrainDescriptor } from '@loyalj/hex-world';
 import {
   resolveTerrainDefinitions, buildTerrainTextureArray, createTerrainMaterial,
   ChunkManager,
-} from 'hex-world';
-import type { TerrainAssetRegistry } from 'hex-world';
+} from '@loyalj/hex-world';
+import type { TerrainAssetRegistry } from '@loyalj/hex-world';
 
 const MY_TERRAIN_DESCRIPTORS: TerrainDescriptor[] = [
   // Procedural noise textures — generated from `color`
@@ -170,7 +170,7 @@ Indices do not need to be contiguous. The texture atlas is sized to `max(index) 
 When passing custom terrain indices to built-in generators, set `waterTerrainIndex` so they know which type counts as water:
 
 ```ts
-import { generateClimateRivers, generateRoads, BiomeAssigner } from 'hex-world';
+import { generateClimateRivers, generateRoads, BiomeAssigner } from '@loyalj/hex-world';
 
 const WATER_IDX = 3;   // matches the 'lava' descriptor above
 
@@ -191,7 +191,7 @@ generateRoads(map, {
 ### Built-in plugins
 
 ```ts
-import { FbmPlugin, ChunkPlugin } from 'hex-world';
+import { FbmPlugin, ChunkPlugin } from '@loyalj/hex-world';
 
 map.clear();
 FbmPlugin.generate(map, FbmPlugin.defaultConfig, seed);
@@ -207,8 +207,8 @@ ChunkPlugin.generate(map, ChunkPlugin.defaultConfig, seed);
 Implement `MapGeneratorPlugin<TConfig>` to plug your generator into any seed/regen system:
 
 ```ts
-import type { MapGeneratorPlugin, HexMap } from 'hex-world';
-import { TerrainType } from 'hex-world';
+import type { MapGeneratorPlugin, HexMap } from '@loyalj/hex-world';
+import { TerrainType } from '@loyalj/hex-world';
 
 interface MyConfig {
   islandRadius: number;
@@ -239,9 +239,9 @@ The library also exports the raw generator functions (`generateFbmTerrain`, `gen
 Scatter layers place instanced meshes (trees, rocks, buildings) using cell feature levels (0–3). Each definition owns a named `layerIndex` slot in `featureData`, so saves are stable regardless of registration order.
 
 ```ts
-import { HexHashGrid, ChunkManager } from 'hex-world';
-import type { ScatterDefinition } from 'hex-world';
-import { TerrainType } from 'hex-world';
+import { HexHashGrid, ChunkManager } from '@loyalj/hex-world';
+import type { ScatterDefinition } from '@loyalj/hex-world';
+import { TerrainType } from '@loyalj/hex-world';
 
 // Map must have featureLayerCount >= the highest layerIndex + 1
 const map = new HexMap({ width: 100, height: 100, featureLayerCount: 1 });
@@ -285,7 +285,7 @@ Each scatter definition is fully game-defined — geometry, material, terrain fi
 Cast against the actual terrain geometry — accurate at any camera angle and elevation. Pass `chunkManager.terrainMeshes` to get the currently loaded chunk meshes.
 
 ```ts
-import { pickHexFromMeshes } from 'hex-world';
+import { pickHexFromMeshes } from '@loyalj/hex-world';
 
 renderer.domElement.addEventListener('pointermove', e => {
   const cell = pickHexFromMeshes(
@@ -307,7 +307,7 @@ Call it inside the render loop (not just on `pointermove`) so the hovered cell u
 Intersects a flat horizontal plane at a given Y. Faster, but drifts at low camera angles over elevated terrain. Useful for water surfaces or flat maps.
 
 ```ts
-import { pickHex } from 'hex-world';
+import { pickHex } from '@loyalj/hex-world';
 
 const cell = pickHex(e.clientX, e.clientY, renderer.domElement, camera, layout, map, 0);
 ```
@@ -317,7 +317,7 @@ const cell = pickHex(e.clientX, e.clientY, renderer.domElement, camera, layout, 
 ## RTS camera
 
 ```ts
-import { RtsCameraController } from 'hex-world';
+import { RtsCameraController } from '@loyalj/hex-world';
 
 const controls = new RtsCameraController({
   camera,
@@ -351,7 +351,7 @@ controls.panTo(x, z);
 ## Save and load
 
 ```ts
-import { serializeMap, deserializeMap, serializeMapJSON, deserializeMapJSON } from 'hex-world';
+import { serializeMap, deserializeMap, serializeMapJSON, deserializeMapJSON } from '@loyalj/hex-world';
 
 // Binary — compact, fast. Use for file saves, IndexedDB, network transfer.
 const bytes    = serializeMap(map);              // Uint8Array (~60 KB for a 100×100 map)
@@ -386,7 +386,7 @@ Pass your descriptor arrays as optional arguments to `serializeMapJSON`. The con
 import {
   serializeMapJSON, deserializeMapJSON,
   resolveTerrainDefinitions,
-} from 'hex-world';
+} from '@loyalj/hex-world';
 
 const json = serializeMapJSON(map, metadata, scatterDescriptors, MY_TERRAIN_DESCRIPTORS);
 
@@ -407,7 +407,7 @@ import {
   smoothPath,
   offsetToHex, hexToOffset,
   type MoveCostFn,
-} from 'hex-world';
+} from '@loyalj/hex-world';
 
 // Define movement costs for your game
 const cost: MoveCostFn = (from, to) => {
@@ -466,14 +466,14 @@ Costs must be non-negative. Return `Infinity` to mark a transition as impassable
 ## Fog of war
 
 ```ts
-import { FogData } from 'hex-world';
+import { FogData } from '@loyalj/hex-world';
 
 // Create fog state and pass it to ChunkManager
 const fog = new FogData(map.width, map.height);
 const chunks = new ChunkManager({ ..., fogData: fog });
 
 // Reveal cells — typically called when a unit moves
-import { getVisibleCells, hexToOffset, offsetToHex } from 'hex-world';
+import { getVisibleCells, hexToOffset, offsetToHex } from '@loyalj/hex-world';
 
 function revealAround(col: number, row: number, range: number): void {
   const cells = getVisibleCells(offsetToHex(col, row), range, map);
@@ -519,7 +519,7 @@ If you use `UnitManager` with `fogRevealRange > 0`, it manages all `increaseVisi
 The library handles position, path-following, facing, and fog reveal. You supply the `Object3D` (loaded GLTF, instanced mesh, or any Three.js object) and wire your animation system to the provided callbacks.
 
 ```ts
-import { HexUnit, UnitManager } from 'hex-world';
+import { HexUnit, UnitManager } from '@loyalj/hex-world';
 
 // Create unit state
 const unit = new HexUnit({
@@ -566,7 +566,7 @@ manager.reapplyFog();
 
 ```ts
 // Coordinate helpers
-import { hexDistance, hexNeighbors, hexRange, offsetToHex, hexToOffset } from 'hex-world';
+import { hexDistance, hexNeighbors, hexRange, offsetToHex, hexToOffset } from '@loyalj/hex-world';
 
 const hex       = offsetToHex(col, row);
 const neighbors = hexNeighbors(hex);
@@ -584,7 +584,7 @@ const hasRoad   = map.hasRoads(col, row);
 
 ## What the library does NOT own
 
-Keep these in your game, not in hex-world:
+Keep these in your game, not in @loyalj/hex-world:
 
 - **UI** — menus, HUDs, tooltips, cell inspector panels
 - **Turn structure** — action points, whose turn it is

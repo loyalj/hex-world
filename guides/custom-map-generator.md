@@ -11,8 +11,8 @@ Both approaches work fine together — the built-in `ChunkPlugin` is just a thin
 Implement `MapGeneratorPlugin<TConfig>` and you get consistent seed handling, a named entry in any plugin registry, and an optional `configSchema` for auto-generated UI controls:
 
 ```ts
-import type { MapGeneratorPlugin, HexMap } from 'hex-world';
-import { makeRng } from 'hex-world';   // mulberry32 PRNG
+import type { MapGeneratorPlugin, HexMap } from '@loyalj/hex-world';
+import { makeRng } from '@loyalj/hex-world';   // mulberry32 PRNG
 
 interface IslandConfig {
   radius:       number;
@@ -68,7 +68,7 @@ export const IslandPlugin: MapGeneratorPlugin<IslandConfig> = {
 ### Registering in a plugin system
 
 ```ts
-import { FbmPlugin, ChunkPlugin } from 'hex-world';
+import { FbmPlugin, ChunkPlugin } from '@loyalj/hex-world';
 
 const GENERATORS = [FbmPlugin, ChunkPlugin, IslandPlugin];
 let currentGenerator = 0;
@@ -104,13 +104,13 @@ import {
   assignBiomes,
   generateClimateRivers,
   generateRoads,
-} from 'hex-world';
+} from '@loyalj/hex-world';
 ```
 
 ### Minimal example — terrain + rivers, no climate
 
 ```ts
-import { makeRng, createRegions, generateChunkTerrain, applyErosion, generateClimateRivers } from 'hex-world';
+import { makeRng, createRegions, generateChunkTerrain, applyErosion, generateClimateRivers } from '@loyalj/hex-world';
 
 function generateSimple(map: HexMap, seed: number): void {
   const rand = makeRng(seed);
@@ -136,7 +136,7 @@ function generateSimple(map: HexMap, seed: number): void {
 ```ts
 import { makeRng, createRegions, generateChunkTerrain, applyErosion,
          simulateClimate, computeTemperature, assignBiomes,
-         generateClimateRivers, generateRoads } from 'hex-world';
+         generateClimateRivers, generateRoads } from '@loyalj/hex-world';
 
 function generateFull(map: HexMap, seed: number): void {
   const rand    = makeRng(seed);
@@ -221,7 +221,7 @@ Returns `Float32Array` of per-cell temperature (0–1). Cold poles, warm equator
 Sets terrain type and tree-density feature layer (layer 0) per cell using a 4×4 temperature × moisture matrix. Override the matrix for custom biome distributions.
 
 ```ts
-import { TerrainType } from 'hex-world';
+import { TerrainType } from '@loyalj/hex-world';
 
 assignBiomes(map, temperature, moisture, {
   elevationMax: 12,

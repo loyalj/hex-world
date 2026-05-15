@@ -25,7 +25,7 @@ This is stored in the binary and JSON save formats, so the count must match betw
 `ScatterDefinition` is the runtime object that `ChunkManager` consumes. You build it directly when your geometry is procedural or preloaded.
 
 ```ts
-import type { ScatterDefinition } from 'hex-world';
+import type { ScatterDefinition } from '@loyalj/hex-world';
 import * as THREE from 'three';
 
 const treeMat = new THREE.MeshLambertMaterial({ color: 0x4a7c2a });
@@ -87,7 +87,7 @@ tiers: [
 The scatter system needs a seeded hash grid for deterministic placement. One grid per map is enough for all definitions:
 
 ```ts
-import { HexHashGrid } from 'hex-world';
+import { HexHashGrid } from '@loyalj/hex-world';
 
 const hashGrid = new HexHashGrid(seed);   // same seed = same placement
 ```
@@ -97,7 +97,7 @@ const hashGrid = new HexHashGrid(seed);   // same seed = same placement
 ## 4. Pass definitions to `ChunkManager`
 
 ```ts
-import { ChunkManager } from 'hex-world';
+import { ChunkManager } from '@loyalj/hex-world';
 
 const chunks = new ChunkManager({
   map, layout, scene,
@@ -151,8 +151,8 @@ To make two definitions genuinely compete for one slot, give them the **same `la
 `ScatterDefinition` holds live Three.js objects so it can't be serialised directly. For save/load-compatible scatter, split the definition into a `ScatterDescriptor` (serialisable) and a `ScatterAssetRegistry` (runtime-only):
 
 ```ts
-import type { ScatterDescriptor, ScatterAssetRegistry } from 'hex-world';
-import { resolveScatterDefinition } from 'hex-world';
+import type { ScatterDescriptor, ScatterAssetRegistry } from '@loyalj/hex-world';
+import { resolveScatterDefinition } from '@loyalj/hex-world';
 
 // Declare once at module level — stable across sessions
 const PINE_DESCRIPTOR: ScatterDescriptor = {
@@ -181,7 +181,7 @@ const pineDefinition = resolveScatterDefinition(PINE_DESCRIPTOR, registry);
 ### Embedding in the map JSON
 
 ```ts
-import { serializeMapJSON, deserializeMapJSON } from 'hex-world';
+import { serializeMapJSON, deserializeMapJSON } from '@loyalj/hex-world';
 
 // Save — descriptors travel with the map
 const json = serializeMapJSON(map, metadata, [PINE_DESCRIPTOR]);

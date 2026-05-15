@@ -7,7 +7,7 @@
 ## Setup
 
 ```ts
-import { FogData, ChunkManager } from 'hex-world';
+import { FogData, ChunkManager } from '@loyalj/hex-world';
 
 const fog    = new FogData(map.width, map.height);
 const chunks = new ChunkManager({ ..., fogData: fog });
@@ -109,7 +109,7 @@ Toggle at any time — the change takes effect immediately on the next rendered 
 Pass `fogData` to `UnitManager` and set `fogRevealRange > 0` on each unit. The manager wires `increaseVisibility` / `decreaseVisibility` to `onCellEnter` automatically, so you don't track cells manually for moving units:
 
 ```ts
-import { HexUnit, UnitManager } from 'hex-world';
+import { HexUnit, UnitManager } from '@loyalj/hex-world';
 
 const manager = new UnitManager({ scene, map, layout, fogData: fog });
 

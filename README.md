@@ -25,7 +25,7 @@ Your game owns the UI, unit models, game rules, and render loop. The library own
 ## Installation
 
 ```bash
-npm install hex-world
+npm install @loyalj/hex-world
 ```
 
 Three.js is a peer dependency — bring your own:
@@ -46,7 +46,7 @@ import {
   createWaterMaterial, createWaterShoreMaterial,
   createEstuaryMaterial, createRiverMaterial, createRoadMaterial,
   DEFAULT_TERRAIN_DESCRIPTORS, DEFAULT_TERRAIN_DEFINITIONS,
-} from 'hex-world';
+} from '@loyalj/hex-world';
 
 // Map data + generation
 const map = new HexMap({ width: 100, height: 100, featureLayerCount: 1 });
