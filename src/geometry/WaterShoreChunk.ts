@@ -3,7 +3,7 @@ import type { HexLayout } from '../math/HexLayout.js';
 import { hexToWorld } from '../math/HexLayout.js';
 import { HEX_DIRECTIONS } from '../math/HexCoord.js';
 import type { HexMap } from '../map/HexMap.js';
-import { TerrainType } from '../map/HexCell.js';
+import { DEFAULT_WATER_TERRAIN_INDEX } from './TerrainTypes.js';
 import { sampleNoise } from '../math/Noise.js';
 import type { ChunkBounds } from './HexChunk.js';
 import type { WaterGeometryOptions } from './WaterChunk.js';
@@ -39,7 +39,9 @@ export function buildShoreGeometry(
   const perturbStr     = opts.perturbStrength    ?? 0.8;
   const elevScale      = opts.elevationScale     ?? 0.5;
   const elevPerturbStr = 0.2; // must match HexChunk elevPerturbStrength default
-  const edgeDirs   = layout.orientation.edgeDirections;
+  const edgeDirs       = layout.orientation.edgeDirections;
+  const waterTerrains  = opts.waterTerrains ?? new Set([DEFAULT_WATER_TERRAIN_INDEX]);
+  const isWater = (t: number) => waterTerrains.has(t);
   const startAngle = layout.orientation.startAngle;
 
   const { colStart, colEnd, rowStart, rowEnd } = bounds;
@@ -110,7 +112,7 @@ export function buildShoreGeometry(
   for (let row = rowStart; row < rowEnd; row++) {
     for (let col = colStart; col < colEnd; col++) {
       if (!map.inBounds(col, row)) continue;
-      if (map.getTerrain(col, row) !== TerrainType.Water) continue;
+      if (!isWater(map.getTerrain(col, row))) continue;
 
       curCi = row * map.width + col;
       const q      = col - (row - (row & 1)) / 2;
@@ -124,7 +126,7 @@ export function buildShoreGeometry(
         const nc = nq + (nr - (nr & 1)) / 2;
 
         if (!map.inBounds(nc, nr)) continue;
-        if (map.getTerrain(nc, nr) === TerrainType.Water) continue;
+        if (isWater(map.getTerrain(nc, nr))) continue;
 
         // Shore edge found: current cell is water, neighbor (nc,nr) is land.
         const i1 = (i + 1) % 6;
@@ -169,7 +171,7 @@ export function buildShoreGeometry(
         const nb2c = nb2q + (nb2r - (nb2r & 1)) / 2;
 
         if (map.inBounds(nb2c, nb2r)) {
-          const nb2IsWater = map.getTerrain(nb2c, nb2r) === TerrainType.Water;
+          const nb2IsWater = isWater(map.getTerrain(nb2c, nb2r));
           const nb2Center  = hexCenter(nb2c, nb2r);
           const cornerJ    = (i + 5) % 6;
           const factor     = nb2IsWater ? WATER_FACTOR : SOLID_FACTOR;

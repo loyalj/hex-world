@@ -3,7 +3,8 @@ import type { HexLayout } from '../math/HexLayout.js';
 import { hexToWorld, hexCorners } from '../math/HexLayout.js';
 import { HEX_DIRECTIONS } from '../math/HexCoord.js';
 import type { HexMap } from '../map/HexMap.js';
-import { TerrainType, RIVER_SURFACE_ELEVATION_OFFSET } from '../map/HexCell.js';
+import { RIVER_SURFACE_ELEVATION_OFFSET } from '../map/HexCell.js';
+import { DEFAULT_WATER_TERRAIN_INDEX } from './TerrainTypes.js';
 import { sampleNoise } from '../math/Noise.js';
 import type { ChunkBounds } from './HexChunk.js';
 
@@ -12,6 +13,8 @@ export interface WaterGeometryOptions {
   noiseScale?: number;
   perturbStrength?: number;
   elevationScale?: number;
+  /** Set of terrain indices that count as water. Defaults to {5} (built-in Water). */
+  waterTerrains?: Set<number>;
 }
 
 const SOLID_FACTOR   = 0.8;
@@ -34,9 +37,11 @@ export function buildWaterGeometry(
   bounds: ChunkBounds,
   opts: WaterGeometryOptions = {},
 ): THREE.BufferGeometry | null {
-  const waterLevel = opts.waterLevel      ?? 0;
-  const noiseScale = opts.noiseScale      ?? 0.35;
-  const perturbStr = opts.perturbStrength ?? 0.8;
+  const waterLevel   = opts.waterLevel      ?? 0;
+  const noiseScale   = opts.noiseScale      ?? 0.35;
+  const perturbStr   = opts.perturbStrength ?? 0.8;
+  const waterTerrains = opts.waterTerrains ?? new Set([DEFAULT_WATER_TERRAIN_INDEX]);
+  const isWater = (t: number) => waterTerrains.has(t);
 
   const { colStart, colEnd, rowStart, rowEnd } = bounds;
   const hexCount = (colEnd - colStart) * (rowEnd - rowStart);
@@ -67,7 +72,7 @@ export function buildWaterGeometry(
   for (let row = rowStart; row < rowEnd; row++) {
     for (let col = colStart; col < colEnd; col++) {
       if (!map.inBounds(col, row)) continue;
-      if (map.getTerrain(col, row) !== TerrainType.Water) continue;
+      if (!isWater(map.getTerrain(col, row))) continue;
 
       const q    = col - (row - (row & 1)) / 2;
       const c    = hexToWorld(layout, { q, r: row });
@@ -106,12 +111,14 @@ export function buildRiverGeometry(
   bounds: ChunkBounds,
   opts: WaterGeometryOptions = {},
 ): THREE.BufferGeometry | null {
-  const waterLevel     = opts.waterLevel      ?? 0;
-  const noiseScale     = opts.noiseScale      ?? 0.35;
-  const perturbStr     = opts.perturbStrength ?? 0.8;
-  const elevScale      = opts.elevationScale  ?? 0.5;
+  const waterLevel    = opts.waterLevel      ?? 0;
+  const noiseScale    = opts.noiseScale      ?? 0.35;
+  const perturbStr    = opts.perturbStrength ?? 0.8;
+  const elevScale     = opts.elevationScale  ?? 0.5;
   const elevPerturbStr = 0.2;
-  const edgeDirs       = layout.orientation.edgeDirections;
+  const edgeDirs      = layout.orientation.edgeDirections;
+  const waterTerrains  = opts.waterTerrains ?? new Set([DEFAULT_WATER_TERRAIN_INDEX]);
+  const isWaterTerrain = (t: number) => waterTerrains.has(t);
 
   const landCellY = (c: number, r: number): number => {
     const qq = c - (r - (r & 1)) / 2;
@@ -169,9 +176,9 @@ export function buildRiverGeometry(
     for (let col = colStart; col < colEnd; col++) {
       if (!map.inBounds(col, row)) continue;
 
-      const isWater  = map.getTerrain(col, row) === TerrainType.Water;
-      const hasRiver = map.hasRiver(col, row);
-      if (!hasRiver || isWater) continue;
+      const cellIsWater = isWaterTerrain(map.getTerrain(col, row));
+      const hasRiver    = map.hasRiver(col, row);
+      if (!hasRiver || cellIsWater) continue;
 
       curCi = row * map.width + col;
 
@@ -203,7 +210,7 @@ export function buildRiverGeometry(
         if (map.inBounds(nb.col, nb.row)) {
           const nbTerrain = map.getTerrain(nb.col, nb.row);
           const nbElev    = map.getElevation(nb.col, nb.row);
-          nbIsWater = nbTerrain === TerrainType.Water;
+          nbIsWater = isWaterTerrain(nbTerrain);
           nbRy = nbIsWater
             ? waterLevel
             : (nbElev + RIVER_SURFACE_ELEVATION_OFFSET) * elevScale;

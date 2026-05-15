@@ -1,5 +1,6 @@
 import { TerrainType } from '../map/HexCell.js';
 import type { HexMap } from '../map/HexMap.js';
+import { DEFAULT_WATER_TERRAIN_INDEX } from '../geometry/TerrainTypes.js';
 
 export interface BiomeAssignerOptions {
   /** Three thresholds that divide temperature into 4 bands. Default [0.1, 0.3, 0.6]. */
@@ -15,6 +16,8 @@ export interface BiomeAssignerOptions {
   biomeMatrix?:       TerrainType[][];
   /** 4×4 tree-density matrix (values 0–3) with the same indexing. */
   treeDensityMatrix?: number[][];
+  /** Terrain index assigned to submerged (elevation < 0) cells. Default 5 (built-in Water). */
+  waterTerrainIndex?: number;
 }
 
 // ---- Defaults (matching Part 26 tutorial) ----
@@ -51,11 +54,12 @@ export function assignBiomes(
   moisture: Float32Array,
   opts: BiomeAssignerOptions = {},
 ): void {
-  const tempBands = opts.temperatureBands  ?? [0.1, 0.3, 0.6] as [number, number, number];
-  const moistBands = opts.moistureBands    ?? [0.12, 0.28, 0.85] as [number, number, number];
-  const elevMax   = opts.elevationMax      ?? 12;
-  const biomes    = opts.biomeMatrix       ?? DEFAULT_BIOME_MATRIX;
-  const trees     = opts.treeDensityMatrix ?? DEFAULT_TREE_MATRIX;
+  const tempBands      = opts.temperatureBands  ?? [0.1, 0.3, 0.6] as [number, number, number];
+  const moistBands     = opts.moistureBands     ?? [0.12, 0.28, 0.85] as [number, number, number];
+  const elevMax        = opts.elevationMax      ?? 12;
+  const biomes         = opts.biomeMatrix       ?? DEFAULT_BIOME_MATRIX;
+  const trees          = opts.treeDensityMatrix ?? DEFAULT_TREE_MATRIX;
+  const waterIdx       = opts.waterTerrainIndex ?? DEFAULT_WATER_TERRAIN_INDEX;
 
   // High-elevation desert cells become rock desert above this line
   const rockDesertElevation = elevMax - Math.floor(elevMax / 2);
@@ -66,7 +70,7 @@ export function assignBiomes(
 
     // ---- Underwater cells ----
     if (elev < 0) {
-      map.setTerrain(col, row, TerrainType.Water);
+      map.setTerrain(col, row, waterIdx);
       if (map.featureLayerCount > 0) map.setFeatureLevel(col, row, 0, 0);
       return;
     }

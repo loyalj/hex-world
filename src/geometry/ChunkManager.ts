@@ -11,6 +11,8 @@ import { buildScatterMeshes } from './ScatterBuilder.js';
 import type { HexHashGrid } from './HexHashGrid.js';
 import type { ScatterDefinition } from './ScatterTypes.js';
 import type { FogData } from './FogData.js';
+import type { TerrainDefinition } from './TerrainTypes.js';
+import { DEFAULT_TERRAIN_DEFINITIONS, buildWaterTerrainSet } from './TerrainTypes.js';
 
 export interface ChunkManagerOptions {
   map: HexMap;
@@ -41,6 +43,11 @@ export interface ChunkManagerOptions {
   scatterDefinitions?: ScatterDefinition[];
   /** If provided, fog-of-war uniforms are set on all shader materials. */
   fogData?: FogData;
+  /**
+   * Terrain type definitions controlling vertex colors, road colors, and water geometry.
+   * Defaults to the built-in six types. Pass a merged or custom array to extend terrain.
+   */
+  terrainDefinitions?: TerrainDefinition[];
 }
 
 /**
@@ -65,9 +72,10 @@ export class ChunkManager {
   private readonly estuaryMaterial: THREE.Material | null;
   private readonly riverMaterial:   THREE.Material | null;
   private readonly roadMaterial:    THREE.Material | null;
-  private readonly hashGrid:        HexHashGrid | null;
+  private readonly hashGrid:           HexHashGrid | null;
   private readonly scatterDefinitions: ScatterDefinition[] | null;
-  private fogData:                  FogData | null;
+  private readonly waterTerrains:      Set<number>;
+  private fogData:                     FogData | null;
   private hideUnexplored            = true;
   private dimExplored               = true;
   private readonly geoOptions: ChunkGeometryOptions;
@@ -99,11 +107,13 @@ export class ChunkManager {
     this.estuaryMaterial = opts.estuaryMaterial ?? null;
     this.riverMaterial   = opts.riverMaterial   ?? null;
     this.roadMaterial    = opts.roadMaterial    ?? null;
-    this.hashGrid        = opts.hashGrid        ?? null;
+    this.hashGrid           = opts.hashGrid           ?? null;
     this.scatterDefinitions = opts.scatterDefinitions ?? null;
-    this.fogData         = opts.fogData         ?? null;
-    this.geoOptions      = opts.geometryOptions      ?? {};
-    this.waterGeoOptions = opts.waterGeometryOptions ?? {};
+    this.fogData            = opts.fogData            ?? null;
+    const terrainDefs    = opts.terrainDefinitions ?? DEFAULT_TERRAIN_DEFINITIONS;
+    this.waterTerrains   = buildWaterTerrainSet(terrainDefs);
+    this.geoOptions      = { ...opts.geometryOptions,      terrainDefinitions: terrainDefs };
+    this.waterGeoOptions = { ...opts.waterGeometryOptions, waterTerrains: this.waterTerrains };
     this.chunkSize  = opts.chunkSize  ?? 32;
     this.loadRadius = opts.loadRadius ?? 4;
     this.chunksX    = Math.ceil(opts.map.width  / this.chunkSize);
@@ -240,7 +250,7 @@ export class ChunkManager {
     }
 
     if (this.hashGrid && this.scatterDefinitions && this.scatterDefinitions.length > 0) {
-      const scMeshes = buildScatterMeshes(this.map, this.layout, b, this.hashGrid, this.scatterDefinitions);
+      const scMeshes = buildScatterMeshes(this.map, this.layout, b, this.hashGrid, this.scatterDefinitions, this.waterTerrains);
       if (scMeshes.length > 0) {
         for (const m of scMeshes) this.scene.add(m);
         this.scatterChunks.set(k, scMeshes);

@@ -3,7 +3,7 @@ import type { HexLayout } from '../math/HexLayout.js';
 import { hexToWorld } from '../math/HexLayout.js';
 import { HEX_DIRECTIONS } from '../math/HexCoord.js';
 import type { HexMap } from '../map/HexMap.js';
-import { TerrainType } from '../map/HexCell.js';
+import { DEFAULT_WATER_TERRAIN_INDEX } from './TerrainTypes.js';
 import { sampleNoise } from '../math/Noise.js';
 import type { ChunkBounds } from './HexChunk.js';
 import type { WaterGeometryOptions } from './WaterChunk.js';
@@ -37,7 +37,9 @@ export function buildEstuaryGeometry(
   const perturbStr     = opts.perturbStrength    ?? 0.8;
   const elevScale      = opts.elevationScale     ?? 0.5;
   const elevPerturbStr = 0.2; // must match HexChunk elevPerturbStrength default
-  const edgeDirs   = layout.orientation.edgeDirections;
+  const edgeDirs       = layout.orientation.edgeDirections;
+  const waterTerrains  = opts.waterTerrains ?? new Set([DEFAULT_WATER_TERRAIN_INDEX]);
+  const isWater = (t: number) => waterTerrains.has(t);
   const startAngle = layout.orientation.startAngle;
 
   const { colStart, colEnd, rowStart, rowEnd } = bounds;
@@ -108,7 +110,7 @@ export function buildEstuaryGeometry(
   for (let row = rowStart; row < rowEnd; row++) {
     for (let col = colStart; col < colEnd; col++) {
       if (!map.inBounds(col, row)) continue;
-      if (map.getTerrain(col, row) !== TerrainType.Water) continue;
+      if (!isWater(map.getTerrain(col, row))) continue;
 
       curCi = row * map.width + col;
       const q      = col - (row - (row & 1)) / 2;
@@ -124,7 +126,7 @@ export function buildEstuaryGeometry(
         const nc = nq + (nr - (nr & 1)) / 2;
 
         if (!map.inBounds(nc, nr)) continue;
-        if (map.getTerrain(nc, nr) === TerrainType.Water) continue;
+        if (isWater(map.getTerrain(nc, nr))) continue;
 
         const i1 = (i + 1) % 6;
 

@@ -2,6 +2,7 @@ import { TerrainType } from '../map/HexCell.js';
 import type { HexMap } from '../map/HexMap.js';
 import { POINTY_TOP } from '../math/HexOrientation.js';
 import { offsetNeighbor } from '../math/HexCoord.js';
+import { DEFAULT_WATER_TERRAIN_INDEX } from '../geometry/TerrainTypes.js';
 
 const EDGE_DIRS = POINTY_TOP.edgeDirections;
 
@@ -12,6 +13,8 @@ export interface RiverGeneratorOptions {
   minSeedElevation?: number;
   /** Maximum steps a traced river will take. Default 60. */
   maxSteps?: number;
+  /** Terrain index assigned to lake cells. Default 5 (built-in Water). */
+  waterTerrainIndex?: number;
 }
 
 export interface ClimateRiverOptions {
@@ -23,6 +26,8 @@ export interface ClimateRiverOptions {
   maxSteps?: number;
   /** Maximum land elevation — used for origin weighting. Default 12. */
   elevationMax?: number;
+  /** Terrain index assigned to lake cells. Default 5 (built-in Water). */
+  waterTerrainIndex?: number;
 }
 
 // ---- Climate-driven river generator ----
@@ -33,6 +38,7 @@ function traceClimateRiver(
   maxSteps: number,
   lakeProbability: number,
   rand: () => number,
+  waterIdx: number,
 ): number {
   let c = startCol, r = startRow;
   let prevFace = -1;
@@ -93,7 +99,7 @@ function traceClimateRiver(
       if (length === 1) return 0; // couldn't leave origin — don't consume budget
       if (minNbElev >= curElev) {
         // Force elevation below sea level so the water surface renders correctly
-        map.setTerrain(c, r, TerrainType.Water);
+        map.setTerrain(c, r, waterIdx);
         map.setElevation(c, r, -1);
       }
       break;
@@ -136,10 +142,11 @@ export function generateClimateRivers(
   opts: ClimateRiverOptions,
   rand: () => number,
 ): void {
-  const riverPct = Math.min(20, opts.riverPercentage      ?? 10);
-  const lakePct  = opts.extraLakeProbability ?? 0.25;
-  const maxSteps = opts.maxSteps             ?? 100;
-  const elevMax  = opts.elevationMax         ?? 12;
+  const riverPct  = Math.min(20, opts.riverPercentage      ?? 10);
+  const lakePct   = opts.extraLakeProbability ?? 0.25;
+  const maxSteps  = opts.maxSteps             ?? 100;
+  const elevMax   = opts.elevationMax         ?? 12;
+  const waterIdx  = opts.waterTerrainIndex    ?? DEFAULT_WATER_TERRAIN_INDEX;
 
   // Build weighted origin list using additive ifs (matching tutorial exactly)
   const origins: [number, number][] = [];
@@ -178,18 +185,18 @@ export function generateClimateRivers(
     }
     if (tooClose) continue;
 
-    budget -= traceClimateRiver(map, col, row, maxSteps, lakePct, rand);
+    budget -= traceClimateRiver(map, col, row, maxSteps, lakePct, rand, waterIdx);
   }
 }
 
 // ---- Simple grid-seeded river generator (used by FBM generator) ----
 
-function traceRiver(map: HexMap, col: number, row: number, maxSteps: number): void {
+function traceRiver(map: HexMap, col: number, row: number, maxSteps: number, waterIdx: number): void {
   let c = col, r = row;
   const visited = new Set<number>();
 
   for (let step = 0; step < maxSteps; step++) {
-    if (map.getTerrain(c, r) === TerrainType.Water) break;
+    if (map.getElevation(c, r) < 0 || map.getTerrain(c, r) === waterIdx) break;
 
     const cellKey = r * map.width + c;
     if (visited.has(cellKey)) break;
@@ -230,16 +237,17 @@ function traceRiver(map: HexMap, col: number, row: number, maxSteps: number): vo
  * Used by the FBM generator.
  */
 export function generateRivers(map: HexMap, opts: RiverGeneratorOptions = {}): void {
-  const gridSpacing      = opts.gridSpacing      ?? 48;
-  const minSeedElevation = opts.minSeedElevation ?? 5;
-  const maxSteps         = opts.maxSteps         ?? 60;
+  const gridSpacing      = opts.gridSpacing       ?? 48;
+  const minSeedElevation = opts.minSeedElevation  ?? 5;
+  const maxSteps         = opts.maxSteps          ?? 60;
+  const waterIdx         = opts.waterTerrainIndex ?? DEFAULT_WATER_TERRAIN_INDEX;
 
   for (let row = gridSpacing / 2; row < map.height; row += gridSpacing) {
     for (let col = gridSpacing / 2; col < map.width; col += gridSpacing) {
       if (!map.inBounds(col, row)) continue;
-      if (map.getTerrain(col, row) === TerrainType.Water) continue;
+      if (map.getTerrain(col, row) === waterIdx) continue;
       if (map.getElevation(col, row) >= minSeedElevation) {
-        traceRiver(map, col, row, maxSteps);
+        traceRiver(map, col, row, maxSteps, waterIdx);
       }
     }
   }

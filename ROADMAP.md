@@ -45,6 +45,7 @@ Follows the structure of the [Catlike Coding Hex Map tutorial series](https://ca
 - [x] Per-cell color/terrain-type storage
 - [x] Vertex color blending at cell edges — 3-cell corner average, no hard borders
 - [x] Texture splatting — `TerrainMaterial` (splat map + `DataArrayTexture`), procedural noise per terrain type with per-type image override support (`buildTerrainTextureArray`), `colorMode: 'flat' | 'splat' | 'debug'` on `ChunkGeometryOptions`, `ChunkManager.setColorMode()` for runtime switching
+- [x] Extensible terrain type system — `TerrainDescriptor` (serializable: index 0–255, id, name, hex color, roadColor, isWater, texture descriptor) + `TerrainDefinition` (runtime: resolved `THREE.Color`); `TerrainAssetRegistry` maps asset IDs to image sources; `resolveTerrainDefinitions`, `buildWaterTerrainSet`, `buildTerrainLookup` helpers; `DEFAULT_TERRAIN_DESCRIPTORS/DEFINITIONS` ship the built-in six; games pass `terrainDefinitions` to `ChunkManager`, `waterTerrainIndex` to generators; all geometry builders (`HexChunk`, water, shore, estuary, road, scatter) consume the definition set instead of hardcoded arrays; `buildTerrainTextureArray` takes a descriptor array and registry for dynamic atlas sizing and image-backed slices
 - [x] Demo: multi-terrain map with smooth blends
 
 ---
@@ -100,6 +101,7 @@ Follows the structure of the [Catlike Coding Hex Map tutorial series](https://ca
 - [x] Binary serialization format for `HexMap` data — `HXMP` magic, version byte, uint32 dimensions, three packed data sections
 - [x] Save/load API — `serializeMap` / `deserializeMap` (binary `Uint8Array`), `serializeMapJSON` / `deserializeMapJSON` (base64 JSON envelope)
 - [x] Map metadata (`MapMetadata` interface: name, seed, generatorId) — optional second arg to `serializeMapJSON`, returned in `DeserializedMap` from `deserializeMapJSON`
+- [x] Descriptor embedding in JSON envelope — `serializeMapJSON` accepts optional `scatterDescriptors` and `terrainDescriptors` as 3rd/4th args; `deserializeMapJSON` returns both in `DeserializedMap` so consumers can reconstruct full definitions on load
 - [x] Demo: `[S]` saves current map + metadata to localStorage; `[L]` loads and restores generator selection, seed, and cell data; status shown in HUD
 
 ---

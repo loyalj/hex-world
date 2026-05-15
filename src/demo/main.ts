@@ -10,6 +10,7 @@ import { createEstuaryMaterial } from '../geometry/EstuaryMaterial.js';
 import { createRiverMaterial } from '../geometry/RiverMaterial.js';
 import { createRoadMaterial } from '../geometry/RoadMaterial.js';
 import { buildTerrainTextureArray } from '../geometry/TerrainTextures.js';
+import { DEFAULT_TERRAIN_DESCRIPTORS, DEFAULT_TERRAIN_DEFINITIONS } from '../geometry/TerrainTypes.js';
 import { createTerrainMaterial } from '../geometry/TerrainMaterial.js';
 import type { TerrainColorMode } from '../geometry/ChunkManager.js';
 import { HexHashGrid } from '../geometry/HexHashGrid.js';
@@ -159,7 +160,7 @@ async function start() {
 
   let terrainMaterial: THREE.Material;
   if (TERRAIN_COLOR_MODE === 'splat') {
-    const terrainTex = await buildTerrainTextureArray();
+    const terrainTex = await buildTerrainTextureArray(DEFAULT_TERRAIN_DESCRIPTORS);
     terrainMaterial = createTerrainMaterial(terrainTex, {
       lightDir:   new THREE.Vector3(100, 120, 80),
       lightColor: new THREE.Color(0xfff4d0).multiplyScalar(0.7),
@@ -352,7 +353,8 @@ async function start() {
     waterGeometryOptions: waterGeoOptions,
     roadMaterial,
     hashGrid,
-    scatterDefinitions: [pineDefinition, rockDefinition],
+    scatterDefinitions:  [pineDefinition, rockDefinition],
+    terrainDefinitions:  DEFAULT_TERRAIN_DEFINITIONS,
     fogData,
   });
 

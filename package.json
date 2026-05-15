@@ -1,7 +1,35 @@
 {
   "name": "hex-world",
   "version": "0.1.0",
-  "description": "Three.js hex grid library for strategy games",
+  "description": "Three.js hex grid library for strategy and exploration games — chunk-based rendering, terrain, water, roads, scatter, fog of war, pathfinding, and procedural generation.",
+  "author": "Loyal Johnson <loyalj@gmail.com>",
+  "license": "ISC",
+  "keywords": [
+    "hexagon",
+    "hex",
+    "hex-grid",
+    "hex-map",
+    "three",
+    "threejs",
+    "three.js",
+    "strategy",
+    "strategy-game",
+    "rts",
+    "game",
+    "webgl",
+    "procedural-generation",
+    "pathfinding",
+    "fog-of-war",
+    "tilemap"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/loyalj/hex-world.git"
+  },
+  "homepage": "https://github.com/loyalj/hex-world#readme",
+  "bugs": {
+    "url": "https://github.com/loyalj/hex-world/issues"
+  },
   "main": "./dist/hex-world.js",
   "types": "./dist/types/index.d.ts",
   "exports": {
@@ -13,15 +41,12 @@
   "files": [
     "dist"
   ],
+  "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build && tsc --emitDeclarationOnly",
+    "build": "vite build && tsc --emitDeclarationOnly --project tsconfig.build.json",
     "docs": "typedoc"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "type": "module",
   "peerDependencies": {
     "three": ">=0.150.0"
   },

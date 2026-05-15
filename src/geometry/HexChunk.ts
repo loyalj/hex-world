@@ -3,30 +3,17 @@ import type { HexLayout } from '../math/HexLayout.js';
 import { hexToWorld, hexCorners } from '../math/HexLayout.js';
 import { HEX_DIRECTIONS } from '../math/HexCoord.js';
 import type { HexMap } from '../map/HexMap.js';
-import { TerrainType, STREAM_BED_ELEVATION_OFFSET } from '../map/HexCell.js';
+import { STREAM_BED_ELEVATION_OFFSET } from '../map/HexCell.js';
 import { sampleNoise } from '../math/Noise.js';
+import type { TerrainDefinition } from './TerrainTypes.js';
+import { DEFAULT_TERRAIN_LOOKUP } from './TerrainTypes.js';
 
 export type TerrainColorMode = 'flat' | 'splat' | 'debug';
 
-export const TERRAIN_COLORS: Record<TerrainType, THREE.Color> = {
-  [TerrainType.Grassland]: new THREE.Color(0x86b888),
-  [TerrainType.Desert]:    new THREE.Color(0xc8bea0),
-  [TerrainType.Snow]:      new THREE.Color(0xd5e6f5),
-  [TerrainType.Mud]:       new THREE.Color(0xa08870),
-  [TerrainType.Rock]:      new THREE.Color(0xa3adb5),
-  [TerrainType.Water]:     new THREE.Color(0x4a8fb5),
-};
-
 type RGB = readonly [number, number, number];
 
-const ROAD_COLORS: Record<TerrainType, RGB> = {
-  [TerrainType.Grassland]: [0.50, 0.43, 0.33],
-  [TerrainType.Desert]:    [0.54, 0.46, 0.34],
-  [TerrainType.Snow]:      [0.36, 0.41, 0.52],
-  [TerrainType.Mud]:       [0.35, 0.27, 0.16],
-  [TerrainType.Rock]:      [0.46, 0.46, 0.45],
-  [TerrainType.Water]:     [0.42, 0.46, 0.50],
-};
+const _fallbackColor = new THREE.Color(0x888888);
+const _fallbackRoad: RGB = [0.4, 0.4, 0.4];
 
 export interface ChunkBounds {
   colStart: number;
@@ -42,6 +29,8 @@ export interface ChunkGeometryOptions {
   noiseScale?: number;
   cliffThreshold?: number;
   colorMode?: TerrainColorMode;
+  /** Terrain definitions used for vertex color and road color lookups. Defaults to the built-in six. */
+  terrainDefinitions?: TerrainDefinition[];
 }
 
 const SOLID_FACTOR  = 0.8;
@@ -88,6 +77,15 @@ export function buildChunkGeometry(
   const cliffThreshold      = opts.cliffThreshold       ?? 2;
   const colorMode           = opts.colorMode            ?? 'splat';
   const isSplat             = colorMode === 'splat';
+
+  // Build per-type color/road-color lookups from terrain definitions.
+  const terrainLookup: Map<number, TerrainDefinition> = opts.terrainDefinitions
+    ? new Map(opts.terrainDefinitions.map(d => [d.index, d]))
+    : DEFAULT_TERRAIN_LOOKUP;
+  const terrainColor = (t: number): THREE.Color =>
+    (terrainLookup.get(t) ?? { color: _fallbackColor }).color;
+  const roadColor = (t: number): RGB =>
+    (terrainLookup.get(t) ?? { roadColor: _fallbackRoad }).roadColor;
   const edgeDirs  = layout.orientation.edgeDirections;
   const { colStart, colEnd, rowStart, rowEnd } = bounds;
   const hexCount  = (colEnd - colStart) * (rowEnd - rowStart);
@@ -458,7 +456,7 @@ export function buildChunkGeometry(
       triangulateRoadSegment(
         ie2x, ownY,    ie2z,  ie3x, ownBedY, ie3z,  ie4x, ownY,    ie4z,
         oe2x, nbY,     oe2z,  oe3x, nbBedY,  oe3z,  oe4x, nbY,     oe4z,
-        ROAD_COLORS[type1 as TerrainType], ROAD_COLORS[type2 as TerrainType],
+        roadColor(type1), roadColor(type2),
         ownCi, nbCi,
       );
     }
@@ -490,8 +488,8 @@ export function buildChunkGeometry(
     let p5x = ie5x, p5z = ie5z;
     let py = lowerY, p3y = lowerBedY, pr = lr, pg = lg, pb = lb;
 
-    const rc1 = ROAD_COLORS[type1 as TerrainType];
-    const rc2 = ROAD_COLORS[type2 as TerrainType];
+    const rc1 = roadColor(type1);
+    const rc2 = roadColor(type2);
 
     for (let step = 1; step <= TERRACE_STEPS; step++) {
       const h   = step * H_STEP;
@@ -542,7 +540,7 @@ export function buildChunkGeometry(
       const ownY      = cellElevY(col, row);
       const ownTerrain = map.getTerrain(col, row);
       const ownType   = ownTerrain as number;
-      const own       = TERRAIN_COLORS[ownTerrain];
+      const own       = terrainColor(ownTerrain);
       const or = own.r, og = own.g, ob = own.b;
       const ownCi     = row * map.width + col;
 
@@ -601,7 +599,7 @@ export function buildChunkGeometry(
             const mRx = center.x + (e5x - center.x) * interp.r, mRz = center.z + (e5z - center.z) * interp.r;
             const nbI = nbOffset(col, row, edgeDirs[i]);
             const nbRoadCi = map.inBounds(nbI.col, nbI.row) ? nbI.row * map.width + nbI.col : ownCi;
-            const nbRoadColor = ROAD_COLORS[map.inBounds(nbI.col, nbI.row) ? map.getTerrain(nbI.col, nbI.row) : ownTerrain];
+            const nbRoadColor = roadColor(map.inBounds(nbI.col, nbI.row) ? map.getTerrain(nbI.col, nbI.row) : ownTerrain);
             triangulateRoad(
               center.x, ownY, center.z,
               mLx, ownY, mLz,
@@ -610,7 +608,7 @@ export function buildChunkGeometry(
               e3x, ownY, e3z,
               e4x, ownY, e4z,
               map.hasRoadThroughEdge(col, row, i),
-              ROAD_COLORS[ownTerrain], nbRoadColor,
+              roadColor(ownTerrain), nbRoadColor,
               ownCi, nbRoadCi,
             );
           }
@@ -703,12 +701,12 @@ export function buildChunkGeometry(
             const mRx = rcx + (e5x - rcx) * interp.r, mRz = rcz + (e5z - rcz) * interp.r;
             const nbI = nbOffset(col, row, edgeDirs[i]);
             const nbRoadCi = map.inBounds(nbI.col, nbI.row) ? nbI.row * map.width + nbI.col : ownCi;
-            const nbRoadColor = ROAD_COLORS[map.inBounds(nbI.col, nbI.row) ? map.getTerrain(nbI.col, nbI.row) : ownTerrain];
+            const nbRoadColor = roadColor(map.inBounds(nbI.col, nbI.row) ? map.getTerrain(nbI.col, nbI.row) : ownTerrain);
             triangulateRoad(rcx,ownY,rcz, mLx,ownY,mLz, mRx,ownY,mRz,
               e2x,ownY,e2z, e3x,ownY,e3z, e4x,ownY,e4z, hasRoadThrough,
-              ROAD_COLORS[ownTerrain], nbRoadColor, ownCi, nbRoadCi);
-            if (previousHasRiver) triangulateRoadEdge(rcx,ownY,rcz, cx,ownY,cz, mLx,ownY,mLz, ROAD_COLORS[ownTerrain], ownCi);
-            if (nextHasRiver)     triangulateRoadEdge(rcx,ownY,rcz, mRx,ownY,mRz, cx,ownY,cz, ROAD_COLORS[ownTerrain], ownCi);
+              roadColor(ownTerrain), nbRoadColor, ownCi, nbRoadCi);
+            if (previousHasRiver) triangulateRoadEdge(rcx,ownY,rcz, cx,ownY,cz, mLx,ownY,mLz, roadColor(ownTerrain), ownCi);
+            if (nextHasRiver)     triangulateRoadEdge(rcx,ownY,rcz, mRx,ownY,mRz, cx,ownY,cz, roadColor(ownTerrain), ownCi);
           })();
 
         } else if (map.hasRiverBeginOrEnd(col, row)) {
@@ -783,7 +781,7 @@ export function buildChunkGeometry(
         const nbY       = cellElevY(nb.col, nb.row);
         const nbTerrain = map.getTerrain(nb.col, nb.row);
         const nbType    = nbTerrain as number;
-        const nbColor   = TERRAIN_COLORS[nbTerrain];
+        const nbColor   = terrainColor(nbTerrain);
         const nr = nbColor.r, ng = nbColor.g, nb2 = nbColor.b;
         const nbCi = nb.row * map.width + nb.col;
 
@@ -873,7 +871,7 @@ export function buildChunkGeometry(
           const nextNbY       = cellElevY(nextNb.col, nextNb.row);
           const nextNbTerrain = map.getTerrain(nextNb.col, nextNb.row);
           const nextNbType    = nextNbTerrain as number;
-          const nextNbColor   = TERRAIN_COLORS[nextNbTerrain];
+          const nextNbColor   = terrainColor(nextNbTerrain);
           const nnr = nextNbColor.r, nng = nextNbColor.g, nnb = nextNbColor.b;
           const nextNbCi = nextNb.row * map.width + nextNb.col;
 

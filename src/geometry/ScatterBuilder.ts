@@ -2,11 +2,11 @@ import * as THREE from 'three';
 import type { HexMap } from '../map/HexMap.js';
 import type { HexLayout } from '../math/HexLayout.js';
 import { hexToWorld, hexCorners } from '../math/HexLayout.js';
-import { TerrainType } from '../map/HexCell.js';
 import { sampleNoise } from '../math/Noise.js';
 import type { HexHashGrid } from './HexHashGrid.js';
 import type { ScatterDefinition, ScatterLayerConfig, FeatureCollection } from './ScatterTypes.js';
 import type { ChunkBounds } from './HexChunk.js';
+import { DEFAULT_WATER_TERRAIN_INDEX } from './TerrainTypes.js';
 
 // Tutorial threshold table: index = level-1, values = per-tier hash cutoffs.
 // Tier 0 = highest density variant, tier 2 = lowest density variant.
@@ -137,6 +137,7 @@ export function buildScatterMeshes(
   bounds: ChunkBounds,
   hashGrid: HexHashGrid,
   definitions: ScatterDefinition[],
+  waterTerrains: Set<number> = new Set([DEFAULT_WATER_TERRAIN_INDEX]),
 ): THREE.InstancedMesh[] {
   if (definitions.length === 0) return [];
 
@@ -149,7 +150,7 @@ export function buildScatterMeshes(
   for (let row = rowStart; row < rowEnd; row++) {
     for (let col = colStart; col < colEnd; col++) {
       if (!map.inBounds(col, row)) continue;
-      if (map.getTerrain(col, row) === TerrainType.Water) continue;
+      if (waterTerrains.has(map.getTerrain(col, row))) continue;
 
       const terrain = map.getTerrain(col, row);
 

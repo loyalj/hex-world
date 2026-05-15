@@ -1,5 +1,6 @@
 import { HexMap } from './HexMap.js';
 import type { ScatterDescriptor } from '../geometry/ScatterTypes.js';
+import type { TerrainDescriptor } from '../geometry/TerrainTypes.js';
 
 const MAGIC   = [0x48, 0x58, 0x4d, 0x50]; // "HXMP"
 const VERSION = 1;
@@ -12,11 +13,12 @@ export interface MapMetadata {
   generatorId?: string;
 }
 
-/** Result of deserializing a JSON map — includes the map, metadata, and any scatter definitions. */
+/** Result of deserializing a JSON map — includes the map, metadata, and descriptor sets. */
 export interface DeserializedMap {
-  map:                HexMap;
-  metadata:           MapMetadata;
-  scatterDescriptors: ScatterDescriptor[];
+  map:                 HexMap;
+  metadata:            MapMetadata;
+  scatterDescriptors:  ScatterDescriptor[];
+  terrainDescriptors:  TerrainDescriptor[];
 }
 
 // --- Binary ---
@@ -88,10 +90,11 @@ interface MapJSON {
   cells: string;
   roads: string;
   features: string;
-  name?:               string;
-  seed?:               number;
-  generatorId?:        string;
-  scatterDescriptors?: ScatterDescriptor[];
+  name?:                string;
+  seed?:                number;
+  generatorId?:         string;
+  scatterDescriptors?:  ScatterDescriptor[];
+  terrainDescriptors?:  TerrainDescriptor[];
 }
 
 function uint8ToBase64(data: Uint8Array): string {
@@ -119,6 +122,7 @@ export function serializeMapJSON(
   map: HexMap,
   metadata: MapMetadata = {},
   scatterDescriptors?: ScatterDescriptor[],
+  terrainDescriptors?: TerrainDescriptor[],
 ): string {
   const payload: MapJSON = {
     version:           VERSION,
@@ -129,7 +133,8 @@ export function serializeMapJSON(
     roads:    uint8ToBase64(map.roadBits),
     features: map.featureData ? uint8ToBase64(map.featureData) : '',
     ...metadata,
-    ...(scatterDescriptors && scatterDescriptors.length > 0 ? { scatterDescriptors } : {}),
+    ...(scatterDescriptors  && scatterDescriptors.length  > 0 ? { scatterDescriptors }  : {}),
+    ...(terrainDescriptors  && terrainDescriptors.length  > 0 ? { terrainDescriptors }  : {}),
   };
   return JSON.stringify(payload);
 }
@@ -154,5 +159,6 @@ export function deserializeMapJSON(json: string): DeserializedMap {
     map,
     metadata:           { name: p.name, seed: p.seed, generatorId: p.generatorId },
     scatterDescriptors: p.scatterDescriptors ?? [],
+    terrainDescriptors: p.terrainDescriptors ?? [],
   };
 }

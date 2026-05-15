@@ -32,6 +32,7 @@ import {
   createWaterMaterial, createWaterShoreMaterial,
   createEstuaryMaterial, createRiverMaterial, createRoadMaterial,
   buildTerrainTextureArray, createTerrainMaterial,
+  DEFAULT_TERRAIN_DESCRIPTORS, DEFAULT_TERRAIN_DEFINITIONS,
 } from 'hex-world';
 
 // 1. Map data
@@ -49,20 +50,21 @@ renderer.setSize(innerWidth, innerHeight);
 document.body.appendChild(renderer.domElement);
 
 // 4. Terrain material (splat = texture blend, flat = vertex colour, debug = terrain IDs)
-const terrainTex = await buildTerrainTextureArray();
+const terrainTex = await buildTerrainTextureArray(DEFAULT_TERRAIN_DESCRIPTORS);
 const terrainMaterial = createTerrainMaterial(terrainTex);
 
 // 5. ChunkManager — owns all Three.js meshes, handles chunk streaming
 const chunks = new ChunkManager({
   map, layout, scene,
-  material:         terrainMaterial,
-  waterMaterial:    createWaterMaterial(),
-  shoreMaterial:    createWaterShoreMaterial(),
-  estuaryMaterial:  createEstuaryMaterial(),
-  riverMaterial:    createRiverMaterial(),
-  roadMaterial:     createRoadMaterial(),
-  chunkSize:        32,
-  loadRadius:       5,
+  material:           terrainMaterial,
+  waterMaterial:      createWaterMaterial(),
+  shoreMaterial:      createWaterShoreMaterial(),
+  estuaryMaterial:    createEstuaryMaterial(),
+  riverMaterial:      createRiverMaterial(),
+  roadMaterial:       createRoadMaterial(),
+  terrainDefinitions: DEFAULT_TERRAIN_DEFINITIONS,
+  chunkSize:          32,
+  loadRadius:         5,
 });
 
 // 6. Render loop
@@ -78,17 +80,109 @@ animate();
 
 ## Terrain types
 
-The six built-in types are numeric constants:
+Terrain is stored per-cell as a `Uint8` index (0–255). The library ships with six built-in types (`TerrainType.Grassland = 0` through `TerrainType.Water = 5`). Games that need custom terrain — different biomes, color palettes, or image textures — define their own `TerrainDescriptor` array and pass it to the library at startup.
+
+### Using the defaults
 
 ```ts
-import { TerrainType } from 'hex-world';
+import {
+  TerrainType,
+  DEFAULT_TERRAIN_DESCRIPTORS, DEFAULT_TERRAIN_DEFINITIONS,
+  buildTerrainTextureArray, createTerrainMaterial, ChunkManager,
+} from 'hex-world';
 
-// TerrainType.Water | Grassland | Desert | Mud | Rock | Snow
-map.setTerrain(col, row, TerrainType.Grassland);
-map.setElevation(col, row, 3);   // Int8, -128–127; negative = underwater
+const terrainTex = await buildTerrainTextureArray(DEFAULT_TERRAIN_DESCRIPTORS);
+const terrainMaterial = createTerrainMaterial(terrainTex);
+
+const chunks = new ChunkManager({
+  // ...
+  terrainDefinitions: DEFAULT_TERRAIN_DEFINITIONS,
+});
+
+map.setTerrain(col, row, TerrainType.Grassland);   // index 0
+map.setTerrain(col, row, TerrainType.Water);        // index 5
+map.setElevation(col, row, 3);                      // Int8, -128–127; negative = underwater
 ```
 
-Stored as `Uint8` (0–255). The built-in materials and generators use values 0–5. Values 6–255 are available for custom terrain. Provide a custom `TerrainMaterial` shader that knows how to render your values.
+### Custom terrain types
+
+Define your own descriptor array and pass it through the library at startup:
+
+```ts
+import type { TerrainDescriptor } from 'hex-world';
+import {
+  resolveTerrainDefinitions, buildTerrainTextureArray, createTerrainMaterial,
+  ChunkManager,
+} from 'hex-world';
+import type { TerrainAssetRegistry } from 'hex-world';
+
+const MY_TERRAIN_DESCRIPTORS: TerrainDescriptor[] = [
+  // Procedural noise textures — generated from `color`
+  { index: 0, id: 'tundra', name: 'Tundra', color: 0xb8ccd5,
+    texture: { type: 'procedural' } },
+  { index: 1, id: 'steppe', name: 'Steppe', color: 0xc9b87a,
+    texture: { type: 'procedural', noiseFrequency: 128 } },
+
+  // Image texture — register the asset ID before building the atlas
+  { index: 2, id: 'volcano', name: 'Volcano', color: 0x5a3a2a,
+    texture: { type: 'image', assetId: 'terrain/volcano' } },
+
+  // Water — receives shore, estuary, and river geometry
+  { index: 3, id: 'lava', name: 'Lava', color: 0xdd4422,
+    isWater: true,
+    texture: { type: 'procedural' } },
+];
+
+// Map stable asset IDs to image URLs or preloaded bitmaps
+const registry: TerrainAssetRegistry = new Map([
+  ['terrain/volcano', '/assets/textures/volcano.jpg'],
+]);
+
+const terrainTex      = await buildTerrainTextureArray(MY_TERRAIN_DESCRIPTORS, registry);
+const terrainMaterial = createTerrainMaterial(terrainTex);
+
+const definitions = resolveTerrainDefinitions(MY_TERRAIN_DESCRIPTORS);
+
+const chunks = new ChunkManager({
+  // ...
+  terrainDefinitions: definitions,
+});
+```
+
+**`TerrainDescriptor` fields**
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `index` | `number` (0–255) | yes | Stored in cell data; must be unique per map |
+| `id` | `string` | yes | Stable key used in save files |
+| `name` | `string` | yes | Display label for editors and HUDs |
+| `color` | `number` | yes | Hex color for vertex blending and procedural noise |
+| `roadColor` | `[r, g, b]` | no | Linear 0–1 RGB; derived from `color` if omitted |
+| `isWater` | `boolean` | no | Receives water surface, shore, and estuary geometry |
+| `texture.type` | `'procedural' \| 'image'` | yes | How the texture atlas slice is built |
+| `texture.assetId` | `string` | image only | Key looked up in the `TerrainAssetRegistry` |
+| `texture.noiseFrequency` | `number` | no | Noise grain scale (higher = finer detail) |
+
+Indices do not need to be contiguous. The texture atlas is sized to `max(index) + 1` slices, so gaps produce transparent slices that will never be visible on valid cells.
+
+### Custom water terrain in generators
+
+When passing custom terrain indices to built-in generators, set `waterTerrainIndex` so they know which type counts as water:
+
+```ts
+import { generateClimateRivers, generateRoads, BiomeAssigner } from 'hex-world';
+
+const WATER_IDX = 3;   // matches the 'lava' descriptor above
+
+BiomeAssigner.assign(map, climateData, { waterTerrainIndex: WATER_IDX });
+
+generateClimateRivers(map, { waterTerrainIndex: WATER_IDX });
+
+generateRoads(map, {
+  seed,
+  waterTerrainIndex: WATER_IDX,   // also accepts number[] for multiple water types
+});
+```
 
 ---
 
@@ -113,7 +207,8 @@ ChunkPlugin.generate(map, ChunkPlugin.defaultConfig, seed);
 Implement `MapGeneratorPlugin<TConfig>` to plug your generator into any seed/regen system:
 
 ```ts
-import type { MapGeneratorPlugin, HexMap, TerrainType } from 'hex-world';
+import type { MapGeneratorPlugin, HexMap } from 'hex-world';
+import { TerrainType } from 'hex-world';
 
 interface MyConfig {
   islandRadius: number;
@@ -146,6 +241,7 @@ Scatter layers place instanced meshes (trees, rocks, buildings) using cell featu
 ```ts
 import { HexHashGrid, ChunkManager } from 'hex-world';
 import type { ScatterDefinition } from 'hex-world';
+import { TerrainType } from 'hex-world';
 
 // Map must have featureLayerCount >= the highest layerIndex + 1
 const map = new HexMap({ width: 100, height: 100, featureLayerCount: 1 });
@@ -164,7 +260,7 @@ const pineDefinition: ScatterDefinition = {
     // tier 2 (density 1): small trees
     [{ geometry: new THREE.ConeGeometry(0.24, 1.0, 7), material: treeMat, yOffset: 0.5 }],
   ],
-  allowedTerrains: [TerrainType.Grassland, TerrainType.Mud],  // optional whitelist
+  allowedTerrains: [TerrainType.Grassland, TerrainType.Mud],  // terrain indices; optional whitelist
   tiltStrength:    0,      // optional random X/Z lean in radians; 0 = upright
 };
 
@@ -281,6 +377,23 @@ console.log(metadata.name, metadata.seed, metadata.generatorId);
 ```
 
 All map data is preserved: terrain, elevation, flags, rivers, roads, and scatter feature layers.
+
+### Saving custom terrain and scatter descriptors
+
+Pass your descriptor arrays as optional arguments to `serializeMapJSON`. The consumer can reconstruct the same definitions on load:
+
+```ts
+import {
+  serializeMapJSON, deserializeMapJSON,
+  resolveTerrainDefinitions,
+} from 'hex-world';
+
+const json = serializeMapJSON(map, metadata, scatterDescriptors, MY_TERRAIN_DESCRIPTORS);
+
+// On load:
+const { map, metadata, scatterDescriptors, terrainDescriptors } = deserializeMapJSON(json);
+const definitions = resolveTerrainDefinitions(terrainDescriptors);
+```
 
 ---
 
@@ -461,7 +574,7 @@ const dist      = hexDistance(a, b);
 const ring      = hexRange(center, 3);   // all cells within distance 3
 
 // Cell data
-const terrain   = map.getTerrain(col, row);     // TerrainType (number)
+const terrain   = map.getTerrain(col, row);     // terrain index (number)
 const elevation = map.getElevation(col, row);   // Int8
 const hasRiver  = map.hasRiver(col, row);
 const hasRoad   = map.hasRoads(col, row);
