@@ -19,6 +19,7 @@ import { createRockMaterial } from '../geometry/RockMaterial.js';
 import type { MapGeneratorPlugin } from '../generators/MapGeneratorPlugin.js';
 import { FbmPlugin } from '../generators/FbmPlugin.js';
 import { ChunkPlugin } from '../generators/ChunkPlugin.js';
+import { MountainLakePlugin } from '../generators/MountainLakePlugin.js';
 import { pickHexFromMeshes } from '../geometry/HexPicking.js';
 import { hexToWorld, hexCorners } from '../math/HexLayout.js';
 import { offsetToHex } from '../math/HexCoord.js';
@@ -51,7 +52,7 @@ const LOAD_RADIUS = 5;
 
 // --- Generator registry ---
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-const GENERATORS: MapGeneratorPlugin<any>[] = [FbmPlugin, ChunkPlugin];
+const GENERATORS: MapGeneratorPlugin<any>[] = [FbmPlugin, ChunkPlugin, MountainLakePlugin];
 let activeGenIndex = 0;
 let seed = Math.floor(Math.random() * 0xffffffff);
 
@@ -154,9 +155,7 @@ let frameCount = 0;
 let lastFpsTime = performance.now();
 
 async function start() {
-  // waterLevel=-0.25 sits between water terrain max Y (-0.3, elev=-1 with perturbation)
-  // and land terrain min Y (-0.2, elev=0 with max negative perturbation).
-  const waterGeoOptions = { waterLevel: -0.25 };
+  const waterGeoOptions = {};
 
   let terrainMaterial: THREE.Material;
   if (TERRAIN_COLOR_MODE === 'splat') {

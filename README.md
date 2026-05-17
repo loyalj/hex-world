@@ -8,7 +8,7 @@ A Three.js library for building hex-grid strategy and exploration games. Handles
 
 - **Chunk-based rendering** — large maps streamed in and out as the camera moves, one draw call per chunk
 - **Terrain system** — six built-in types with vertex color blending and texture splatting; fully extensible with custom types, procedural noise, or image textures
-- **Water** — animated standing water, shore foam, estuaries, and flowing rivers with surface geometry
+- **Water** — animated standing water, shore foam, estuaries, and flowing rivers; per-body surface elevation supports mountain lakes at any height alongside ocean at sea level
 - **Roads** — geometry strips rendered above terrain
 - **Scatter features** — instanced meshes (trees, rocks, buildings) placed deterministically from per-cell density levels; modular definitions with terrain filters and density tiers
 - **Fog of war** — reference-counted per-cell visibility with smooth reveal animation; integrated with units
@@ -99,6 +99,8 @@ let last = performance.now();
 | [Pathfinding and Movement](guides/pathfinding-and-movement.md) | A\*, movement range, LOS, path smoothing, MoveCostFn design |
 
 API reference (TypeDoc): `docs/index.html` after running `npm run docs`.
+
+Live demo: [loyalj.github.io/hex-world](https://loyalj.github.io/hex-world/)
 
 ---
 

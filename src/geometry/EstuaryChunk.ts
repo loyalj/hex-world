@@ -35,6 +35,7 @@ export function buildEstuaryGeometry(
   const noiseScale     = opts.noiseScale         ?? 0.35;
   const perturbStr     = opts.perturbStrength    ?? 0.8;
   const elevScale      = opts.elevationScale     ?? 0.5;
+  const surfaceLift    = opts.surfaceLift        ?? 0.02;
   const elevPerturbStr = 0.2; // must match HexChunk elevPerturbStrength default
   const edgeDirs       = layout.orientation.edgeDirections;
   const waterTerrains  = opts.waterTerrains ?? new Set([DEFAULT_WATER_TERRAIN_INDEX]);
@@ -114,7 +115,7 @@ export function buildEstuaryGeometry(
       curCi = row * map.width + col;
       const q          = col - (row - (row & 1)) / 2;
       const center     = hexToWorld(layout, { q, r: row });
-      const wSurfaceY  = map.getWaterSurface(col, row) * elevScale;
+      const wSurfaceY  = map.getWaterSurface(col, row) * elevScale + surfaceLift;
 
       for (let i = 0; i < 6; i++) {
         if (!map.hasRiverThroughEdge(col, row, i)) continue;

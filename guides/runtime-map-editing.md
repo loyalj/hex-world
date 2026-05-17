@@ -224,6 +224,55 @@ Use `POINTY_TOP.edgeDirections[face]` to get the `HexCoord` offset vector for ne
 
 ---
 
+## Water surfaces
+
+Water bodies automatically compute a flat surface elevation so that every cell in a connected lake or ocean sits at the same Y, regardless of the individual depth variation underneath. This surface is stored in `map.waterSurfaces` and drives the water geometry Y position.
+
+**`ChunkManager` handles this automatically.** When any cells are marked dirty, `computeWaterSurfaces()` runs once before the affected chunks are rebuilt. You do not need to call it yourself for normal editing workflows.
+
+If you need the water surface elevation before the next `update()` — for example, to position a hover indicator at the correct Y — call it manually after your edits:
+
+```ts
+map.setTerrain(col, row, waterTerrainIndex);
+map.computeWaterSurfaces(t => myWaterTerrains.has(t));
+chunks.markDirty(col, row);
+
+// Now safe to query
+const surfaceY = map.getWaterSurface(col, row) * elevScale;
+```
+
+### Mountain lakes
+
+Set the lake floor cells to **one below your desired surface elevation** — `computeWaterSurfaces` adds one to the highest floor cell to produce the surface, then clamps to ≥ 0 so ocean bodies (floor at −1) always surface at sea level. Shore land cells should sit at the desired surface elevation so the foam renders flush with the waterline.
+
+```ts
+// Create a lake with surface at elevation 5 (world Y = 5 × elevScale)
+const desiredSurface = 5;
+for (const {col, row} of lakeCells) {
+  map.setTerrain(col, row, waterTerrainIndex);
+  map.setElevation(col, row, desiredSurface - 1); // floor one step below surface
+  chunks.markDirty(col, row);
+}
+// Rim / shore land cells should be at desiredSurface so water meets land flush
+// ChunkManager recomputes surfaces automatically on next update()
+```
+
+Depth variation within a lake is supported — cells set lower than `desiredSurface - 1` will appear darker. The surface geometry stays flat at the computed surface elevation regardless of floor variation.
+
+### Querying water surface elevation
+
+```ts
+// World-space Y of the water surface above a cell
+const surfaceY = map.getWaterSurface(col, row) * elevScale;
+
+// All cells that form the same connected water body
+const body = map.getConnectedWaterBody(col, row, t => myWaterTerrains.has(t));
+```
+
+`getWaterSurface` returns the elevation index (same units as `getElevation`). Multiply by your `elevScale` to get world Y. Returns 0 for non-water cells.
+
+---
+
 ## Quick reference
 
 | Operation | Map API | Note |
@@ -236,3 +285,6 @@ Use `POINTY_TOP.edgeDirections[face]` to get the `HexCoord` offset vector for ne
 | Clear river | `map.clearRiver(col, row)` | also clear neighbor links |
 | Set scatter density | `map.setFeatureLevel(col, row, layer, 0–3)` | mark chunk dirty |
 | Trigger rebuild | `chunks.markDirty(col, row)` | lazy — runs on next update() |
+| Water surface Y | `map.getWaterSurface(col, row) * elevScale` | elevation index × scale |
+| Connected water body | `map.getConnectedWaterBody(col, row, isWater)` | returns all cells in body |
+| Recompute surfaces | `map.computeWaterSurfaces(isWater?)` | auto-called by ChunkManager |

@@ -74,10 +74,11 @@ Follows the structure of the [Catlike Coding Hex Map tutorial series](https://ca
 - [x] River data model — directed per-cell packed byte (`OFFSET_RIVER_DIR`): bits 2-0 = incoming+1, bits 5-3 = outgoing+1; full API (`hasRiver`, `getIncomingRiverDir`, `getOutgoingRiverDir`, `hasRiverThroughEdge`, `setRiverOutgoing`, `setRiverIncoming`)
 - [x] River channel geometry — 5-vertex edge strips (0/0.25/0.5/0.75/1.0) with center vertex depressed to `streamBedY = (elev − 1.75) × elevScale`; no noise perturbation on stream bed for cross-cell consistency (Part 6)
 - [x] Inside-cell river routing — 5-case dispatch per direction: normal fan / adjacent-to-river / begin-or-end / straight-through / sharp-turn / gentle-curve; `INNER_TO_OUTER` scaling for curve center line (Part 6)
-- [x] Standing water — full hex fan at configurable `waterLevel` over Water-terrain cells
+- [x] Standing water — full hex fan per-body water surface Y (`map.getWaterSurface(col,row) * elevScale + surfaceLift`); `WaterGeometryOptions.surfaceLift` (default 0.02 world units) prevents z-fighting on coplanar cells; `waterLevel` option removed
 - [x] River water surface — inner-hex fan at `riverSurfaceY = (elev − 0.5) × elevScale` (SOLID_FACTOR vertices); slope quads at hex boundary for elevation-different adjacent river cells; XZ perturbation via `sampleNoise` matching terrain builder for seamless edges
 - [x] Water shader — dual-layer sin-wave `ShaderMaterial` with specular glint, world-XZ-driven UV animation
 - [x] Demo: rivers auto-traced downhill from high-elevation cells to ocean/lakes using directed outgoing/incoming edge API
+- [x] Per-body water surface elevation — `HexMap.waterSurfaces: Int8Array` stores per-cell surface elevation (elevation index units); `computeWaterSurfaces(isWater?)` BFS flood-fill sets surface = `max(0, maxFloorElev + 1)` — one step above the highest floor cell, clamped so ocean bodies (floor at −1) always surface at 0; lake floor cells must be set to `desiredSurface − 1` so surface computes correctly and terrain sits below the water plane; geometry builders (`WaterChunk`, `WaterShoreChunk`, `EstuaryChunk`) read `map.getWaterSurface(col, row)` for per-cell Y; depth attribute = `(surfaceElev − cellElev) / 9` preserving variable-depth rendering; `ChunkManager.update()` calls `computeWaterSurfaces` automatically before dirty rebuilds; generators and deserializers call it after writing map data; `getConnectedWaterBody(col, row, isWater)` exposed for editor tools
 
 ---
 

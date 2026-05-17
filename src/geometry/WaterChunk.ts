@@ -9,10 +9,16 @@ import { sampleNoise } from '../math/Noise.js';
 import type { ChunkBounds } from './HexChunk.js';
 
 export interface WaterGeometryOptions {
-  waterLevel?: number;
   noiseScale?: number;
   perturbStrength?: number;
   elevationScale?: number;
+  /**
+   * Constant world-space Y added to every water surface position after the
+   * elevation scale is applied. Prevents z-fighting between the water mesh and
+   * coplanar terrain (e.g. a cell at elevation 0 connected to the ocean).
+   * Default 0.02.
+   */
+  surfaceLift?: number;
   /** Set of terrain indices that count as water. Defaults to {5} (built-in Water). */
   waterTerrains?: Set<number>;
 }
@@ -37,9 +43,10 @@ export function buildWaterGeometry(
   bounds: ChunkBounds,
   opts: WaterGeometryOptions = {},
 ): THREE.BufferGeometry | null {
-  const noiseScale   = opts.noiseScale      ?? 0.35;
-  const perturbStr   = opts.perturbStrength ?? 0.8;
-  const elevScale    = opts.elevationScale  ?? 0.5;
+  const noiseScale    = opts.noiseScale      ?? 0.35;
+  const perturbStr    = opts.perturbStrength ?? 0.8;
+  const elevScale     = opts.elevationScale  ?? 0.5;
+  const surfaceLift   = opts.surfaceLift     ?? 0.02;
   const waterTerrains = opts.waterTerrains ?? new Set([DEFAULT_WATER_TERRAIN_INDEX]);
   const isWater = (t: number) => waterTerrains.has(t);
 
@@ -81,7 +88,7 @@ export function buildWaterGeometry(
 
       const elev        = map.getElevation(col, row);
       const surfaceElev = map.getWaterSurface(col, row);
-      const surfaceY    = surfaceElev * elevScale;
+      const surfaceY    = surfaceElev * elevScale + surfaceLift;
       const depth       = Math.min(1.0, Math.max(0.0, (surfaceElev - elev) / 9.0));
 
       for (let i = 0; i < 6; i++) {
@@ -113,11 +120,12 @@ export function buildRiverGeometry(
   bounds: ChunkBounds,
   opts: WaterGeometryOptions = {},
 ): THREE.BufferGeometry | null {
-  const noiseScale    = opts.noiseScale      ?? 0.35;
-  const perturbStr    = opts.perturbStrength ?? 0.8;
-  const elevScale     = opts.elevationScale  ?? 0.5;
+  const noiseScale     = opts.noiseScale      ?? 0.35;
+  const perturbStr     = opts.perturbStrength ?? 0.8;
+  const elevScale      = opts.elevationScale  ?? 0.5;
+  const surfaceLift    = opts.surfaceLift     ?? 0.02;
   const elevPerturbStr = 0.2;
-  const edgeDirs      = layout.orientation.edgeDirections;
+  const edgeDirs       = layout.orientation.edgeDirections;
   const waterTerrains  = opts.waterTerrains ?? new Set([DEFAULT_WATER_TERRAIN_INDEX]);
   const isWaterTerrain = (t: number) => waterTerrains.has(t);
 
@@ -214,7 +222,7 @@ export function buildRiverGeometry(
           const nbElev    = map.getElevation(nb.col, nb.row);
           nbIsWater = isWaterTerrain(nbTerrain);
           if (nbIsWater) {
-            nbWaterSurfaceY = map.getWaterSurface(nb.col, nb.row) * elevScale;
+            nbWaterSurfaceY = map.getWaterSurface(nb.col, nb.row) * elevScale + surfaceLift;
             nbRy = nbWaterSurfaceY;
           } else {
             nbRy = (nbElev + RIVER_SURFACE_ELEVATION_OFFSET) * elevScale;

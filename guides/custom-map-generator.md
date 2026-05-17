@@ -128,6 +128,9 @@ function generateSimple(map: HexMap, seed: number): void {
   generateClimateRivers(map, new Float32Array(map.width * map.height).fill(0.5), {
     riverPercentage: 8,
   }, rand);
+
+  // 5. Compute flat water surface elevations for lakes and ocean
+  map.computeWaterSurfaces();
 }
 ```
 
@@ -165,6 +168,9 @@ function generateFull(map: HexMap, seed: number): void {
 
   // Roads — grid of routes avoiding water, rivers, steep slopes
   generateRoads(map, { gridSpacing: 24, maxElevationDiff: 1 });
+
+  // Compute flat water surface elevations for lakes and ocean
+  map.computeWaterSurfaces();
 }
 ```
 

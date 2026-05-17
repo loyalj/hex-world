@@ -257,9 +257,9 @@ export class HexMap {
 
   /**
    * BFS flood-fill that finds every connected water body and records its surface
-   * elevation in `waterSurfaces`. The surface of a body is the maximum elevation
-   * of any water cell it contains, clamped to ≥ 0 so ocean bodies always sit at
-   * sea level (0) regardless of how deep their cells go.
+   * elevation in `waterSurfaces`. The surface is `max(0, maxFloorElevation + 1)`:
+   * one step above the highest floor cell, clamped so ocean bodies (floor ≤ −1)
+   * always surface at 0. Elevated lakes (floor ≥ 0) surface one step above their floor.
    *
    * Called automatically by `ChunkManager.update()` before any dirty chunk rebuilds,
    * and by generators / deserializers after map data is written. Call it yourself
@@ -309,7 +309,10 @@ export class HexMap {
           }
         }
 
-        const surfaceElev = Math.max(0, maxElev);
+        // Surface is one step above the highest floor cell, clamped to ≥ 0 so that
+        // ocean bodies (floor cells at −1 or lower) always sit at sea level (0).
+        // Elevated lakes (floor cells at ≥ 0) surface one step above their floor.
+        const surfaceElev = Math.max(0, maxElev + 1);
         for (let i = 0; i < qTail; i++) {
           this.waterSurfaces[queue[i]] = surfaceElev;
         }

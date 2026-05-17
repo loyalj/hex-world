@@ -16,7 +16,7 @@ const SOLID_FACTOR = 0.8;
 /**
  * Builds the shore water geometry for a chunk.
  *
- * Water-side vertices are flat at waterLevel. Land-side vertices use the actual
+ * Water-side vertices are flat at the per-body water surface Y. Land-side vertices use the actual
  * terrain Y so the foamy V=1 edge sits on the terrain surface and is rendered
  * on top via polygonOffset rather than being hidden underground.
  *
@@ -37,6 +37,7 @@ export function buildShoreGeometry(
   const noiseScale     = opts.noiseScale         ?? 0.35;
   const perturbStr     = opts.perturbStrength    ?? 0.8;
   const elevScale      = opts.elevationScale     ?? 0.5;
+  const surfaceLift    = opts.surfaceLift        ?? 0.02;
   const elevPerturbStr = 0.2; // must match HexChunk elevPerturbStrength default
   const edgeDirs       = layout.orientation.edgeDirections;
   const waterTerrains  = opts.waterTerrains ?? new Set([DEFAULT_WATER_TERRAIN_INDEX]);
@@ -116,7 +117,7 @@ export function buildShoreGeometry(
       curCi = row * map.width + col;
       const q          = col - (row - (row & 1)) / 2;
       const center     = hexToWorld(layout, { q, r: row });
-      const wSurfaceY  = map.getWaterSurface(col, row) * elevScale;
+      const wSurfaceY  = map.getWaterSurface(col, row) * elevScale + surfaceLift;
 
       for (let i = 0; i < 6; i++) {
         const d  = edgeDirs[i];
@@ -131,7 +132,7 @@ export function buildShoreGeometry(
         // Shore edge found: current cell is water, neighbor (nc,nr) is land.
         const i1 = (i + 1) % 6;
 
-        // Water-side corners at WATER_FACTOR, all at waterLevel (V=0).
+        // Water-side corners at WATER_FACTOR, all at the water surface Y (V=0).
         const c1 = cornerAt(center.x, center.z, i,  WATER_FACTOR);
         const c2 = cornerAt(center.x, center.z, i1, WATER_FACTOR);
 
