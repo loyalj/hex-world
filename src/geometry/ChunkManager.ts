@@ -324,6 +324,11 @@ export class ChunkManager {
       if (scatterNeedsRefresh) this.updateScatterFog();
     }
 
+    // Recompute water surfaces before any chunk rebuilds so geometry is correct.
+    if (this.dirty.size > 0) {
+      this.map.computeWaterSurfaces(t => this.waterTerrains.has(t));
+    }
+
     // Rebuild any dirty chunks first
     for (const k of this.dirty) {
       const mesh = this.chunks.get(k);

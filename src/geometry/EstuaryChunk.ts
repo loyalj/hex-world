@@ -32,7 +32,6 @@ export function buildEstuaryGeometry(
   bounds: ChunkBounds,
   opts: WaterGeometryOptions = {},
 ): THREE.BufferGeometry | null {
-  const waterLevel     = opts.waterLevel         ?? 0;
   const noiseScale     = opts.noiseScale         ?? 0.35;
   const perturbStr     = opts.perturbStrength    ?? 0.8;
   const elevScale      = opts.elevationScale     ?? 0.5;
@@ -113,8 +112,9 @@ export function buildEstuaryGeometry(
       if (!isWater(map.getTerrain(col, row))) continue;
 
       curCi = row * map.width + col;
-      const q      = col - (row - (row & 1)) / 2;
-      const center = hexToWorld(layout, { q, r: row });
+      const q          = col - (row - (row & 1)) / 2;
+      const center     = hexToWorld(layout, { q, r: row });
+      const wSurfaceY  = map.getWaterSurface(col, row) * elevScale;
 
       for (let i = 0; i < 6; i++) {
         if (!map.hasRiverThroughEdge(col, row, i)) continue;
@@ -152,8 +152,8 @@ export function buildEstuaryGeometry(
         const e2v5 = cornerAt(nbc.x, nbc.z, (i + 3) % 6, SOLID_FACTOR);
         const e2v2 = lerp2(e2v1, e2v5, 0.25);
         const e2v4 = lerp2(e2v1, e2v5, 0.75);
-        const e2Y  = waterLevel + (landCellY(nc, nr) - waterLevel) * 0.5;
-        const wl   = waterLevel;
+        const e2Y  = wSurfaceY + (landCellY(nc, nr) - wSurfaceY) * 0.5;
+        const wl   = wSurfaceY;
 
         // Left quad (rotated for symmetry): e2v1, e1v2, e2v2, e1v3
         addTri(

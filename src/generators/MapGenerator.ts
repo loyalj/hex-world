@@ -57,4 +57,5 @@ export function generateMap(map: HexMap, config: MapGeneratorConfig, seed: numbe
 
   generateClimateRivers(map, moisture, { ...config.rivers, elevationMax: elevMax }, rand);
   generateRoads(map, config.roads);
+  map.computeWaterSurfaces();
 }

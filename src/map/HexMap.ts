@@ -6,6 +6,7 @@ import {
   OFFSET_RIVER_DIR,
   TerrainType,
 } from './HexCell.js';
+import { HEX_DIRECTIONS } from '../math/HexCoord.js';
 
 export interface HexMapOptions {
   width: number;
@@ -33,6 +34,12 @@ export class HexMap {
   private readonly int8: Int8Array;
   readonly roadBits: Uint8Array;
   readonly featureData: Uint8Array | null;
+  /**
+   * Per-cell water surface elevation (elevation index, same units as `getElevation`).
+   * Populated by `computeWaterSurfaces`. World-space Y = `getWaterSurface(col, row) * elevScale`.
+   * Initialized to 0 (sea level). Non-water cells retain 0 and should not be queried.
+   */
+  readonly waterSurfaces: Int8Array;
 
   constructor(options: HexMapOptions) {
     this.width = options.width;
@@ -45,6 +52,7 @@ export class HexMap {
     this.featureData = this.featureLayerCount > 0
       ? new Uint8Array(this.width * this.height * this.featureLayerCount)
       : null;
+    this.waterSurfaces = new Int8Array(this.width * this.height);
 
     if (options.defaultTerrain !== undefined && options.defaultTerrain !== TerrainType.Grassland) {
       for (let i = 0; i < this.width * this.height; i++) {
@@ -233,6 +241,124 @@ export class HexMap {
     this.uint8.fill(0);
     this.roadBits.fill(0);
     this.featureData?.fill(0);
+    this.waterSurfaces.fill(0);
+  }
+
+  // --- Water surfaces ---
+
+  /**
+   * Returns the pre-computed water surface elevation for a cell (elevation index units).
+   * Multiply by your `elevScale` to get world-space Y.
+   * Returns 0 for non-water cells and before `computeWaterSurfaces` has been called.
+   */
+  getWaterSurface(col: number, row: number): number {
+    return this.waterSurfaces[row * this.width + col];
+  }
+
+  /**
+   * BFS flood-fill that finds every connected water body and records its surface
+   * elevation in `waterSurfaces`. The surface of a body is the maximum elevation
+   * of any water cell it contains, clamped to ≥ 0 so ocean bodies always sit at
+   * sea level (0) regardless of how deep their cells go.
+   *
+   * Called automatically by `ChunkManager.update()` before any dirty chunk rebuilds,
+   * and by generators / deserializers after map data is written. Call it yourself
+   * after bulk edits if you need `getWaterSurface` to be accurate before the next
+   * `ChunkManager.update()`.
+   *
+   * @param isWater Predicate that returns `true` for liquid terrain indices.
+   *   Defaults to the built-in water terrain (index 5). Pass a custom predicate
+   *   when using additional liquid terrain types.
+   */
+  computeWaterSurfaces(
+    isWater: (terrain: number) => boolean = t => t === TerrainType.Water,
+  ): void {
+    const w = this.width, h = this.height;
+    const n = w * h;
+    const visited = new Uint8Array(n);
+    const queue   = new Int32Array(n);
+
+    for (let startRow = 0; startRow < h; startRow++) {
+      for (let startCol = 0; startCol < w; startCol++) {
+        const startIdx = startRow * w + startCol;
+        if (visited[startIdx] || !isWater(this.getTerrain(startCol, startRow))) continue;
+
+        let qHead = 0, qTail = 0;
+        queue[qTail++] = startIdx;
+        visited[startIdx] = 1;
+        let maxElev = -128;
+
+        while (qHead < qTail) {
+          const ci  = queue[qHead++];
+          const row = (ci / w) | 0;
+          const col = ci % w;
+          const elev = this.getElevation(col, row);
+          if (elev > maxElev) maxElev = elev;
+
+          const q = col - (row - (row & 1)) / 2;
+          for (let d = 0; d < 6; d++) {
+            const nq = q   + HEX_DIRECTIONS[d].q;
+            const nr = row + HEX_DIRECTIONS[d].r;
+            const nc = nq  + (nr - (nr & 1)) / 2;
+            if (nc < 0 || nc >= w || nr < 0 || nr >= h) continue;
+            const ni = nr * w + nc;
+            if (!visited[ni] && isWater(this.getTerrain(nc, nr))) {
+              visited[ni] = 1;
+              queue[qTail++] = ni;
+            }
+          }
+        }
+
+        const surfaceElev = Math.max(0, maxElev);
+        for (let i = 0; i < qTail; i++) {
+          this.waterSurfaces[queue[i]] = surfaceElev;
+        }
+      }
+    }
+  }
+
+  /**
+   * BFS from `(col, row)` that returns all cells in the same connected water body.
+   * Returns an empty array if the starting cell is not a water cell.
+   * Useful for editor tools that need to paint a whole lake consistently.
+   */
+  getConnectedWaterBody(
+    col: number,
+    row: number,
+    isWater: (terrain: number) => boolean,
+  ): Array<{ col: number; row: number }> {
+    if (!this.inBounds(col, row) || !isWater(this.getTerrain(col, row))) return [];
+
+    const w = this.width, h = this.height;
+    const visited = new Uint8Array(w * h);
+    const result: Array<{ col: number; row: number }> = [];
+    const queue: number[] = [];
+
+    const start = row * w + col;
+    visited[start] = 1;
+    queue.push(start);
+
+    for (let qi = 0; qi < queue.length; qi++) {
+      const ci = queue[qi];
+      const r  = (ci / w) | 0;
+      const c  = ci % w;
+      result.push({ col: c, row: r });
+
+      const q = c - (r - (r & 1)) / 2;
+      for (let d = 0; d < 6; d++) {
+        const nq = q + HEX_DIRECTIONS[d].q;
+        const nr = r + HEX_DIRECTIONS[d].r;
+        const nc = nq + (nr - (nr & 1)) / 2;
+        if (nc < 0 || nc >= w || nr < 0 || nr >= h) continue;
+        const ni = nr * w + nc;
+        if (!visited[ni] && isWater(this.getTerrain(nc, nr))) {
+          visited[ni] = 1;
+          queue.push(ni);
+        }
+      }
+    }
+
+    return result;
   }
 
 }

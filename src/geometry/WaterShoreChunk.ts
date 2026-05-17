@@ -34,7 +34,6 @@ export function buildShoreGeometry(
   bounds: ChunkBounds,
   opts: WaterGeometryOptions = {},
 ): THREE.BufferGeometry | null {
-  const waterLevel     = opts.waterLevel         ?? 0;
   const noiseScale     = opts.noiseScale         ?? 0.35;
   const perturbStr     = opts.perturbStrength    ?? 0.8;
   const elevScale      = opts.elevationScale     ?? 0.5;
@@ -115,8 +114,9 @@ export function buildShoreGeometry(
       if (!isWater(map.getTerrain(col, row))) continue;
 
       curCi = row * map.width + col;
-      const q      = col - (row - (row & 1)) / 2;
-      const center = hexToWorld(layout, { q, r: row });
+      const q          = col - (row - (row & 1)) / 2;
+      const center     = hexToWorld(layout, { q, r: row });
+      const wSurfaceY  = map.getWaterSurface(col, row) * elevScale;
 
       for (let i = 0; i < 6; i++) {
         const d  = edgeDirs[i];
@@ -135,14 +135,14 @@ export function buildShoreGeometry(
         const c1 = cornerAt(center.x, center.z, i,  WATER_FACTOR);
         const c2 = cornerAt(center.x, center.z, i1, WATER_FACTOR);
 
-        // 1. Fan triangle: center → water corners, all at waterLevel, V=0.
+        // 1. Fan triangle: center → water corners, all at water surface Y, V=0.
         addTri(
-          center.x, center.z, waterLevel, 0, 0,
-          c2.x,     c2.z,     waterLevel, 0, 0,
-          c1.x,     c1.z,     waterLevel, 0, 0,
+          center.x, center.z, wSurfaceY, 0, 0,
+          c2.x,     c2.z,     wSurfaceY, 0, 0,
+          c1.x,     c1.z,     wSurfaceY, 0, 0,
         );
 
-        // 2. Strip quad: water side (waterLevel) → land side (terrain Y).
+        // 2. Strip quad: water side (wSurfaceY) → land side (terrain Y).
         //    Land-side uses actual terrain Y so the V=1 foam edge sits on the
         //    terrain surface and is visible via polygonOffset over the terrain.
         //    Also rendered for estuary edges — the estuary mesh sits on top via
@@ -154,13 +154,13 @@ export function buildShoreGeometry(
           const ls2  = cornerAt(nbc.x, nbc.z, (i + 3) % 6, SOLID_FACTOR);
           // Land-side Y stops halfway up the slope so the foam band doesn't
           // climb all the way to the terrain tile surface.
-          const nbY  = waterLevel + (landCellY(nc, nr) - waterLevel) * 0.5;
+          const nbY  = wSurfaceY + (landCellY(nc, nr) - wSurfaceY) * 0.5;
 
           addQuad(
-            c1.x,  c1.z,  waterLevel, 0, 0,
-            c2.x,  c2.z,  waterLevel, 0, 0,
-            ls1.x, ls1.z, nbY,        0, 1,
-            ls2.x, ls2.z, nbY,        0, 1,
+            c1.x,  c1.z,  wSurfaceY, 0, 0,
+            c2.x,  c2.z,  wSurfaceY, 0, 0,
+            ls1.x, ls1.z, nbY,       0, 1,
+            ls2.x, ls2.z, nbY,       0, 1,
           );
         }
 
@@ -176,18 +176,18 @@ export function buildShoreGeometry(
           const cornerJ    = (i + 5) % 6;
           const factor     = nb2IsWater ? WATER_FACTOR : SOLID_FACTOR;
           const v3         = cornerAt(nb2Center.x, nb2Center.z, cornerJ, factor);
-          const rawV3Y     = nb2IsWater ? waterLevel : landCellY(nb2c, nb2r);
-          const v3Y        = nb2IsWater ? waterLevel : waterLevel + (rawV3Y - waterLevel) * 0.5;
+          const rawV3Y     = nb2IsWater ? wSurfaceY : landCellY(nb2c, nb2r);
+          const v3Y        = nb2IsWater ? wSurfaceY : wSurfaceY + (rawV3Y - wSurfaceY) * 0.5;
           const v3V        = nb2IsWater ? 0 : 1;
 
           const nbc2 = hexCenter(nc, nr);
           const ls2  = cornerAt(nbc2.x, nbc2.z, (i + 3) % 6, SOLID_FACTOR);
-          const ls2Y = waterLevel + (landCellY(nc, nr) - waterLevel) * 0.5;
+          const ls2Y = wSurfaceY + (landCellY(nc, nr) - wSurfaceY) * 0.5;
 
           addTri(
-            c2.x,  c2.z,  waterLevel, 0, 0,
-            ls2.x, ls2.z, ls2Y,       0, 1,
-            v3.x,  v3.z,  v3Y,        0, v3V,
+            c2.x,  c2.z,  wSurfaceY, 0, 0,
+            ls2.x, ls2.z, ls2Y,      0, 1,
+            v3.x,  v3.z,  v3Y,       0, v3V,
           );
         }
       }

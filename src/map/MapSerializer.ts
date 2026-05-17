@@ -77,6 +77,7 @@ export function deserializeMap(data: Uint8Array): HexMap {
     map.featureData.set(data.subarray(offset, offset + map.featureData.byteLength));
   }
 
+  map.computeWaterSurfaces();
   return map;
 }
 
@@ -155,6 +156,7 @@ export function deserializeMapJSON(json: string): DeserializedMap {
   if (map.featureData && p.features) {
     map.featureData.set(base64ToUint8(p.features));
   }
+  map.computeWaterSurfaces();
   return {
     map,
     metadata:           { name: p.name, seed: p.seed, generatorId: p.generatorId },

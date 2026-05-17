@@ -37,9 +37,9 @@ export function buildWaterGeometry(
   bounds: ChunkBounds,
   opts: WaterGeometryOptions = {},
 ): THREE.BufferGeometry | null {
-  const waterLevel   = opts.waterLevel      ?? 0;
   const noiseScale   = opts.noiseScale      ?? 0.35;
   const perturbStr   = opts.perturbStrength ?? 0.8;
+  const elevScale    = opts.elevationScale  ?? 0.5;
   const waterTerrains = opts.waterTerrains ?? new Set([DEFAULT_WATER_TERRAIN_INDEX]);
   const isWater = (t: number) => waterTerrains.has(t);
 
@@ -58,10 +58,10 @@ export function buildWaterGeometry(
     return [(n[0] * 2 - 1) * perturbStr, (n[2] * 2 - 1) * perturbStr];
   };
 
-  const addVertW = (x: number, z: number, depth: number, ci: number) => {
+  const addVertW = (x: number, z: number, y: number, depth: number, ci: number) => {
     const [dx, dz] = perturb(x, z);
     positions[vi++] = x + dx;
-    positions[vi++] = waterLevel;
+    positions[vi++] = y;
     positions[vi++] = z + dz;
     uvs[uvi++] = x * UV_WATER_SCALE;
     uvs[uvi++] = z * UV_WATER_SCALE;
@@ -79,14 +79,16 @@ export function buildWaterGeometry(
       const crns = hexCorners(layout, { q, r: row });
       const ci   = row * map.width + col;
 
-      const elev  = map.getElevation(col, row);
-      const depth = Math.min(1.0, Math.max(0.0, (-elev - 1) / 8.0));
+      const elev        = map.getElevation(col, row);
+      const surfaceElev = map.getWaterSurface(col, row);
+      const surfaceY    = surfaceElev * elevScale;
+      const depth       = Math.min(1.0, Math.max(0.0, (surfaceElev - elev) / 9.0));
 
       for (let i = 0; i < 6; i++) {
         const i1 = (i + 1) % 6;
-        addVertW(c.x,        c.z,        depth, ci);
-        addVertW(crns[i1].x, crns[i1].z, depth, ci);
-        addVertW(crns[i].x,  crns[i].z,  depth, ci);
+        addVertW(c.x,        c.z,        surfaceY, depth, ci);
+        addVertW(crns[i1].x, crns[i1].z, surfaceY, depth, ci);
+        addVertW(crns[i].x,  crns[i].z,  surfaceY, depth, ci);
       }
     }
   }
@@ -111,7 +113,6 @@ export function buildRiverGeometry(
   bounds: ChunkBounds,
   opts: WaterGeometryOptions = {},
 ): THREE.BufferGeometry | null {
-  const waterLevel    = opts.waterLevel      ?? 0;
   const noiseScale    = opts.noiseScale      ?? 0.35;
   const perturbStr    = opts.perturbStrength ?? 0.8;
   const elevScale     = opts.elevationScale  ?? 0.5;
@@ -203,25 +204,29 @@ export function buildRiverGeometry(
         const eRx = crns[i].x * 0.25 + crns[i1].x * 0.75;
         const eRz = crns[i].z * 0.25 + crns[i1].z * 0.75;
 
-        let   nbRy      = ry;
-        let   nbIsWater = false;
+        let   nbRy            = ry;
+        let   nbIsWater       = false;
+        let   nbWaterSurfaceY = 0;
         const d  = edgeDirs[i];
         const nb = neighborOffset(col, row, d);
         if (map.inBounds(nb.col, nb.row)) {
           const nbTerrain = map.getTerrain(nb.col, nb.row);
           const nbElev    = map.getElevation(nb.col, nb.row);
           nbIsWater = isWaterTerrain(nbTerrain);
-          nbRy = nbIsWater
-            ? waterLevel
-            : (nbElev + RIVER_SURFACE_ELEVATION_OFFSET) * elevScale;
+          if (nbIsWater) {
+            nbWaterSurfaceY = map.getWaterSurface(nb.col, nb.row) * elevScale;
+            nbRy = nbWaterSurfaceY;
+          } else {
+            nbRy = (nbElev + RIVER_SURFACE_ELEVATION_OFFSET) * elevScale;
+          }
         }
         const estuaryEdgeY = nbIsWater
-          ? waterLevel + (landCellY(col, row) - waterLevel) * 0.5
+          ? nbWaterSurfaceY + (landCellY(col, row) - nbWaterSurfaceY) * 0.5
           : nbRy;
 
         if (isBeginEnd) {
           if (isOutgoing) {
-            if (nbIsWater && ry > waterLevel) {
+            if (nbIsWater && ry > nbWaterSurfaceY) {
               const [dcx, dcz] = perturb(center.x, center.z);
               const [dLx, dLz] = perturb(eLx, eLz);
               const [dRx, dRz] = perturb(eRx, eRz);

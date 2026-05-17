@@ -54,5 +54,6 @@ export const FbmPlugin: MapGeneratorPlugin<FbmGeneratorConfig> = {
     generateFbmTerrain(map, { ...config.terrain, noiseOffsetX: x, noiseOffsetZ: z });
     generateRivers(map, config.rivers);
     generateRoads(map, config.roads);
+    map.computeWaterSurfaces();
   },
 };
