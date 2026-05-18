@@ -101,6 +101,7 @@ let last = performance.now();
 |---|---|
 | [Quick Start](guides/QUICKSTART.md) | Full setup walkthrough — terrain, water, scatter, fog, units, save/load |
 | [Adding a Terrain Type](guides/adding-terrain-type.md) | Custom terrain indices, procedural and image textures, water flags |
+| [Adding a Liquid Type](guides/adding-liquid-type.md) | Custom liquid types with their own surface/shore/estuary/river materials and save/load |
 | [Adding a Scatter Type](guides/adding-scatter-type.md) | Instanced feature meshes — tiers, terrain filters, save/load descriptors |
 | [Custom Map Generator](guides/custom-map-generator.md) | Plugin interface and composing raw generation passes |
 | [Runtime Map Editing](guides/runtime-map-editing.md) | Painting terrain, rivers, and roads at runtime; the markDirty loop |
