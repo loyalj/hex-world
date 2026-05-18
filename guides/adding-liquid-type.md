@@ -83,38 +83,36 @@ const MY_LIQUID_DESCRIPTORS: LiquidTypeDescriptor[] = [
 
 ## 4. Create the materials
 
-All four factory functions accept an optional `LiquidColorOptions` object. Omit any color to fall back to the water defaults.
+Call `resolveLiquidMaterials(descriptor)` — it reads the color fields from your descriptor and builds all four materials in one call:
 
 ```ts
-import {
-  createWaterMaterial,
-  createWaterShoreMaterial,
-  createEstuaryMaterial,
-  createRiverMaterial,
-} from '@loyalj/hex-world';
+import { resolveLiquidMaterials } from '@loyalj/hex-world';
+
+const mercuryMaterials = resolveLiquidMaterials(MY_LIQUID_DESCRIPTORS.find(d => d.id === 'mercury')!);
+```
+
+Or build a complete map for all types at once:
+
+```ts
+const liquidMaterials = new Map(MY_LIQUID_DESCRIPTORS.map(d => [d.id, resolveLiquidMaterials(d)]));
+```
+
+If you need full control over the Three.js material (custom shaders, extra uniforms, etc.), you can still construct a `LiquidMaterialSet` manually using the individual factory functions:
+
+```ts
+import { createWaterMaterial, createWaterShoreMaterial,
+         createEstuaryMaterial, createRiverMaterial } from '@loyalj/hex-world';
 import * as THREE from 'three';
 
 const mercuryMaterials = {
-  surface: createWaterMaterial({
-    shallow: new THREE.Color(0.67, 0.73, 0.75),   // silvery highlight
-    deep:    new THREE.Color(0.42, 0.50, 0.54),   // darker pooled mercury
-  }),
-  shore: createWaterShoreMaterial({
-    shallow:   new THREE.Color(0.60, 0.68, 0.72),
-    foam:      new THREE.Color(0.85, 0.90, 0.92), // near-silver foam
-  }),
-  estuary: createEstuaryMaterial({
-    shallow:   new THREE.Color(0.60, 0.68, 0.72),
-    foam:      new THREE.Color(0.85, 0.90, 0.92),
-  }),
-  river: createRiverMaterial({
-    shallow: new THREE.Color(0.72, 0.78, 0.80),
-    deep:    new THREE.Color(0.45, 0.52, 0.56),
-  }),
+  surface: createWaterMaterial({ shallow: new THREE.Color(0xaabbc0), deep: new THREE.Color(0x6b8088) }),
+  shore:   createWaterShoreMaterial({ shallow: new THREE.Color(0x99adb5), foam: new THREE.Color(0xd9e8ec) }),
+  estuary: createEstuaryMaterial({ shallow: new THREE.Color(0x99adb5), foam: new THREE.Color(0xd9e8ec) }),
+  river:   createRiverMaterial({ shallow: new THREE.Color(0xb8ccd0), deep: new THREE.Color(0x7294a0) }),
 };
 ```
 
-### `LiquidColorOptions` fields
+### `LiquidColorOptions` fields (for manual construction)
 
 | Field | Used by | Default |
 |---|---|---|
@@ -262,10 +260,15 @@ To flip priority, swap the terrain indices in your descriptor array.
 | Task | API |
 |---|---|
 | Declare terrain index | `TerrainDescriptor` with `liquidType: 'your-id'` |
-| Declare liquid type | `LiquidTypeDescriptor` with matching `id` |
-| Build materials | `createWaterMaterial`, `createWaterShoreMaterial`, `createEstuaryMaterial`, `createRiverMaterial` — all accept `LiquidColorOptions` |
+| Declare liquid type | `LiquidTypeDescriptor` with matching `id` and color fields |
+| Build all four materials from descriptor | `resolveLiquidMaterials(descriptor)` |
+| Build materials manually | `createWaterMaterial`, `createWaterShoreMaterial`, `createEstuaryMaterial`, `createRiverMaterial` — all accept `LiquidColorOptions` |
 | Register with renderer | `ChunkManager({ liquidMaterials, liquidDescriptors })` |
 | Place cells | `map.setTerrain(col, row, index)` · `map.setElevation(col, row, -1)` |
 | Compute surfaces | `map.computeWaterSurfaces(t => myLiquidSet.has(t))` |
 | Save (binary) | `deserializeMap(bytes, isWaterPredicate)` |
 | Save (JSON) | `serializeMapJSON` / `deserializeMapJSON` (auto-reconstructs predicate) |
+
+---
+
+Once your liquid descriptors are ready, bundle them alongside terrain, scatter, and maps into a portable file using [HexPack](hex-pack.md).

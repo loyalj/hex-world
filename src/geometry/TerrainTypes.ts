@@ -42,6 +42,11 @@ export interface TerrainDescriptor {
   isWater?: boolean;
   /** How to build the texture atlas slice for this type. */
   texture: TerrainTextureDescriptor;
+  /**
+   * Pathfinding cost multiplier for crossing this terrain on a road.
+   * Defaults to 1.0 (neutral cost). Higher values make the tile more expensive to traverse.
+   */
+  roadCost?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -79,6 +84,8 @@ export interface TerrainDefinition {
   isWater: boolean;
   /** Texture descriptor, carried through for buildTerrainTextureArray. */
   texture: TerrainTextureDescriptor;
+  /** Pathfinding cost multiplier for road traversal. Always present; defaults to 1.0. */
+  roadCost: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -107,6 +114,7 @@ export function resolveTerrainDefinitions(descriptors: TerrainDescriptor[]): Ter
       liquidType,
       isWater:    liquidType !== undefined,
       texture:    d.texture,
+      roadCost:   d.roadCost ?? 1.0,
     };
   });
 }
@@ -149,32 +157,32 @@ export function buildTerrainLookup(definitions: TerrainDefinition[]): Map<number
 export const DEFAULT_TERRAIN_DESCRIPTORS: TerrainDescriptor[] = [
   {
     index: 0, id: 'grassland', name: 'Grassland', color: 0x86b888,
-    roadColor: [0.50, 0.43, 0.33],
+    roadColor: [0.50, 0.43, 0.33], roadCost: 1,
     texture: { type: 'procedural' },
   },
   {
     index: 1, id: 'desert', name: 'Desert', color: 0xc8bea0,
-    roadColor: [0.54, 0.46, 0.34],
+    roadColor: [0.54, 0.46, 0.34], roadCost: 2,
     texture: { type: 'procedural', noiseFrequency: 256 },
   },
   {
     index: 2, id: 'snow', name: 'Snow', color: 0xd5e6f5,
-    roadColor: [0.36, 0.41, 0.52],
+    roadColor: [0.36, 0.41, 0.52], roadCost: 3,
     texture: { type: 'procedural' },
   },
   {
     index: 3, id: 'mud', name: 'Mud', color: 0xa08870,
-    roadColor: [0.35, 0.27, 0.16],
+    roadColor: [0.35, 0.27, 0.16], roadCost: 3,
     texture: { type: 'procedural' },
   },
   {
     index: 4, id: 'rock', name: 'Rock', color: 0xa3adb5,
-    roadColor: [0.46, 0.46, 0.45],
+    roadColor: [0.46, 0.46, 0.45], roadCost: 5,
     texture: { type: 'procedural', noiseFrequency: 64 },
   },
   {
     index: 5, id: 'water', name: 'Water', color: 0x4a8fb5,
-    roadColor: [0.42, 0.46, 0.50],
+    roadColor: [0.42, 0.46, 0.50], roadCost: 1,
     liquidType: 'water',
     texture: { type: 'procedural' },
   },

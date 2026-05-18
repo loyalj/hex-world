@@ -1,4 +1,5 @@
 export * from './math/index.js';
+export * from './pack/index.js';
 export * from './math/Noise.js';
 export * from './math/Random.js';
 export * from './map/index.js';

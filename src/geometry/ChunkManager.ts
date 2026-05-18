@@ -97,6 +97,7 @@ export class ChunkManager {
   private readonly roadChunks    = new Map<string, THREE.Mesh>();
   private readonly scatterChunks = new Map<string, THREE.InstancedMesh[]>();
   private readonly dirty         = new Set<string>();
+  private elapsedSeconds         = 0;
 
   /** Total number of chunks across the map width */
   readonly chunksX: number;
@@ -345,6 +346,14 @@ export class ChunkManager {
    * Loads chunks within loadRadius, unloads those outside.
    */
   update(camera: THREE.Camera, dt = 0): void {
+    this.elapsedSeconds += dt;
+    for (const ms of this.liquidMaterials.values()) {
+      if (ms.surface  instanceof THREE.ShaderMaterial) ms.surface.uniforms.uTime.value  = this.elapsedSeconds;
+      if (ms.shore    instanceof THREE.ShaderMaterial) ms.shore.uniforms.uTime.value    = this.elapsedSeconds;
+      if (ms.estuary  instanceof THREE.ShaderMaterial) ms.estuary.uniforms.uTime.value  = this.elapsedSeconds;
+      if (ms.river    instanceof THREE.ShaderMaterial) ms.river.uniforms.uTime.value    = this.elapsedSeconds;
+    }
+
     if (this.fogData) {
       const scatterNeedsRefresh = this.fogData.needsUpdate || this.fogData.isAnimating;
       this.fogData.update(dt);

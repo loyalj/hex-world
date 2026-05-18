@@ -208,3 +208,7 @@ The binary format (`serializeMap` / `deserializeMap`) stores only cell data; des
 | Register with renderer | `ChunkManager({ scatterDefinitions: [...] })` |
 | Embed in save file | `serializeMapJSON(map, meta, descriptors)` |
 | Restore on load | `deserializeMapJSON(json).scatterDescriptors` → `resolveScatterDefinition` |
+
+---
+
+Once your scatter descriptors and GLB models are ready, bundle everything into a portable file using [HexPack](hex-pack.md).

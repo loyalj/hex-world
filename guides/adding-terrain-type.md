@@ -265,3 +265,7 @@ const map = deserializeMap(bytes, t => liquidIndices.has(t));
 | Water index for generators | `BiomeAssigner`, `generateClimateRivers`, `generateRoads` — all accept `waterTerrainIndex` |
 | Embed in save file | `serializeMapJSON(map, meta, scatterDesc, terrainDesc)` |
 | Restore on load | `deserializeMapJSON(json).terrainDescriptors` → `resolveTerrainDefinitions` |
+
+---
+
+Once your descriptor array is ready, bundle it with image assets and maps into a portable file using [HexPack](hex-pack.md).

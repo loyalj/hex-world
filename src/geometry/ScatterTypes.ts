@@ -1,6 +1,5 @@
 import type * as THREE from 'three';
 import type { HexMap } from '../map/HexMap.js';
-import type { TerrainType } from '../map/HexCell.js';
 
 // ---------------------------------------------------------------------------
 // Core resolved types (hold live Three.js objects — not serializable)
@@ -45,8 +44,10 @@ export interface ScatterDescriptor {
   layerIndex: number;
   /** [tier 0=dense → tier 2=sparse][variant within tier] */
   tiers: ScatterVariantDescriptor[][];
-  /** If set, only cells whose terrain type is in this list can host this scatter. */
-  allowedTerrains?: TerrainType[];
+  /** If set, only cells whose terrain type index is in this list can host this scatter. */
+  allowedTerrains?: number[];
+  /** Random X/Z tilt applied to each instance matrix (radians). 0 = upright only. */
+  tiltStrength?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -77,8 +78,8 @@ export interface ScatterDefinition {
   /** Feature layer slot index in `HexMap.featureData`. Must be unique per map. */
   layerIndex: number;
   tiers: ScatterLayerConfig;
-  /** If set, only cells whose terrain type is in this list can host this scatter. */
-  allowedTerrains?: TerrainType[];
+  /** If set, only cells whose terrain type index is in this list can host this scatter. */
+  allowedTerrains?: number[];
   /** Custom per-cell filter applied after `allowedTerrains`. */
   canSpawnAt?(map: HexMap, col: number, row: number): boolean;
   /** Random X/Z tilt applied to each instance matrix (radians). 0 = upright only. */
@@ -113,5 +114,6 @@ export function resolveScatterDefinition(
     layerIndex:      descriptor.layerIndex,
     tiers,
     allowedTerrains: descriptor.allowedTerrains,
+    tiltStrength:    descriptor.tiltStrength,
   };
 }

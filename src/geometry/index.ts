@@ -15,3 +15,4 @@ export * from './HexHashGrid.js';
 export * from './ScatterTypes.js';
 export * from './ScatterBuilder.js';
 export * from './TerrainTypes.js';
+export * from './LiquidTypes.js';

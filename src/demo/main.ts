@@ -4,15 +4,11 @@ import { RtsCameraController } from '../camera/RtsCameraController.js';
 import { createLayout } from '../math/HexLayout.js';
 import { HexMap } from '../map/HexMap.js';
 import { ChunkManager } from '../geometry/ChunkManager.js';
-import { createWaterMaterial } from '../geometry/WaterMaterial.js';
-import { createWaterShoreMaterial } from '../geometry/WaterShoreMaterial.js';
-import { createEstuaryMaterial } from '../geometry/EstuaryMaterial.js';
-import { createRiverMaterial } from '../geometry/RiverMaterial.js';
 import { createRoadMaterial } from '../geometry/RoadMaterial.js';
 import { buildTerrainTextureArray } from '../geometry/TerrainTextures.js';
 import { DEFAULT_TERRAIN_DESCRIPTORS, resolveTerrainDefinitions, buildWaterTerrainSet } from '../geometry/TerrainTypes.js';
 import { createTerrainMaterial } from '../geometry/TerrainMaterial.js';
-import type { LiquidMaterialSet } from '../geometry/LiquidTypes.js';
+import { resolveLiquidMaterials, DEFAULT_LIQUID_DESCRIPTORS } from '../geometry/LiquidTypes.js';
 import type { TerrainColorMode } from '../geometry/ChunkManager.js';
 import { HexHashGrid } from '../geometry/HexHashGrid.js';
 import type { ScatterDefinition } from '../geometry/ScatterTypes.js';
@@ -136,41 +132,8 @@ scene.add(hoverMesh);
 let hoverCell: { col: number; row: number } | null = null;
 
 // --- Materials ---
-const roadMaterial = createRoadMaterial();
-
-// Water — default blue
-const waterMaterial   = createWaterMaterial();
-const shoreMaterial   = createWaterShoreMaterial();
-const estuaryMaterial = createEstuaryMaterial();
-const riverMaterial   = createRiverMaterial();
-
-// Lava — deep orange/red
-const lavaColors = {
-  shallow: new THREE.Color(0.90, 0.40, 0.05),
-  deep:    new THREE.Color(0.55, 0.10, 0.02),
-  foam:    new THREE.Color(0.95, 0.70, 0.30),
-};
-const lavaSurface  = createWaterMaterial(lavaColors);
-const lavaShore    = createWaterShoreMaterial(lavaColors);
-const lavaEstuary  = createEstuaryMaterial(lavaColors);
-const lavaRiver    = createRiverMaterial(lavaColors);
-
-// Acid — green
-const acidColors = {
-  shallow: new THREE.Color(0.30, 0.70, 0.10),
-  deep:    new THREE.Color(0.15, 0.40, 0.05),
-  foam:    new THREE.Color(0.70, 0.95, 0.40),
-};
-const acidSurface  = createWaterMaterial(acidColors);
-const acidShore    = createWaterShoreMaterial(acidColors);
-const acidEstuary  = createEstuaryMaterial(acidColors);
-const acidRiver    = createRiverMaterial(acidColors);
-
-const liquidMaterials = new Map<string, LiquidMaterialSet>([
-  ['water', { surface: waterMaterial, shore: shoreMaterial, estuary: estuaryMaterial, river: riverMaterial }],
-  ['lava',  { surface: lavaSurface,   shore: lavaShore,     estuary: lavaEstuary,     river: lavaRiver }],
-  ['acid',  { surface: acidSurface,   shore: acidShore,     estuary: acidEstuary,     river: acidRiver }],
-]);
+const roadMaterial    = createRoadMaterial();
+const liquidMaterials = new Map(DEFAULT_LIQUID_DESCRIPTORS.map(d => [d.id, resolveLiquidMaterials(d)]));
 
 // --- HUD ---
 const hud = document.createElement('div');
@@ -570,14 +533,6 @@ async function start() {
     controls.update();
     unitManager.update(dt);
     chunkManager.update(camera, dt);
-
-    const t = now / 1000;
-    for (const ms of liquidMaterials.values()) {
-      if (ms.surface  && 'uniforms' in ms.surface)  (ms.surface  as THREE.ShaderMaterial).uniforms.uTime.value = t;
-      if (ms.shore    && 'uniforms' in ms.shore)    (ms.shore    as THREE.ShaderMaterial).uniforms.uTime.value = t;
-      if (ms.estuary  && 'uniforms' in ms.estuary)  (ms.estuary  as THREE.ShaderMaterial).uniforms.uTime.value = t;
-      if (ms.river    && 'uniforms' in ms.river)    (ms.river    as THREE.ShaderMaterial).uniforms.uTime.value = t;
-    }
 
     frameCount++;
     const elapsed = now - lastFpsTime;
