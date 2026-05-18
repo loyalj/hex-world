@@ -40,8 +40,13 @@ export function buildShoreGeometry(
   const surfaceLift    = opts.surfaceLift        ?? 0.02;
   const elevPerturbStr = 0.2; // must match HexChunk elevPerturbStrength default
   const edgeDirs       = layout.orientation.edgeDirections;
-  const waterTerrains  = opts.waterTerrains ?? new Set([DEFAULT_WATER_TERRAIN_INDEX]);
-  const isWater = (t: number) => waterTerrains.has(t);
+  const waterTerrains     = opts.waterTerrains ?? new Set([DEFAULT_WATER_TERRAIN_INDEX]);
+  const allLiquidTerrains = opts.allLiquidTerrains;
+  const isWater       = (t: number) => waterTerrains.has(t);
+  const isOtherLiquid = (t: number) => !!allLiquidTerrains && allLiquidTerrains.has(t) && !waterTerrains.has(t);
+  // Lower terrain index = higher rendering priority at liquid-liquid boundaries.
+  // Only the higher-priority liquid renders a shore so there's a single clean foam line.
+  const currentLiquidPriority = Math.min(...waterTerrains);
   const startAngle = layout.orientation.startAngle;
 
   const { colStart, colEnd, rowStart, rowEnd } = bounds;
@@ -127,10 +132,11 @@ export function buildShoreGeometry(
         const nc = nq + (nr - (nr & 1)) / 2;
 
         if (!map.inBounds(nc, nr)) continue;
-        if (isWater(map.getTerrain(nc, nr))) continue;
+        const nbTerrain = map.getTerrain(nc, nr);
+        if (isWater(nbTerrain)) continue;
 
-        // Shore edge found: current cell is water, neighbor (nc,nr) is land.
         const i1 = (i + 1) % 6;
+        const nbIsOtherLiquid = isOtherLiquid(nbTerrain);
 
         // Water-side corners at WATER_FACTOR, all at the water surface Y (V=0).
         const c1 = cornerAt(center.x, center.z, i,  WATER_FACTOR);
@@ -143,18 +149,29 @@ export function buildShoreGeometry(
           c1.x,     c1.z,     wSurfaceY, 0, 0,
         );
 
-        // 2. Strip quad: water side (wSurfaceY) → land side (terrain Y).
-        //    Land-side uses actual terrain Y so the V=1 foam edge sits on the
-        //    terrain surface and is visible via polygonOffset over the terrain.
-        //    Also rendered for estuary edges — the estuary mesh sits on top via
-        //    its own (more-negative) polygon offset, and this strip fills the
-        //    side corners where the estuary fan doesn't reach.
-        {
+        // 2. Strip quad.
+        if (nbIsOtherLiquid) {
+          // Only the higher-priority liquid (lower terrain index) renders a shore here.
+          // The lower-priority liquid skips so there's exactly one foam line at the boundary.
+          if (nbTerrain < currentLiquidPriority) continue;
+
+          // Keep the strip within the current hex so it never overlaps the other
+          // liquid's surface mesh. The foam (V=1) appears at SOLID_FACTOR — close
+          // to the hex boundary but not crossing into the other cell.
+          const ls1 = cornerAt(center.x, center.z, i,  SOLID_FACTOR);
+          const ls2 = cornerAt(center.x, center.z, i1, SOLID_FACTOR);
+          addQuad(
+            c1.x,  c1.z,  wSurfaceY, 0, 0,
+            c2.x,  c2.z,  wSurfaceY, 0, 0,
+            ls1.x, ls1.z, wSurfaceY, 0, 1,
+            ls2.x, ls2.z, wSurfaceY, 0, 1,
+          );
+          // No corner triangle for liquid-liquid boundaries.
+        } else {
+          // Neighbor is land. Standard shore strip + corner triangle.
           const nbc  = hexCenter(nc, nr);
           const ls1  = cornerAt(nbc.x, nbc.z, (i + 4) % 6, SOLID_FACTOR);
           const ls2  = cornerAt(nbc.x, nbc.z, (i + 3) % 6, SOLID_FACTOR);
-          // Land-side Y stops halfway up the slope so the foam band doesn't
-          // climb all the way to the terrain tile surface.
           const nbY  = wSurfaceY + (landCellY(nc, nr) - wSurfaceY) * 0.5;
 
           addQuad(
@@ -163,33 +180,37 @@ export function buildShoreGeometry(
             ls1.x, ls1.z, nbY,       0, 1,
             ls2.x, ls2.z, nbY,       0, 1,
           );
-        }
 
-        // 3. Corner triangle: fill the three-way junction at corner i1.
-        const d2v  = HEX_DIRECTIONS[edgeDirs[i1]];
-        const nb2q = q  + d2v.q;
-        const nb2r = row + d2v.r;
-        const nb2c = nb2q + (nb2r - (nb2r & 1)) / 2;
+          // 3. Corner triangle: fill the three-way junction at corner i1.
+          const d2v  = HEX_DIRECTIONS[edgeDirs[i1]];
+          const nb2q = q  + d2v.q;
+          const nb2r = row + d2v.r;
+          const nb2c = nb2q + (nb2r - (nb2r & 1)) / 2;
 
-        if (map.inBounds(nb2c, nb2r)) {
-          const nb2IsWater = isWater(map.getTerrain(nb2c, nb2r));
-          const nb2Center  = hexCenter(nb2c, nb2r);
-          const cornerJ    = (i + 5) % 6;
-          const factor     = nb2IsWater ? WATER_FACTOR : SOLID_FACTOR;
-          const v3         = cornerAt(nb2Center.x, nb2Center.z, cornerJ, factor);
-          const rawV3Y     = nb2IsWater ? wSurfaceY : landCellY(nb2c, nb2r);
-          const v3Y        = nb2IsWater ? wSurfaceY : wSurfaceY + (rawV3Y - wSurfaceY) * 0.5;
-          const v3V        = nb2IsWater ? 0 : 1;
+          if (map.inBounds(nb2c, nb2r)) {
+            const nb2Terrain       = map.getTerrain(nb2c, nb2r);
+            const nb2IsWater       = isWater(nb2Terrain);
+            const nb2IsOtherLiquid = isOtherLiquid(nb2Terrain);
+            const nb2IsLiquidLike  = nb2IsWater || nb2IsOtherLiquid;
+            const nb2Center  = hexCenter(nb2c, nb2r);
+            const cornerJ    = (i + 5) % 6;
+            const factor     = nb2IsLiquidLike ? WATER_FACTOR : SOLID_FACTOR;
+            const v3         = cornerAt(nb2Center.x, nb2Center.z, cornerJ, factor);
+            const v3Y        = nb2IsLiquidLike
+              ? (nb2IsOtherLiquid ? map.getWaterSurface(nb2c, nb2r) * elevScale + surfaceLift : wSurfaceY)
+              : wSurfaceY + (landCellY(nb2c, nb2r) - wSurfaceY) * 0.5;
+            const v3V        = nb2IsLiquidLike ? 0 : 1;
 
-          const nbc2 = hexCenter(nc, nr);
-          const ls2  = cornerAt(nbc2.x, nbc2.z, (i + 3) % 6, SOLID_FACTOR);
-          const ls2Y = wSurfaceY + (landCellY(nc, nr) - wSurfaceY) * 0.5;
+            const nbc2 = hexCenter(nc, nr);
+            const ls2e = cornerAt(nbc2.x, nbc2.z, (i + 3) % 6, SOLID_FACTOR);
+            const ls2Y = wSurfaceY + (landCellY(nc, nr) - wSurfaceY) * 0.5;
 
-          addTri(
-            c2.x,  c2.z,  wSurfaceY, 0, 0,
-            ls2.x, ls2.z, ls2Y,      0, 1,
-            v3.x,  v3.z,  v3Y,       0, v3V,
-          );
+            addTri(
+              c2.x,   c2.z,   wSurfaceY, 0, 0,
+              ls2e.x, ls2e.z, ls2Y,      0, 1,
+              v3.x,   v3.z,   v3Y,       0, v3V,
+            );
+          }
         }
       }
     }

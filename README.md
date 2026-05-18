@@ -8,7 +8,7 @@ A Three.js library for building hex-grid strategy and exploration games. Handles
 
 - **Chunk-based rendering** — large maps streamed in and out as the camera moves, one draw call per chunk
 - **Terrain system** — six built-in types with vertex color blending and texture splatting; fully extensible with custom types, procedural noise, or image textures
-- **Water** — animated standing water, shore foam, estuaries, and flowing rivers; per-body surface elevation supports mountain lakes at any height alongside ocean at sea level
+- **Liquid types** — modular system supporting multiple liquid types on one map (water, lava, acid, or custom); each type has its own surface, shore, estuary, and river materials; correct foam boundaries where liquid types meet; rivers classified by which pool they drain into
 - **Roads** — geometry strips rendered above terrain
 - **Scatter features** — instanced meshes (trees, rocks, buildings) placed deterministically from per-cell density levels; modular definitions with terrain filters and density tiers
 - **Fog of war** — reference-counted per-cell visibility with smooth reveal animation; integrated with units
@@ -16,7 +16,7 @@ A Three.js library for building hex-grid strategy and exploration games. Handles
 - **Pathfinding** — A\*, flood-fill movement range, BFS visibility radius, elevation-aware line of sight, Catmull-Rom path smoothing
 - **Units** — position, smooth path-following, facing, fog reveal; wire your own `Object3D` and animation callbacks
 - **RTS camera** — pan, zoom, tilt with smooth damping
-- **Save/load** — binary and JSON formats; scatter and terrain descriptors travel with the map
+- **Save/load** — binary and JSON formats; scatter, terrain, and liquid descriptors travel with the map; water surfaces recomputed correctly for all liquid types on load
 
 Your game owns the UI, unit models, game rules, and render loop. The library owns the hex geometry, shaders, and algorithms.
 
@@ -46,6 +46,7 @@ import {
   createWaterMaterial, createWaterShoreMaterial,
   createEstuaryMaterial, createRiverMaterial, createRoadMaterial,
   DEFAULT_TERRAIN_DESCRIPTORS, DEFAULT_TERRAIN_DEFINITIONS,
+  DEFAULT_LIQUID_DESCRIPTORS,
 } from '@loyalj/hex-world';
 
 // Map data + generation
@@ -63,13 +64,21 @@ document.body.appendChild(renderer.domElement);
 const terrainTex = await buildTerrainTextureArray(DEFAULT_TERRAIN_DESCRIPTORS);
 const material   = createTerrainMaterial(terrainTex);
 
+// Liquid materials — one set of four materials per liquid type
+const liquidMaterials = new Map([
+  ['water', {
+    surface: createWaterMaterial(),
+    shore:   createWaterShoreMaterial(),
+    estuary: createEstuaryMaterial(),
+    river:   createRiverMaterial(),
+  }],
+]);
+
 // Chunk manager — owns all meshes, handles streaming
 const chunks = new ChunkManager({
   map, layout: createLayout(POINTY_TOP, 1), scene, material,
-  waterMaterial:      createWaterMaterial(),
-  shoreMaterial:      createWaterShoreMaterial(),
-  estuaryMaterial:    createEstuaryMaterial(),
-  riverMaterial:      createRiverMaterial(),
+  liquidMaterials,
+  liquidDescriptors:  DEFAULT_LIQUID_DESCRIPTORS,
   roadMaterial:       createRoadMaterial(),
   terrainDefinitions: DEFAULT_TERRAIN_DEFINITIONS,
 });

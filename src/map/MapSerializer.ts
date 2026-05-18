@@ -2,6 +2,7 @@ import { HexMap } from './HexMap.js';
 import type { ScatterDescriptor } from '../geometry/ScatterTypes.js';
 import type { TerrainDescriptor } from '../geometry/TerrainTypes.js';
 import type { LiquidTypeDescriptor } from '../geometry/LiquidTypes.js';
+import { DEFAULT_WATER_TERRAIN_INDEX } from '../geometry/TerrainTypes.js';
 
 const MAGIC   = [0x48, 0x58, 0x4d, 0x50]; // "HXMP"
 const VERSION = 1;
@@ -53,7 +54,7 @@ export function serializeMap(map: HexMap): Uint8Array {
  * Deserializes a HexMap from binary data produced by `serializeMap`.
  * Throws if the magic bytes or version are unrecognised.
  */
-export function deserializeMap(data: Uint8Array): HexMap {
+export function deserializeMap(data: Uint8Array, isWater?: (terrain: number) => boolean): HexMap {
   const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
 
   if (data[0] !== MAGIC[0] || data[1] !== MAGIC[1] || data[2] !== MAGIC[2] || data[3] !== MAGIC[3]) {
@@ -79,7 +80,7 @@ export function deserializeMap(data: Uint8Array): HexMap {
     map.featureData.set(data.subarray(offset, offset + map.featureData.byteLength));
   }
 
-  map.computeWaterSurfaces();
+  map.computeWaterSurfaces(isWater);
   return map;
 }
 
@@ -161,7 +162,19 @@ export function deserializeMapJSON(json: string): DeserializedMap {
   if (map.featureData && p.features) {
     map.featureData.set(base64ToUint8(p.features));
   }
-  map.computeWaterSurfaces();
+
+  // Build isWater predicate from embedded terrain descriptors so custom liquid
+  // types (lava, acid, …) get correct water surfaces after deserialization.
+  // Falls back to built-in water only when no descriptors are saved.
+  const savedDescriptors = p.terrainDescriptors ?? [];
+  const liquidIndices = new Set<number>(
+    savedDescriptors
+      .filter(d => d.liquidType != null || d.isWater)
+      .map(d => d.index),
+  );
+  if (liquidIndices.size === 0) liquidIndices.add(DEFAULT_WATER_TERRAIN_INDEX);
+  map.computeWaterSurfaces(t => liquidIndices.has(t));
+
   return {
     map,
     metadata:           { name: p.name, seed: p.seed, generatorId: p.generatorId },

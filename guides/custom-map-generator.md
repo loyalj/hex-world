@@ -129,7 +129,8 @@ function generateSimple(map: HexMap, seed: number): void {
     riverPercentage: 8,
   }, rand);
 
-  // 5. Compute flat water surface elevations for lakes and ocean
+  // 5. Compute flat water surface elevations for lakes and ocean.
+  // Pass a custom predicate if your map uses non-default liquid terrain indices.
   map.computeWaterSurfaces();
 }
 ```
@@ -169,7 +170,8 @@ function generateFull(map: HexMap, seed: number): void {
   // Roads — grid of routes avoiding water, rivers, steep slopes
   generateRoads(map, { gridSpacing: 24, maxElevationDiff: 1 });
 
-  // Compute flat water surface elevations for lakes and ocean
+  // Compute flat water surface elevations for lakes and ocean.
+  // Pass a custom predicate if your map uses non-default liquid terrain indices.
   map.computeWaterSurfaces();
 }
 ```

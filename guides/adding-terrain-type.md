@@ -136,13 +136,20 @@ const definitions = resolveTerrainDefinitions(MY_TERRAIN_DESCRIPTORS);
 ```ts
 import { ChunkManager } from '@loyalj/hex-world';
 
+const liquidMaterials = new Map([
+  ['water', {
+    surface: createWaterMaterial(),
+    shore:   createWaterShoreMaterial(),
+    estuary: createEstuaryMaterial(),
+    river:   createRiverMaterial(),
+  }],
+]);
+
 const chunks = new ChunkManager({
   map, layout, scene,
   material:           terrainMaterial,
-  waterMaterial:      createWaterMaterial(),
-  shoreMaterial:      createWaterShoreMaterial(),
-  estuaryMaterial:    createEstuaryMaterial(),
-  riverMaterial:      createRiverMaterial(),
+  liquidMaterials,
+  liquidDescriptors:  DEFAULT_LIQUID_DESCRIPTORS,
   roadMaterial:       createRoadMaterial(),
   terrainDefinitions: definitions,   // ← your custom set
 });
@@ -234,7 +241,14 @@ const terrainTex  = await buildTerrainTextureArray(terrainDescriptors, registry)
 const chunks = new ChunkManager({ ..., terrainDefinitions: definitions });
 ```
 
-The binary format (`serializeMap` / `deserializeMap`) stores only cell data; descriptors are a JSON-only feature.
+The binary format (`serializeMap` / `deserializeMap`) stores only cell data; descriptors are a JSON-only feature. If your terrain descriptors include custom liquid types, pass an `isWater` predicate to `deserializeMap` so water surfaces are recomputed correctly:
+
+```ts
+const liquidIndices = new Set(MY_TERRAIN_DESCRIPTORS.filter(d => d.liquidType).map(d => d.index));
+const map = deserializeMap(bytes, t => liquidIndices.has(t));
+```
+
+`deserializeMapJSON` handles this automatically — it reads the embedded `terrainDescriptors` and builds the predicate for you.
 
 ---
 

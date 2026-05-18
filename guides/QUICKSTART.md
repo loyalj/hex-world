@@ -33,6 +33,7 @@ import {
   createEstuaryMaterial, createRiverMaterial, createRoadMaterial,
   buildTerrainTextureArray, createTerrainMaterial,
   DEFAULT_TERRAIN_DESCRIPTORS, DEFAULT_TERRAIN_DEFINITIONS,
+  DEFAULT_LIQUID_DESCRIPTORS,
 } from '@loyalj/hex-world';
 
 // 1. Map data
@@ -53,14 +54,22 @@ document.body.appendChild(renderer.domElement);
 const terrainTex = await buildTerrainTextureArray(DEFAULT_TERRAIN_DESCRIPTORS);
 const terrainMaterial = createTerrainMaterial(terrainTex);
 
-// 5. ChunkManager — owns all Three.js meshes, handles chunk streaming
+// 5. Liquid materials — one set of four materials per liquid type
+const liquidMaterials = new Map([
+  ['water', {
+    surface: createWaterMaterial(),
+    shore:   createWaterShoreMaterial(),
+    estuary: createEstuaryMaterial(),
+    river:   createRiverMaterial(),
+  }],
+]);
+
+// 6. ChunkManager — owns all Three.js meshes, handles chunk streaming
 const chunks = new ChunkManager({
   map, layout, scene,
   material:           terrainMaterial,
-  waterMaterial:      createWaterMaterial(),
-  shoreMaterial:      createWaterShoreMaterial(),
-  estuaryMaterial:    createEstuaryMaterial(),
-  riverMaterial:      createRiverMaterial(),
+  liquidMaterials,
+  liquidDescriptors:  DEFAULT_LIQUID_DESCRIPTORS,
   roadMaterial:       createRoadMaterial(),
   terrainDefinitions: DEFAULT_TERRAIN_DEFINITIONS,
   chunkSize:          32,
@@ -355,7 +364,12 @@ import { serializeMap, deserializeMap, serializeMapJSON, deserializeMapJSON } fr
 
 // Binary — compact, fast. Use for file saves, IndexedDB, network transfer.
 const bytes    = serializeMap(map);              // Uint8Array (~60 KB for a 100×100 map)
-const restored = deserializeMap(bytes);          // returns HexMap
+const restored = deserializeMap(bytes);          // returns HexMap (built-in water only)
+
+// If your map uses custom liquid types (lava, acid, …) pass an isWater predicate
+// so their water surfaces are recomputed correctly after load:
+const liquidTerrains = new Set([5, 6, 7]); // indices of all liquid terrain types
+const restored = deserializeMap(bytes, t => liquidTerrains.has(t));
 
 // Persist to a file (browser)
 const blob = new Blob([bytes], { type: 'application/octet-stream' });
@@ -364,7 +378,7 @@ const url  = URL.createObjectURL(blob);
 
 // Load from a file (browser)
 const file = await fileInput.files[0].arrayBuffer();
-const map  = deserializeMap(new Uint8Array(file));
+const map  = deserializeMap(new Uint8Array(file), t => liquidTerrains.has(t));
 
 // JSON with metadata — suitable for localStorage, editor clipboard, or debug export.
 const json = serializeMapJSON(map, {
