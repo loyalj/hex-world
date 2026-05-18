@@ -12,7 +12,9 @@ import type { HexHashGrid } from './HexHashGrid.js';
 import type { ScatterDefinition } from './ScatterTypes.js';
 import type { FogData } from './FogData.js';
 import type { TerrainDefinition } from './TerrainTypes.js';
-import { DEFAULT_TERRAIN_DEFINITIONS, buildWaterTerrainSet } from './TerrainTypes.js';
+import { DEFAULT_TERRAIN_DEFINITIONS, buildWaterTerrainSet, buildLiquidTerrainSets } from './TerrainTypes.js';
+import type { LiquidTypeDescriptor, LiquidMaterialSet } from './LiquidTypes.js';
+import { DEFAULT_LIQUID_DESCRIPTORS } from './LiquidTypes.js';
 
 export interface ChunkManagerOptions {
   map: HexMap;
@@ -25,17 +27,21 @@ export interface ChunkManagerOptions {
   loadRadius?: number;
   /** Passed through to each chunk's terrain geometry builder. */
   geometryOptions?: ChunkGeometryOptions;
-  /** If provided, water and river surfaces are rendered with this material. */
-  waterMaterial?: THREE.Material;
-  /** If provided, shore foam strips are rendered with this material. */
-  shoreMaterial?: THREE.Material;
-  /** If provided, estuary (river-meets-shore) regions are rendered with this material. */
-  estuaryMaterial?: THREE.Material;
-  /** If provided, river channels on land cells are rendered with this material. */
-  riverMaterial?: THREE.Material;
   /** If provided, roads are rendered with this material. */
   roadMaterial?: THREE.Material;
-  /** Passed through to the water geometry builder. */
+  /**
+   * Per-liquid-type material sets, keyed by LiquidTypeDescriptor.id.
+   * Each entry controls which mesh layers are rendered for that liquid type.
+   * Omit entries for liquid types that should not be rendered.
+   */
+  liquidMaterials?: Map<string, LiquidMaterialSet>;
+  /**
+   * Liquid type descriptors that define per-type geometry overrides.
+   * Defaults to DEFAULT_LIQUID_DESCRIPTORS (water, lava, acid).
+   * Must include an entry for every key present in liquidMaterials.
+   */
+  liquidDescriptors?: LiquidTypeDescriptor[];
+  /** Passed through to the water geometry builder as baseline options. */
   waterGeometryOptions?: WaterGeometryOptions;
   /** Hash grid for deterministic scatter placement. Required when scatterDefinitions is provided. */
   hashGrid?: HexHashGrid;
@@ -56,8 +62,8 @@ export interface ChunkManagerOptions {
  * The map is divided into NxN cell chunks. `update(camera)` loads chunks within
  * `loadRadius` of the camera each frame and unloads those that have moved out of
  * range. Each chunk is a single merged `BufferGeometry` draw call for terrain,
- * with optional separate meshes for water, shore, estuary, rivers, roads, and
- * scatter features.
+ * with optional separate meshes per liquid type for surface, shore, estuary, rivers,
+ * plus roads and scatter features.
  *
  * Call `markDirty(col, row)` after modifying map data to trigger a geometry rebuild
  * for the affected chunk on the next `update()`.
@@ -67,27 +73,27 @@ export class ChunkManager {
   private readonly layout: HexLayout;
   private readonly scene: THREE.Scene;
   private material: THREE.Material;
-  private readonly waterMaterial: THREE.Material | null;
-  private readonly shoreMaterial:   THREE.Material | null;
-  private readonly estuaryMaterial: THREE.Material | null;
-  private readonly riverMaterial:   THREE.Material | null;
   private readonly roadMaterial:    THREE.Material | null;
   private readonly hashGrid:           HexHashGrid | null;
   private readonly scatterDefinitions: ScatterDefinition[] | null;
-  private readonly waterTerrains:      Set<number>;
+  private readonly liquidMaterials:    Map<string, LiquidMaterialSet>;
+  private readonly liquidDescriptors:  Map<string, LiquidTypeDescriptor>;
+  private readonly liquidTerrainSets:  Map<string, Set<number>>;
+  private readonly allWaterTerrains:   Set<number>;
   private fogData:                     FogData | null;
   private hideUnexplored            = true;
   private dimExplored               = true;
-  private readonly geoOptions: ChunkGeometryOptions;
+  private readonly geoOptions:      ChunkGeometryOptions;
   private readonly waterGeoOptions: WaterGeometryOptions;
   readonly chunkSize: number;
   private readonly loadRadius: number;
 
-  private readonly chunks        = new Map<string, THREE.Mesh>();
-  private readonly waterChunks   = new Map<string, THREE.Mesh>();
-  private readonly shoreChunks   = new Map<string, THREE.Mesh>();
-  private readonly estuaryChunks = new Map<string, THREE.Mesh>();
-  private readonly riverChunks   = new Map<string, THREE.Mesh>();
+  private readonly chunks = new Map<string, THREE.Mesh>();
+  // Liquid chunk maps use compound key: `${liquidId}|${chunkKey}`
+  private readonly liquidSurfaceChunks = new Map<string, THREE.Mesh>();
+  private readonly liquidShoreChunks   = new Map<string, THREE.Mesh>();
+  private readonly liquidEstuaryChunks = new Map<string, THREE.Mesh>();
+  private readonly liquidRiverChunks   = new Map<string, THREE.Mesh>();
   private readonly roadChunks    = new Map<string, THREE.Mesh>();
   private readonly scatterChunks = new Map<string, THREE.InstancedMesh[]>();
   private readonly dirty         = new Set<string>();
@@ -98,26 +104,56 @@ export class ChunkManager {
   readonly chunksY: number;
 
   constructor(opts: ChunkManagerOptions) {
-    this.map             = opts.map;
-    this.layout          = opts.layout;
-    this.scene           = opts.scene;
-    this.material        = opts.material;
-    this.waterMaterial   = opts.waterMaterial ?? null;
-    this.shoreMaterial   = opts.shoreMaterial   ?? null;
-    this.estuaryMaterial = opts.estuaryMaterial ?? null;
-    this.riverMaterial   = opts.riverMaterial   ?? null;
-    this.roadMaterial    = opts.roadMaterial    ?? null;
+    this.map          = opts.map;
+    this.layout       = opts.layout;
+    this.scene        = opts.scene;
+    this.material     = opts.material;
+    this.roadMaterial = opts.roadMaterial ?? null;
     this.hashGrid           = opts.hashGrid           ?? null;
     this.scatterDefinitions = opts.scatterDefinitions ?? null;
     this.fogData            = opts.fogData            ?? null;
-    const terrainDefs    = opts.terrainDefinitions ?? DEFAULT_TERRAIN_DEFINITIONS;
-    this.waterTerrains   = buildWaterTerrainSet(terrainDefs);
-    this.geoOptions      = { ...opts.geometryOptions,      terrainDefinitions: terrainDefs };
-    this.waterGeoOptions = { ...opts.waterGeometryOptions, waterTerrains: this.waterTerrains };
+
+    const terrainDefs       = opts.terrainDefinitions ?? DEFAULT_TERRAIN_DEFINITIONS;
+    this.liquidTerrainSets  = buildLiquidTerrainSets(terrainDefs);
+    this.allWaterTerrains   = buildWaterTerrainSet(terrainDefs);
+
+    this.liquidMaterials   = opts.liquidMaterials ?? new Map();
+    const descriptorList   = opts.liquidDescriptors ?? DEFAULT_LIQUID_DESCRIPTORS;
+    this.liquidDescriptors = new Map(descriptorList.map(d => [d.id, d]));
+
+    this.geoOptions      = { ...opts.geometryOptions, terrainDefinitions: terrainDefs };
+    this.waterGeoOptions = { ...opts.waterGeometryOptions };
+
     this.chunkSize  = opts.chunkSize  ?? 32;
     this.loadRadius = opts.loadRadius ?? 4;
     this.chunksX    = Math.ceil(opts.map.width  / this.chunkSize);
     this.chunksY    = Math.ceil(opts.map.height / this.chunkSize);
+  }
+
+  /** Merge global water geometry options with per-liquid overrides and inject the terrain set. */
+  private liquidOpts(liquidId: string): WaterGeometryOptions {
+    const desc = this.liquidDescriptors.get(liquidId);
+    return {
+      ...this.waterGeoOptions,
+      ...(desc?.noiseScale      !== undefined ? { noiseScale:      desc.noiseScale }      : {}),
+      ...(desc?.perturbStrength !== undefined ? { perturbStrength: desc.perturbStrength } : {}),
+      ...(desc?.surfaceLift     !== undefined ? { surfaceLift:     desc.surfaceLift }     : {}),
+      waterTerrains:    this.liquidTerrainSets.get(liquidId) ?? new Set(),
+      allLiquidTerrains: this.allWaterTerrains,
+    };
+  }
+
+  /** Collect all materials currently in use (for fog uniform propagation). */
+  private allMaterials(): THREE.Material[] {
+    const mats: THREE.Material[] = [this.material];
+    if (this.roadMaterial) mats.push(this.roadMaterial);
+    for (const ms of this.liquidMaterials.values()) {
+      if (ms.surface) mats.push(ms.surface);
+      if (ms.shore)   mats.push(ms.shore);
+      if (ms.estuary) mats.push(ms.estuary);
+      if (ms.river)   mats.push(ms.river);
+    }
+    return mats;
   }
 
   private applyFogToScatterMeshes(meshes: THREE.InstancedMesh[]): void {
@@ -132,7 +168,7 @@ export class ChunkManager {
       if (!ci) continue;
       for (let i = 0; i < ci.length; i++) {
         const r = raw[ci[i] * 4]     / 255;
-        const b = raw[ci[i] * 4 + 2] / 255; // B channel = reveal animation progress 0→1
+        const b = raw[ci[i] * 4 + 2] / 255;
         const hidden = this.hideUnexplored && b < 0.01;
         const revealFactor = this.hideUnexplored ? b : 1.0;
         const brightness = hidden ? 0 : revealFactor * (this.dimExplored ? (0.25 + 0.75 * r) : 1.0);
@@ -152,14 +188,12 @@ export class ChunkManager {
     }
   }
 
-  /** Update instance colors on all loaded scatter chunks to reflect current fog. */
   private updateScatterFog(): void {
     for (const meshes of this.scatterChunks.values()) {
       this.applyFogToScatterMeshes(meshes);
     }
   }
 
-  /** Push fog-of-war uniforms onto a ShaderMaterial that supports them. */
   private applyFog(mat: THREE.Material | null): void {
     if (!mat || !this.fogData || !(mat instanceof THREE.ShaderMaterial)) return;
     const u = mat.uniforms;
@@ -195,48 +229,53 @@ export class ChunkManager {
     this.scene.add(mesh);
     this.chunks.set(k, mesh);
 
-    if (this.waterMaterial) {
-      this.applyFog(this.waterMaterial);
-      const wGeo = buildWaterGeometry(this.map, this.layout, b, this.waterGeoOptions);
-      if (wGeo) {
-        const wMesh = new THREE.Mesh(wGeo, this.waterMaterial);
-        wMesh.frustumCulled = true;
-        this.scene.add(wMesh);
-        this.waterChunks.set(k, wMesh);
-      }
-    }
+    for (const [liquidId, mats] of this.liquidMaterials) {
+      const lk   = `${liquidId}|${k}`;
+      const opts = this.liquidOpts(liquidId);
 
-    if (this.shoreMaterial) {
-      this.applyFog(this.shoreMaterial);
-      const sGeo = buildShoreGeometry(this.map, this.layout, b, this.waterGeoOptions);
-      if (sGeo) {
-        const sMesh = new THREE.Mesh(sGeo, this.shoreMaterial);
-        sMesh.frustumCulled = true;
-        this.scene.add(sMesh);
-        this.shoreChunks.set(k, sMesh);
+      if (mats.surface) {
+        this.applyFog(mats.surface);
+        const wGeo = buildWaterGeometry(this.map, this.layout, b, opts);
+        if (wGeo) {
+          const m = new THREE.Mesh(wGeo, mats.surface);
+          m.frustumCulled = true;
+          this.scene.add(m);
+          this.liquidSurfaceChunks.set(lk, m);
+        }
       }
-    }
 
-    if (this.estuaryMaterial) {
-      this.applyFog(this.estuaryMaterial);
-      const eGeo = buildEstuaryGeometry(this.map, this.layout, b, this.waterGeoOptions);
-      if (eGeo) {
-        const eMesh = new THREE.Mesh(eGeo, this.estuaryMaterial);
-        eMesh.frustumCulled = true;
-        this.scene.add(eMesh);
-        this.estuaryChunks.set(k, eMesh);
+      if (mats.shore) {
+        this.applyFog(mats.shore);
+        const sGeo = buildShoreGeometry(this.map, this.layout, b, opts);
+        if (sGeo) {
+          const m = new THREE.Mesh(sGeo, mats.shore);
+          m.frustumCulled = true;
+          this.scene.add(m);
+          this.liquidShoreChunks.set(lk, m);
+        }
       }
-    }
 
-    if (this.riverMaterial) {
-      this.applyFog(this.riverMaterial);
-      const rGeo = buildRiverGeometry(this.map, this.layout, b, this.waterGeoOptions);
-      if (rGeo) {
-        const rMesh = new THREE.Mesh(rGeo, this.riverMaterial);
-        rMesh.frustumCulled = true;
-        rMesh.renderOrder = 1; // draw after water (equivalent to Unity Queue=Transparent+1)
-        this.scene.add(rMesh);
-        this.riverChunks.set(k, rMesh);
+      if (mats.estuary) {
+        this.applyFog(mats.estuary);
+        const eGeo = buildEstuaryGeometry(this.map, this.layout, b, opts);
+        if (eGeo) {
+          const m = new THREE.Mesh(eGeo, mats.estuary);
+          m.frustumCulled = true;
+          this.scene.add(m);
+          this.liquidEstuaryChunks.set(lk, m);
+        }
+      }
+
+      if (mats.river) {
+        this.applyFog(mats.river);
+        const rGeo = buildRiverGeometry(this.map, this.layout, b, opts);
+        if (rGeo) {
+          const m = new THREE.Mesh(rGeo, mats.river);
+          m.frustumCulled = true;
+          m.renderOrder = 1;
+          this.scene.add(m);
+          this.liquidRiverChunks.set(lk, m);
+        }
       }
     }
 
@@ -244,13 +283,13 @@ export class ChunkManager {
       this.applyFog(this.roadMaterial);
       const rdMesh = new THREE.Mesh(roadsGeo, this.roadMaterial);
       rdMesh.frustumCulled = true;
-      rdMesh.renderOrder = 2; // draw on top of terrain and water
+      rdMesh.renderOrder = 2;
       this.scene.add(rdMesh);
       this.roadChunks.set(k, rdMesh);
     }
 
     if (this.hashGrid && this.scatterDefinitions && this.scatterDefinitions.length > 0) {
-      const scMeshes = buildScatterMeshes(this.map, this.layout, b, this.hashGrid, this.scatterDefinitions, this.waterTerrains);
+      const scMeshes = buildScatterMeshes(this.map, this.layout, b, this.hashGrid, this.scatterDefinitions, this.allWaterTerrains);
       if (scMeshes.length > 0) {
         for (const m of scMeshes) this.scene.add(m);
         this.scatterChunks.set(k, scMeshes);
@@ -266,32 +305,20 @@ export class ChunkManager {
     mesh.geometry.dispose();
     this.chunks.delete(k);
 
-    const wMesh = this.waterChunks.get(k);
-    if (wMesh) {
-      this.scene.remove(wMesh);
-      wMesh.geometry.dispose();
-      this.waterChunks.delete(k);
-    }
+    for (const liquidId of this.liquidMaterials.keys()) {
+      const lk = `${liquidId}|${k}`;
 
-    const sMesh = this.shoreChunks.get(k);
-    if (sMesh) {
-      this.scene.remove(sMesh);
-      sMesh.geometry.dispose();
-      this.shoreChunks.delete(k);
-    }
+      const wm = this.liquidSurfaceChunks.get(lk);
+      if (wm) { this.scene.remove(wm); wm.geometry.dispose(); this.liquidSurfaceChunks.delete(lk); }
 
-    const eMesh = this.estuaryChunks.get(k);
-    if (eMesh) {
-      this.scene.remove(eMesh);
-      eMesh.geometry.dispose();
-      this.estuaryChunks.delete(k);
-    }
+      const sm = this.liquidShoreChunks.get(lk);
+      if (sm) { this.scene.remove(sm); sm.geometry.dispose(); this.liquidShoreChunks.delete(lk); }
 
-    const rMesh = this.riverChunks.get(k);
-    if (rMesh) {
-      this.scene.remove(rMesh);
-      rMesh.geometry.dispose();
-      this.riverChunks.delete(k);
+      const em = this.liquidEstuaryChunks.get(lk);
+      if (em) { this.scene.remove(em); em.geometry.dispose(); this.liquidEstuaryChunks.delete(lk); }
+
+      const rm = this.liquidRiverChunks.get(lk);
+      if (rm) { this.scene.remove(rm); rm.geometry.dispose(); this.liquidRiverChunks.delete(lk); }
     }
 
     const rdMesh = this.roadChunks.get(k);
@@ -324,12 +351,10 @@ export class ChunkManager {
       if (scatterNeedsRefresh) this.updateScatterFog();
     }
 
-    // Recompute water surfaces before any chunk rebuilds so geometry is correct.
     if (this.dirty.size > 0) {
-      this.map.computeWaterSurfaces(t => this.waterTerrains.has(t));
+      this.map.computeWaterSurfaces(t => this.allWaterTerrains.has(t));
     }
 
-    // Rebuild any dirty chunks first
     for (const k of this.dirty) {
       const mesh = this.chunks.get(k);
       if (!mesh) { this.dirty.delete(k); continue; }
@@ -339,61 +364,77 @@ export class ChunkManager {
       const { terrain: newGeo, roads: newRoadsGeo } = buildChunkGeometry(this.map, this.layout, b, this.geoOptions);
       mesh.geometry = newGeo;
 
-      const wMesh = this.waterChunks.get(k);
-      if (wMesh) {
-        wMesh.geometry.dispose();
-        const wGeo = buildWaterGeometry(this.map, this.layout, b, this.waterGeoOptions);
-        if (wGeo) {
-          wMesh.geometry = wGeo;
-        } else {
-          this.scene.remove(wMesh);
-          this.waterChunks.delete(k);
-        }
-      }
+      for (const [liquidId, mats] of this.liquidMaterials) {
+        const lk   = `${liquidId}|${k}`;
+        const opts = this.liquidOpts(liquidId);
 
-      const sMesh = this.shoreChunks.get(k);
-      if (sMesh) {
-        sMesh.geometry.dispose();
-        const sGeo = buildShoreGeometry(this.map, this.layout, b, this.waterGeoOptions);
-        if (sGeo) {
-          sMesh.geometry = sGeo;
-        } else {
-          this.scene.remove(sMesh);
-          this.shoreChunks.delete(k);
+        const wm = this.liquidSurfaceChunks.get(lk);
+        if (wm) {
+          wm.geometry.dispose();
+          const wGeo = buildWaterGeometry(this.map, this.layout, b, opts);
+          if (wGeo) { wm.geometry = wGeo; }
+          else { this.scene.remove(wm); this.liquidSurfaceChunks.delete(lk); }
+        } else if (mats.surface) {
+          const wGeo = buildWaterGeometry(this.map, this.layout, b, opts);
+          if (wGeo) {
+            this.applyFog(mats.surface);
+            const m = new THREE.Mesh(wGeo, mats.surface);
+            m.frustumCulled = true;
+            this.scene.add(m);
+            this.liquidSurfaceChunks.set(lk, m);
+          }
         }
-      }
 
-      const eMesh = this.estuaryChunks.get(k);
-      if (eMesh) {
-        eMesh.geometry.dispose();
-        const eGeo = buildEstuaryGeometry(this.map, this.layout, b, this.waterGeoOptions);
-        if (eGeo) {
-          eMesh.geometry = eGeo;
-        } else {
-          this.scene.remove(eMesh);
-          this.estuaryChunks.delete(k);
+        const sm = this.liquidShoreChunks.get(lk);
+        if (sm) {
+          sm.geometry.dispose();
+          const sGeo = buildShoreGeometry(this.map, this.layout, b, opts);
+          if (sGeo) { sm.geometry = sGeo; }
+          else { this.scene.remove(sm); this.liquidShoreChunks.delete(lk); }
+        } else if (mats.shore) {
+          const sGeo = buildShoreGeometry(this.map, this.layout, b, opts);
+          if (sGeo) {
+            this.applyFog(mats.shore);
+            const m = new THREE.Mesh(sGeo, mats.shore);
+            m.frustumCulled = true;
+            this.scene.add(m);
+            this.liquidShoreChunks.set(lk, m);
+          }
         }
-      }
 
-      const rMesh = this.riverChunks.get(k);
-      if (rMesh) {
-        rMesh.geometry.dispose();
-        const rGeo = buildRiverGeometry(this.map, this.layout, b, this.waterGeoOptions);
-        if (rGeo) {
-          rMesh.geometry = rGeo;
-        } else {
-          this.scene.remove(rMesh);
-          this.riverChunks.delete(k);
+        const em = this.liquidEstuaryChunks.get(lk);
+        if (em) {
+          em.geometry.dispose();
+          const eGeo = buildEstuaryGeometry(this.map, this.layout, b, opts);
+          if (eGeo) { em.geometry = eGeo; }
+          else { this.scene.remove(em); this.liquidEstuaryChunks.delete(lk); }
+        } else if (mats.estuary) {
+          const eGeo = buildEstuaryGeometry(this.map, this.layout, b, opts);
+          if (eGeo) {
+            this.applyFog(mats.estuary);
+            const m = new THREE.Mesh(eGeo, mats.estuary);
+            m.frustumCulled = true;
+            this.scene.add(m);
+            this.liquidEstuaryChunks.set(lk, m);
+          }
         }
-      } else if (this.riverMaterial) {
-        const rGeo = buildRiverGeometry(this.map, this.layout, b, this.waterGeoOptions);
-        if (rGeo) {
-          this.applyFog(this.riverMaterial);
-          const newRMesh = new THREE.Mesh(rGeo, this.riverMaterial);
-          newRMesh.frustumCulled = true;
-          newRMesh.renderOrder = 1;
-          this.scene.add(newRMesh);
-          this.riverChunks.set(k, newRMesh);
+
+        const rm = this.liquidRiverChunks.get(lk);
+        if (rm) {
+          rm.geometry.dispose();
+          const rGeo = buildRiverGeometry(this.map, this.layout, b, opts);
+          if (rGeo) { rm.geometry = rGeo; }
+          else { this.scene.remove(rm); this.liquidRiverChunks.delete(lk); }
+        } else if (mats.river) {
+          const rGeo = buildRiverGeometry(this.map, this.layout, b, opts);
+          if (rGeo) {
+            this.applyFog(mats.river);
+            const m = new THREE.Mesh(rGeo, mats.river);
+            m.frustumCulled = true;
+            m.renderOrder = 1;
+            this.scene.add(m);
+            this.liquidRiverChunks.set(lk, m);
+          }
         }
       }
 
@@ -431,11 +472,9 @@ export class ChunkManager {
       this.dirty.delete(k);
     }
 
-    // Determine which chunk the camera is over
     const pos  = new THREE.Vector3();
     camera.getWorldPosition(pos);
     const hex  = worldToHex(this.layout, pos.x, pos.z);
-    // Convert cube coord to offset col/row
     const camRow = hex.r;
     const camCol = hex.q + (hex.r - (hex.r & 1)) / 2;
     const camCX  = Math.floor(camCol / this.chunkSize);
@@ -443,7 +482,6 @@ export class ChunkManager {
 
     const r = this.loadRadius;
 
-    // Load chunks in radius
     for (let dy = -r; dy <= r; dy++) {
       for (let dx = -r; dx <= r; dx++) {
         const cx = camCX + dx;
@@ -453,7 +491,6 @@ export class ChunkManager {
       }
     }
 
-    // Unload chunks outside radius + 1 (hysteresis prevents thrashing)
     const unloadRadius = r + 1;
     for (const [k, _mesh] of this.chunks) {
       const [cx, cy] = k.split(',').map(Number);
@@ -491,16 +528,8 @@ export class ChunkManager {
    */
   setFogData(fog: FogData | null): void {
     this.fogData = fog;
-    const mats = [
-      this.material,
-      this.waterMaterial,
-      this.shoreMaterial,
-      this.estuaryMaterial,
-      this.riverMaterial,
-      this.roadMaterial,
-    ];
-    for (const mat of mats) {
-      if (!mat || !(mat instanceof THREE.ShaderMaterial)) continue;
+    for (const mat of this.allMaterials()) {
+      if (!(mat instanceof THREE.ShaderMaterial)) continue;
       const u = mat.uniforms;
       if (!u || !('uFogEnabled' in u)) continue;
       if (fog) {
@@ -515,7 +544,6 @@ export class ChunkManager {
     if (fog) {
       this.updateScatterFog();
     } else {
-      // Fog disabled: restore all instances to white + original matrices.
       const white = new THREE.Color(1, 1, 1);
       const mat   = new THREE.Matrix4();
       for (const meshes of this.scatterChunks.values()) {
@@ -549,16 +577,8 @@ export class ChunkManager {
   }
 
   private _pushFogUniform(name: string, value: number): void {
-    const mats = [
-      this.material,
-      this.waterMaterial,
-      this.shoreMaterial,
-      this.estuaryMaterial,
-      this.riverMaterial,
-      this.roadMaterial,
-    ];
-    for (const mat of mats) {
-      if (!mat || !(mat instanceof THREE.ShaderMaterial)) continue;
+    for (const mat of this.allMaterials()) {
+      if (!(mat instanceof THREE.ShaderMaterial)) continue;
       const u = mat.uniforms;
       if (u && name in u) u[name].value = value;
     }
@@ -574,8 +594,6 @@ export class ChunkManager {
   /**
    * Switch the terrain color mode at runtime.
    * Updates the material on all loaded terrain meshes and rebuilds geometry.
-   * Use 'flat' or 'debug' with MeshPhongMaterial({ vertexColors: true }),
-   * or 'splat' with a TerrainMaterial.
    */
   setColorMode(mode: TerrainColorMode, material: THREE.Material): void {
     this.material = material;
@@ -588,14 +606,14 @@ export class ChunkManager {
     }
   }
 
-  /** Total number of water/river meshes currently in the scene. */
+  /** Total number of liquid surface meshes currently in the scene (all types combined). */
   get loadedWaterChunkCount(): number {
-    return this.waterChunks.size;
+    return this.liquidSurfaceChunks.size;
   }
 
-  /** Number of shore foam meshes currently in the scene. */
+  /** Number of shore foam meshes currently in the scene (all liquid types combined). */
   get loadedShoreChunkCount(): number {
-    return this.shoreChunks.size;
+    return this.liquidShoreChunks.size;
   }
 
   get loadedChunkCount(): number {

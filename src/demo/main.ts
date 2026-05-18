@@ -10,8 +10,9 @@ import { createEstuaryMaterial } from '../geometry/EstuaryMaterial.js';
 import { createRiverMaterial } from '../geometry/RiverMaterial.js';
 import { createRoadMaterial } from '../geometry/RoadMaterial.js';
 import { buildTerrainTextureArray } from '../geometry/TerrainTextures.js';
-import { DEFAULT_TERRAIN_DESCRIPTORS, DEFAULT_TERRAIN_DEFINITIONS } from '../geometry/TerrainTypes.js';
+import { DEFAULT_TERRAIN_DESCRIPTORS, resolveTerrainDefinitions, buildWaterTerrainSet } from '../geometry/TerrainTypes.js';
 import { createTerrainMaterial } from '../geometry/TerrainMaterial.js';
+import type { LiquidMaterialSet } from '../geometry/LiquidTypes.js';
 import type { TerrainColorMode } from '../geometry/ChunkManager.js';
 import { HexHashGrid } from '../geometry/HexHashGrid.js';
 import type { ScatterDefinition } from '../geometry/ScatterTypes.js';
@@ -20,6 +21,7 @@ import type { MapGeneratorPlugin } from '../generators/MapGeneratorPlugin.js';
 import { FbmPlugin } from '../generators/FbmPlugin.js';
 import { ChunkPlugin } from '../generators/ChunkPlugin.js';
 import { MountainLakePlugin } from '../generators/MountainLakePlugin.js';
+import { LiquidShowcasePlugin } from '../generators/LiquidShowcasePlugin.js';
 import { pickHexFromMeshes } from '../geometry/HexPicking.js';
 import { hexToWorld, hexCorners } from '../math/HexLayout.js';
 import { offsetToHex } from '../math/HexCoord.js';
@@ -42,9 +44,22 @@ const TERRAIN_NAMES: Record<number, string> = {
   [TerrainType.Mud]:       'Mud',
   [TerrainType.Rock]:      'Rock',
   [TerrainType.Snow]:      'Snow',
+  6: 'Lava',
+  7: 'Acid',
 };
 
-const MAP_WIDTH   = 100;
+// Extended terrain descriptors — default six plus lava (6) and acid (7).
+const DEMO_TERRAIN_DESCRIPTORS = [
+  ...DEFAULT_TERRAIN_DESCRIPTORS,
+  { index: 6, id: 'lava', name: 'Lava', color: 0xd44010 as number,
+    liquidType: 'lava', texture: { type: 'procedural' as const } },
+  { index: 7, id: 'acid', name: 'Acid', color: 0x55cc22 as number,
+    liquidType: 'acid', texture: { type: 'procedural' as const } },
+];
+const DEMO_TERRAIN_DEFINITIONS = resolveTerrainDefinitions(DEMO_TERRAIN_DESCRIPTORS);
+const DEMO_WATER_TERRAINS      = buildWaterTerrainSet(DEMO_TERRAIN_DEFINITIONS);
+
+const MAP_WIDTH   = 200;
 const MAP_HEIGHT  = 100;
 const HEX_SIZE    = 1;
 const CHUNK_SIZE  = 32;
@@ -52,7 +67,7 @@ const LOAD_RADIUS = 5;
 
 // --- Generator registry ---
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-const GENERATORS: MapGeneratorPlugin<any>[] = [FbmPlugin, ChunkPlugin, MountainLakePlugin];
+const GENERATORS: MapGeneratorPlugin<any>[] = [FbmPlugin, ChunkPlugin, MountainLakePlugin, LiquidShowcasePlugin];
 let activeGenIndex = 0;
 let seed = Math.floor(Math.random() * 0xffffffff);
 
@@ -121,11 +136,41 @@ scene.add(hoverMesh);
 let hoverCell: { col: number; row: number } | null = null;
 
 // --- Materials ---
+const roadMaterial = createRoadMaterial();
+
+// Water — default blue
 const waterMaterial   = createWaterMaterial();
 const shoreMaterial   = createWaterShoreMaterial();
 const estuaryMaterial = createEstuaryMaterial();
 const riverMaterial   = createRiverMaterial();
-const roadMaterial    = createRoadMaterial();
+
+// Lava — deep orange/red
+const lavaColors = {
+  shallow: new THREE.Color(0.90, 0.40, 0.05),
+  deep:    new THREE.Color(0.55, 0.10, 0.02),
+  foam:    new THREE.Color(0.95, 0.70, 0.30),
+};
+const lavaSurface  = createWaterMaterial(lavaColors);
+const lavaShore    = createWaterShoreMaterial(lavaColors);
+const lavaEstuary  = createEstuaryMaterial(lavaColors);
+const lavaRiver    = createRiverMaterial(lavaColors);
+
+// Acid — green
+const acidColors = {
+  shallow: new THREE.Color(0.30, 0.70, 0.10),
+  deep:    new THREE.Color(0.15, 0.40, 0.05),
+  foam:    new THREE.Color(0.70, 0.95, 0.40),
+};
+const acidSurface  = createWaterMaterial(acidColors);
+const acidShore    = createWaterShoreMaterial(acidColors);
+const acidEstuary  = createEstuaryMaterial(acidColors);
+const acidRiver    = createRiverMaterial(acidColors);
+
+const liquidMaterials = new Map<string, LiquidMaterialSet>([
+  ['water', { surface: waterMaterial, shore: shoreMaterial, estuary: estuaryMaterial, river: riverMaterial }],
+  ['lava',  { surface: lavaSurface,   shore: lavaShore,     estuary: lavaEstuary,     river: lavaRiver }],
+  ['acid',  { surface: acidSurface,   shore: acidShore,     estuary: acidEstuary,     river: acidRiver }],
+]);
 
 // --- HUD ---
 const hud = document.createElement('div');
@@ -159,7 +204,7 @@ async function start() {
 
   let terrainMaterial: THREE.Material;
   if (TERRAIN_COLOR_MODE === 'splat') {
-    const terrainTex = await buildTerrainTextureArray(DEFAULT_TERRAIN_DESCRIPTORS);
+    const terrainTex = await buildTerrainTextureArray(DEMO_TERRAIN_DESCRIPTORS);
     terrainMaterial = createTerrainMaterial(terrainTex, {
       lightDir:   new THREE.Vector3(100, 120, 80),
       lightColor: new THREE.Color(0xfff4d0).multiplyScalar(0.7),
@@ -206,7 +251,7 @@ async function start() {
     if (!map.inBounds(col, row)) return Infinity;
     // When unexplored cells are hidden, treat them as impassable.
     if (hideUnexplored && fogData.rawData[(row * MAP_WIDTH + col) * 4 + 1] === 0) return Infinity;
-    if (map.getTerrain(col, row) === TerrainType.Water) return Infinity;
+    if (DEMO_WATER_TERRAINS.has(map.getTerrain(col, row))) return Infinity;
     return 1;
   };
 
@@ -342,10 +387,7 @@ async function start() {
     layout,
     scene,
     material: terrainMaterial,
-    waterMaterial,
-    shoreMaterial,
-    estuaryMaterial,
-    riverMaterial,
+    liquidMaterials,
     chunkSize: CHUNK_SIZE,
     loadRadius: LOAD_RADIUS,
     geometryOptions: { colorMode: TERRAIN_COLOR_MODE },
@@ -353,7 +395,7 @@ async function start() {
     roadMaterial,
     hashGrid,
     scatterDefinitions:  [pineDefinition, rockDefinition],
-    terrainDefinitions:  DEFAULT_TERRAIN_DEFINITIONS,
+    terrainDefinitions:  DEMO_TERRAIN_DEFINITIONS,
     fogData,
   });
 
@@ -362,11 +404,11 @@ async function start() {
 
   /** BFS outward from (col, row) to find the nearest non-water cell. */
   function findSpawnCell(col: number, row: number): { col: number; row: number } {
-    if (map.inBounds(col, row) && map.getTerrain(col, row) !== TerrainType.Water) return { col, row };
+    if (map.inBounds(col, row) && !DEMO_WATER_TERRAINS.has(map.getTerrain(col, row))) return { col, row };
     const candidates = getVisibleCells(offsetToHex(col, row), Math.max(MAP_WIDTH, MAP_HEIGHT), map);
     for (const c of candidates) {
       const oc = hexToOffset(c);
-      if (map.inBounds(oc.col, oc.row) && map.getTerrain(oc.col, oc.row) !== TerrainType.Water) return oc;
+      if (map.inBounds(oc.col, oc.row) && !DEMO_WATER_TERRAINS.has(map.getTerrain(oc.col, oc.row))) return oc;
     }
     return { col, row };
   }
@@ -490,7 +532,7 @@ async function start() {
 
   renderer.domElement.addEventListener('pointerdown', (e) => {
     if (e.button !== 0 || !hoverCell) return;
-    if (map.getTerrain(hoverCell.col, hoverCell.row) === TerrainType.Water) return;
+    if (DEMO_WATER_TERRAINS.has(map.getTerrain(hoverCell.col, hoverCell.row))) return;
 
     const cell = hoverCell;
     const clickedUnit = units.find(u => u.col === cell.col && u.row === cell.row);
@@ -530,10 +572,12 @@ async function start() {
     chunkManager.update(camera, dt);
 
     const t = now / 1000;
-    waterMaterial.uniforms.uTime.value   = t;
-    shoreMaterial.uniforms.uTime.value   = t;
-    estuaryMaterial.uniforms.uTime.value = t;
-    riverMaterial.uniforms.uTime.value   = t;
+    for (const ms of liquidMaterials.values()) {
+      if (ms.surface  && 'uniforms' in ms.surface)  (ms.surface  as THREE.ShaderMaterial).uniforms.uTime.value = t;
+      if (ms.shore    && 'uniforms' in ms.shore)    (ms.shore    as THREE.ShaderMaterial).uniforms.uTime.value = t;
+      if (ms.estuary  && 'uniforms' in ms.estuary)  (ms.estuary  as THREE.ShaderMaterial).uniforms.uTime.value = t;
+      if (ms.river    && 'uniforms' in ms.river)    (ms.river    as THREE.ShaderMaterial).uniforms.uTime.value = t;
+    }
 
     frameCount++;
     const elapsed = now - lastFpsTime;

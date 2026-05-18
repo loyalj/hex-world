@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { WATER_GLSL } from './WaterMaterial.js';
+import { WATER_GLSL, type LiquidColorOptions } from './WaterMaterial.js';
 import { FOG_VERT_DECL, FOG_VERT_BODY, FOG_FRAG_DECL, fogUniforms } from './FogGLSL.js';
 
 const vertexShader = /* glsl */`
@@ -15,24 +15,29 @@ const vertexShader = /* glsl */`
 const fragmentShader = /* glsl */`
   ${FOG_FRAG_DECL}
   uniform float uTime;
+  uniform vec3  uDeep;
+  uniform vec3  uShallow;
   varying vec2 vUv;
 
   ${WATER_GLSL}
 
   void main() {
-    float r = River(vUv, uTime);
-
-    vec3 deep    = vec3(0.35, 0.50, 0.62);
-    vec3 shallow = vec3(0.58, 0.72, 0.82);
-    vec3 color   = mix(deep, shallow, r);
-
+    float r    = River(vUv, uTime);
+    vec3 color = mix(uDeep, uShallow, r);
     gl_FragColor = vec4(color * vVisibility, 0.78 * vExplored);
   }
 `;
 
-export function createRiverMaterial(): THREE.ShaderMaterial {
+export function createRiverMaterial(colors?: LiquidColorOptions): THREE.ShaderMaterial {
+  const deep    = colors?.deep    ?? new THREE.Color(0.35, 0.50, 0.62);
+  const shallow = colors?.shallow ?? new THREE.Color(0.58, 0.72, 0.82);
   return new THREE.ShaderMaterial({
-    uniforms: { uTime: { value: 0 }, ...fogUniforms() },
+    uniforms: {
+      uTime:    { value: 0 },
+      uDeep:    { value: deep },
+      uShallow: { value: shallow },
+      ...fogUniforms(),
+    },
     vertexShader,
     fragmentShader,
     transparent: true,

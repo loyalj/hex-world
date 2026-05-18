@@ -21,6 +21,14 @@ export interface WaterGeometryOptions {
   surfaceLift?: number;
   /** Set of terrain indices that count as water. Defaults to {5} (built-in Water). */
   waterTerrains?: Set<number>;
+  /**
+   * Set of ALL liquid terrain indices across every liquid type.
+   * When provided, river geometry is only built for river cells that drain into
+   * a terrain in `waterTerrains`. Cells draining into a different liquid type
+   * (in allLiquidTerrains but not waterTerrains) are skipped so each liquid type
+   * only owns the rivers that flow into it.
+   */
+  allLiquidTerrains?: Set<number>;
 }
 
 const SOLID_FACTOR   = 0.8;
@@ -126,8 +134,55 @@ export function buildRiverGeometry(
   const surfaceLift    = opts.surfaceLift     ?? 0.02;
   const elevPerturbStr = 0.2;
   const edgeDirs       = layout.orientation.edgeDirections;
-  const waterTerrains  = opts.waterTerrains ?? new Set([DEFAULT_WATER_TERRAIN_INDEX]);
-  const isWaterTerrain = (t: number) => waterTerrains.has(t);
+  const waterTerrains    = opts.waterTerrains    ?? new Set([DEFAULT_WATER_TERRAIN_INDEX]);
+  const allLiquidTerrains = opts.allLiquidTerrains;
+  const isWaterTerrain   = (t: number) => waterTerrains.has(t);
+
+  // Follow outgoing river chain to determine which liquid type it drains into.
+  // edgeDirs maps edge index (0-5) → HEX_DIRECTIONS index for the neighbor across that edge.
+  // Returns true if it drains into THIS liquid type (waterTerrains),
+  // false if it drains into a different liquid type, null if undetermined (render for all).
+  // Per-chunk cache so cells that share a downstream chain reuse the first result.
+  // Also prevents inconsistency when two separate traces happen to join the same channel.
+  const ownershipCache = new Map<number, boolean | null>();
+
+  const drainsIntoThisLiquid = (startCol: number, startRow: number): boolean | null => {
+    if (!allLiquidTerrains) return null; // no filtering — backward compat
+
+    const startKey = startRow * map.width + startCol;
+    if (ownershipCache.has(startKey)) return ownershipCache.get(startKey)!;
+
+    // Accumulate the path so we can back-fill the cache once the result is known.
+    const path: number[] = [startKey];
+    const visitedLocal = new Set<number>([startKey]);
+    let c = startCol, r = startRow;
+
+    const resolve = (result: boolean | null): boolean | null => {
+      for (const k of path) ownershipCache.set(k, result);
+      return result;
+    };
+
+    for (let step = 0; step < 200; step++) {
+      const outEdge = map.getOutgoingRiverDir(c, r);
+      if (outEdge === -1) break; // no outgoing — unclassified
+      const nb = neighborOffset(c, r, edgeDirs[outEdge]); // edgeDirs maps edge→HEX_DIRECTIONS index
+      if (!map.inBounds(nb.col, nb.row)) break;
+
+      const nbKey = nb.row * map.width + nb.col;
+      if (ownershipCache.has(nbKey)) return resolve(ownershipCache.get(nbKey)!); // hit cache mid-chain
+      if (visitedLocal.has(nbKey))   break; // cycle — shouldn't happen but defensive
+
+      const nbTerrain = map.getTerrain(nb.col, nb.row);
+      if (waterTerrains.has(nbTerrain))     return resolve(true);  // flows into this liquid type
+      if (allLiquidTerrains.has(nbTerrain)) return resolve(false); // flows into a different liquid type
+
+      visitedLocal.add(nbKey);
+      path.push(nbKey);
+      c = nb.col;
+      r = nb.row;
+    }
+    return resolve(null); // unclassified — include in all liquid types rather than dropping
+  };
 
   const landCellY = (c: number, r: number): number => {
     const qq = c - (r - (r & 1)) / 2;
@@ -185,9 +240,13 @@ export function buildRiverGeometry(
     for (let col = colStart; col < colEnd; col++) {
       if (!map.inBounds(col, row)) continue;
 
-      const cellIsWater = isWaterTerrain(map.getTerrain(col, row));
+      const terrain     = map.getTerrain(col, row);
+      const cellIsLiquid = allLiquidTerrains ? allLiquidTerrains.has(terrain) : isWaterTerrain(terrain);
       const hasRiver    = map.hasRiver(col, row);
-      if (!hasRiver || cellIsWater) continue;
+      if (!hasRiver || cellIsLiquid) continue;
+
+      const drains = drainsIntoThisLiquid(col, row);
+      if (drains === false) continue; // belongs to a different liquid type
 
       curCi = row * map.width + col;
 

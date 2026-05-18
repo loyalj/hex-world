@@ -131,25 +131,41 @@ const vertexShader = /* glsl */`
 const fragmentShader = /* glsl */`
   ${FOG_FRAG_DECL}
   uniform float uTime;
+  uniform vec3  uShallow;
+  uniform vec3  uDeep;
   varying vec2  vWorldXZ;
   varying float vDepth;
 
   ${WATER_GLSL}
 
   void main() {
-    vec3 shallow = vec3(0.32, 0.52, 0.70);
-    vec3 deep    = vec3(0.12, 0.28, 0.48);
-    vec3 color   = mix(shallow, deep, vDepth);
-
+    vec3 color = mix(uShallow, uDeep, vDepth);
     float hl = waterNoise(vec3(vWorldXZ * 4.5, uTime * 0.2));
     color += hl * 0.2;
     gl_FragColor = vec4(color * vVisibility, 0.82 * vExplored);
   }
 `;
 
-export function createWaterMaterial(): THREE.ShaderMaterial {
+/** Per-liquid color options for createWaterMaterial / createWaterShoreMaterial / createEstuaryMaterial. */
+export interface LiquidColorOptions {
+  /** Shallow-water / surface liquid color. Default: blue-green water. */
+  shallow?: THREE.Color;
+  /** Deep-water color (surface material only). Default: dark blue. */
+  deep?: THREE.Color;
+  /** Foam / crest color (shore and estuary materials). Default: near-white. */
+  foam?: THREE.Color;
+}
+
+export function createWaterMaterial(colors?: LiquidColorOptions): THREE.ShaderMaterial {
+  const shallow = colors?.shallow ?? new THREE.Color(0.32, 0.52, 0.70);
+  const deep    = colors?.deep    ?? new THREE.Color(0.12, 0.28, 0.48);
   return new THREE.ShaderMaterial({
-    uniforms: { uTime: { value: 0 }, ...fogUniforms() },
+    uniforms: {
+      uTime:    { value: 0 },
+      uShallow: { value: shallow },
+      uDeep:    { value: deep },
+      ...fogUniforms(),
+    },
     vertexShader,
     fragmentShader,
     transparent: true,

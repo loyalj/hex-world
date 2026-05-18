@@ -29,8 +29,15 @@ export interface TerrainDescriptor {
   /** Road color as linear RGB 0–1. If omitted, derived from color at resolve time. */
   roadColor?: [number, number, number];
   /**
-   * If true, cells of this type receive water surface, shore foam, and estuary
-   * geometry. Also tells generators and scatter to treat this as water.
+   * ID of the LiquidTypeDescriptor this terrain belongs to (e.g. 'water', 'lava', 'acid').
+   * When set, cells of this type receive liquid surface, shore foam, estuary, and river
+   * geometry for that liquid type. Also tells generators and scatter to treat this as liquid.
+   * Takes precedence over the legacy `isWater` flag.
+   */
+  liquidType?: string;
+  /**
+   * Legacy alias for `liquidType: 'water'`. Prefer `liquidType` for new descriptors.
+   * Ignored when `liquidType` is also set.
    */
   isWater?: boolean;
   /** How to build the texture atlas slice for this type. */
@@ -63,7 +70,12 @@ export interface TerrainDefinition {
   color: THREE.Color;
   /** Road color as linear RGB 0–1. */
   roadColor: [number, number, number];
-  /** True if this type receives water surface / shore / estuary geometry. */
+  /**
+   * ID of the liquid type this terrain belongs to, or undefined for solid terrain.
+   * Matches a LiquidTypeDescriptor.id.
+   */
+  liquidType: string | undefined;
+  /** True if this type belongs to any liquid type (convenience alias for !!liquidType). */
   isWater: boolean;
   /** Texture descriptor, carried through for buildTerrainTextureArray. */
   texture: TerrainTextureDescriptor;
@@ -85,24 +97,41 @@ export function resolveTerrainDefinitions(descriptors: TerrainDescriptor[]): Ter
       c.g * 0.60,
       c.b * 0.55,
     ];
+    const liquidType = d.liquidType ?? (d.isWater ? 'water' : undefined);
     return {
-      index:    d.index,
-      id:       d.id,
-      name:     d.name,
-      color:    c,
+      index:      d.index,
+      id:         d.id,
+      name:       d.name,
+      color:      c,
       roadColor,
-      isWater:  d.isWater ?? false,
-      texture:  d.texture,
+      liquidType,
+      isWater:    liquidType !== undefined,
+      texture:    d.texture,
     };
   });
 }
 
 /**
- * Builds a Set of terrain type indices that count as water.
- * Pass to geometry builders and generators via their options.
+ * Builds a Set of terrain type indices that count as water (any liquid type).
+ * Used for scatter exclusion and other all-liquid checks.
  */
 export function buildWaterTerrainSet(definitions: TerrainDefinition[]): Set<number> {
   return new Set(definitions.filter(d => d.isWater).map(d => d.index));
+}
+
+/**
+ * Builds a map from liquid type ID → Set of terrain indices belonging to that liquid.
+ * Each entry drives one set of liquid surface / shore / estuary / river meshes in ChunkManager.
+ */
+export function buildLiquidTerrainSets(definitions: TerrainDefinition[]): Map<string, Set<number>> {
+  const result = new Map<string, Set<number>>();
+  for (const def of definitions) {
+    if (!def.liquidType) continue;
+    let s = result.get(def.liquidType);
+    if (!s) { s = new Set(); result.set(def.liquidType, s); }
+    s.add(def.index);
+  }
+  return result;
 }
 
 /**
@@ -146,7 +175,7 @@ export const DEFAULT_TERRAIN_DESCRIPTORS: TerrainDescriptor[] = [
   {
     index: 5, id: 'water', name: 'Water', color: 0x4a8fb5,
     roadColor: [0.42, 0.46, 0.50],
-    isWater: true,
+    liquidType: 'water',
     texture: { type: 'procedural' },
   },
 ];

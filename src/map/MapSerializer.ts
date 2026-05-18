@@ -1,6 +1,7 @@
 import { HexMap } from './HexMap.js';
 import type { ScatterDescriptor } from '../geometry/ScatterTypes.js';
 import type { TerrainDescriptor } from '../geometry/TerrainTypes.js';
+import type { LiquidTypeDescriptor } from '../geometry/LiquidTypes.js';
 
 const MAGIC   = [0x48, 0x58, 0x4d, 0x50]; // "HXMP"
 const VERSION = 1;
@@ -15,10 +16,11 @@ export interface MapMetadata {
 
 /** Result of deserializing a JSON map — includes the map, metadata, and descriptor sets. */
 export interface DeserializedMap {
-  map:                 HexMap;
-  metadata:            MapMetadata;
-  scatterDescriptors:  ScatterDescriptor[];
-  terrainDescriptors:  TerrainDescriptor[];
+  map:                  HexMap;
+  metadata:             MapMetadata;
+  scatterDescriptors:   ScatterDescriptor[];
+  terrainDescriptors:   TerrainDescriptor[];
+  liquidDescriptors:    LiquidTypeDescriptor[];
 }
 
 // --- Binary ---
@@ -91,11 +93,12 @@ interface MapJSON {
   cells: string;
   roads: string;
   features: string;
-  name?:                string;
-  seed?:                number;
-  generatorId?:         string;
-  scatterDescriptors?:  ScatterDescriptor[];
-  terrainDescriptors?:  TerrainDescriptor[];
+  name?:                 string;
+  seed?:                 number;
+  generatorId?:          string;
+  scatterDescriptors?:   ScatterDescriptor[];
+  terrainDescriptors?:   TerrainDescriptor[];
+  liquidDescriptors?:    LiquidTypeDescriptor[];
 }
 
 function uint8ToBase64(data: Uint8Array): string {
@@ -124,6 +127,7 @@ export function serializeMapJSON(
   metadata: MapMetadata = {},
   scatterDescriptors?: ScatterDescriptor[],
   terrainDescriptors?: TerrainDescriptor[],
+  liquidDescriptors?: LiquidTypeDescriptor[],
 ): string {
   const payload: MapJSON = {
     version:           VERSION,
@@ -134,8 +138,9 @@ export function serializeMapJSON(
     roads:    uint8ToBase64(map.roadBits),
     features: map.featureData ? uint8ToBase64(map.featureData) : '',
     ...metadata,
-    ...(scatterDescriptors  && scatterDescriptors.length  > 0 ? { scatterDescriptors }  : {}),
-    ...(terrainDescriptors  && terrainDescriptors.length  > 0 ? { terrainDescriptors }  : {}),
+    ...(scatterDescriptors && scatterDescriptors.length > 0 ? { scatterDescriptors } : {}),
+    ...(terrainDescriptors && terrainDescriptors.length > 0 ? { terrainDescriptors } : {}),
+    ...(liquidDescriptors  && liquidDescriptors.length  > 0 ? { liquidDescriptors }  : {}),
   };
   return JSON.stringify(payload);
 }
@@ -162,5 +167,6 @@ export function deserializeMapJSON(json: string): DeserializedMap {
     metadata:           { name: p.name, seed: p.seed, generatorId: p.generatorId },
     scatterDescriptors: p.scatterDescriptors ?? [],
     terrainDescriptors: p.terrainDescriptors ?? [],
+    liquidDescriptors:  p.liquidDescriptors  ?? [],
   };
 }

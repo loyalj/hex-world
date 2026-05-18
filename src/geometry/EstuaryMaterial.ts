@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { WATER_GLSL } from './WaterMaterial.js';
+import { WATER_GLSL, type LiquidColorOptions } from './WaterMaterial.js';
 import { FOG_VERT_DECL, FOG_VERT_BODY, FOG_FRAG_DECL, fogUniforms } from './FogGLSL.js';
 
 const vertexShader = /* glsl */`
@@ -21,6 +21,8 @@ const vertexShader = /* glsl */`
 const fragmentShader = /* glsl */`
   ${FOG_FRAG_DECL}
   uniform float uTime;
+  uniform vec3  uColor;
+  uniform vec3  uFoamColor;
   varying vec2 vUv;    // UV1: (blend, shore)  blend=0 shore, blend=1 river
   varying vec2 vUv2;   // UV2: river flow coordinates
   varying vec2 vWorldXZ;
@@ -31,18 +33,16 @@ const fragmentShader = /* glsl */`
     float blend = vUv.x;  // 0 = shore side, 1 = river center
     float shore = vUv.y;  // 0 = water edge, 1 = land edge
 
-    vec3 foamCol = vec3(0.92, 0.96, 1.00);
-
     float hl = waterNoise(vec3(vWorldXZ * 4.5, uTime * 0.2));
-    vec3 waterColor = vec3(0.25, 0.44, 0.64) + hl * 0.2;
+    vec3 waterColor = uColor + hl * 0.2;
 
     // Shore side: foam at land edge (shore=1), water color at water edge (shore=0).
     float foam = Foam(shore, vWorldXZ, uTime);
-    vec3 shoreColor = mix(waterColor, foamCol, foam);
+    vec3 shoreColor = mix(waterColor, uFoamColor, foam);
 
     // River center: flowing pattern blended into water color.
     float river = River(vUv2, uTime);
-    vec3 riverColor = mix(vec3(0.25, 0.44, 0.64), foamCol, river * 0.6);
+    vec3 riverColor = mix(uColor, uFoamColor, river * 0.6);
 
     // blend=0 at outer edges (shore-like), blend=1 at river center.
     vec3 color = mix(shoreColor, riverColor, blend);
@@ -51,9 +51,16 @@ const fragmentShader = /* glsl */`
   }
 `;
 
-export function createEstuaryMaterial(): THREE.ShaderMaterial {
+export function createEstuaryMaterial(colors?: LiquidColorOptions): THREE.ShaderMaterial {
+  const color     = colors?.shallow ?? new THREE.Color(0.25, 0.44, 0.64);
+  const foamColor = colors?.foam    ?? new THREE.Color(0.92, 0.96, 1.00);
   return new THREE.ShaderMaterial({
-    uniforms: { uTime: { value: 0 }, ...fogUniforms() },
+    uniforms: {
+      uTime:      { value: 0 },
+      uColor:     { value: color },
+      uFoamColor: { value: foamColor },
+      ...fogUniforms(),
+    },
     vertexShader,
     fragmentShader,
     transparent: true,
