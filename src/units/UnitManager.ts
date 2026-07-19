@@ -53,10 +53,11 @@ export class UnitManager {
     this._opts.scene.add(object3D);
 
     // Wire fog reveal through the unit's cell-enter callback.
+    // Reveal runs first so that user callbacks see up-to-date fog state.
     const existingCellEnter = unit.onCellEnter;
     unit.onCellEnter = (col, row) => {
-      existingCellEnter?.(col, row);
       this._revealForUnit(unit, col, row);
+      existingCellEnter?.(col, row);
     };
 
     // Snap to initial position and apply initial fog reveal.

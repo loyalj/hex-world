@@ -38,15 +38,22 @@ export function buildShoreGeometry(
   const perturbStr     = opts.perturbStrength    ?? 0.8;
   const elevScale      = opts.elevationScale     ?? 0.5;
   const surfaceLift    = opts.surfaceLift        ?? 0.02;
-  const elevPerturbStr = 0.2; // must match HexChunk elevPerturbStrength default
+  // Land-side vertices must track the terrain mesh, which perturbs with its own
+  // ChunkGeometryOptions — not the liquid's (possibly overridden) noise settings.
+  const terrainNoiseScale = opts.terrainNoiseScale          ?? 0.35;
+  const terrainPerturbStr = opts.terrainPerturbStrength     ?? 0.8;
+  const elevPerturbStr    = opts.terrainElevPerturbStrength ?? 0.2;
   const edgeDirs       = layout.orientation.edgeDirections;
   const waterTerrains     = opts.waterTerrains ?? new Set([DEFAULT_WATER_TERRAIN_INDEX]);
   const allLiquidTerrains = opts.allLiquidTerrains;
   const isWater       = (t: number) => waterTerrains.has(t);
   const isOtherLiquid = (t: number) => !!allLiquidTerrains && allLiquidTerrains.has(t) && !waterTerrains.has(t);
   // Lower terrain index = higher rendering priority at liquid-liquid boundaries.
-  // Only the higher-priority liquid renders a shore so there's a single clean foam line.
+  // Only the higher-priority liquid renders a shore so there's a single clean foam
+  // line. Priority is liquid-level: every terrain index of a liquid shares that
+  // liquid's lowest index, so liquids spanning multiple indices compare correctly.
   const currentLiquidPriority = Math.min(...waterTerrains);
+  const priorityOf = (t: number) => opts.liquidPriorityByTerrain?.get(t) ?? t;
   const startAngle = layout.orientation.startAngle;
 
   const { colStart, colEnd, rowStart, rowEnd } = bounds;
@@ -59,25 +66,29 @@ export function buildShoreGeometry(
   let vi = 0, uvi = 0, cii = 0;
   let curCi = 0;
 
-  const perturbSample = (x: number, z: number) =>
-    sampleNoise(x * noiseScale, z * noiseScale);
-
   const perturbXZ = (x: number, z: number): [number, number] => {
-    const n = perturbSample(x, z);
+    const n = sampleNoise(x * noiseScale, z * noiseScale);
     return [(n[0] * 2 - 1) * perturbStr, (n[2] * 2 - 1) * perturbStr];
+  };
+
+  /** XZ perturbation matching HexChunk's terrain vertices — used for land-side vertices. */
+  const perturbXZLand = (x: number, z: number): [number, number] => {
+    const n = sampleNoise(x * terrainNoiseScale, z * terrainNoiseScale);
+    return [(n[0] * 2 - 1) * terrainPerturbStr, (n[2] * 2 - 1) * terrainPerturbStr];
   };
 
   /** Y matching HexChunk.cellElevY — samples at cell center, same formula. */
   const landCellY = (col: number, row: number): number => {
     const q  = col - (row - (row & 1)) / 2;
     const wc = hexToWorld(layout, { q, r: row });
-    const n  = perturbSample(wc.x, wc.z);
+    const n  = sampleNoise(wc.x * terrainNoiseScale, wc.z * terrainNoiseScale);
     const dy = (n[1] * 2 - 1) * elevPerturbStr;
     return map.getElevation(col, row) * elevScale + dy;
   };
 
-  const addVert = (x: number, z: number, y: number, u: number, v: number) => {
-    const [dx, dz] = perturbXZ(x, z);
+  /** `land` selects the terrain-matched perturbation for land-side vertices. */
+  const addVert = (x: number, z: number, y: number, u: number, v: number, land = false) => {
+    const [dx, dz] = land ? perturbXZLand(x, z) : perturbXZ(x, z);
     positions[vi++] = x + dx;
     positions[vi++] = y;
     positions[vi++] = z + dz;
@@ -90,16 +101,18 @@ export function buildShoreGeometry(
     x0: number, z0: number, y0: number, u0: number, v0: number,
     x1: number, z1: number, y1: number, u1: number, v1: number,
     x2: number, z2: number, y2: number, u2: number, v2: number,
-  ) => { addVert(x0, z0, y0, u0, v0); addVert(x1, z1, y1, u1, v1); addVert(x2, z2, y2, u2, v2); };
+    l0 = false, l1 = false, l2 = false,
+  ) => { addVert(x0, z0, y0, u0, v0, l0); addVert(x1, z1, y1, u1, v1, l1); addVert(x2, z2, y2, u2, v2, l2); };
 
   const addQuad = (
     x0: number, z0: number, y0: number, u0: number, v0: number,
     x1: number, z1: number, y1: number, u1: number, v1: number,
     x2: number, z2: number, y2: number, u2: number, v2: number,
     x3: number, z3: number, y3: number, u3: number, v3: number,
+    l0 = false, l1 = false, l2 = false, l3 = false,
   ) => {
-    addTri(x0, z0, y0, u0, v0,  x1, z1, y1, u1, v1,  x3, z3, y3, u3, v3);
-    addTri(x0, z0, y0, u0, v0,  x3, z3, y3, u3, v3,  x2, z2, y2, u2, v2);
+    addTri(x0, z0, y0, u0, v0,  x1, z1, y1, u1, v1,  x3, z3, y3, u3, v3,  l0, l1, l3);
+    addTri(x0, z0, y0, u0, v0,  x3, z3, y3, u3, v3,  x2, z2, y2, u2, v2,  l0, l3, l2);
   };
 
   /** World position of corner j of a hex centered at (cx, cz) at the given radius factor. */
@@ -151,9 +164,9 @@ export function buildShoreGeometry(
 
         // 2. Strip quad.
         if (nbIsOtherLiquid) {
-          // Only the higher-priority liquid (lower terrain index) renders a shore here.
-          // The lower-priority liquid skips so there's exactly one foam line at the boundary.
-          if (nbTerrain < currentLiquidPriority) continue;
+          // Only the higher-priority liquid renders a shore here. The lower-priority
+          // liquid skips so there's exactly one foam line at the boundary.
+          if (priorityOf(nbTerrain) < currentLiquidPriority) continue;
 
           // Keep the strip within the current hex so it never overlaps the other
           // liquid's surface mesh. The foam (V=1) appears at SOLID_FACTOR — close
@@ -169,17 +182,23 @@ export function buildShoreGeometry(
           // No corner triangle for liquid-liquid boundaries.
         } else {
           // Neighbor is land. Standard shore strip + corner triangle.
-          const nbc  = hexCenter(nc, nr);
-          const ls1  = cornerAt(nbc.x, nbc.z, (i + 4) % 6, SOLID_FACTOR);
-          const ls2  = cornerAt(nbc.x, nbc.z, (i + 3) % 6, SOLID_FACTOR);
-          const nbY  = wSurfaceY + (landCellY(nc, nr) - wSurfaceY) * 0.5;
+          // Estuary edges get their strip from EstuaryChunk — only the fan and
+          // corner triangles are emitted here, so the two transparent meshes
+          // don't double-blend over the same area.
+          if (!map.hasRiverThroughEdge(col, row, i)) {
+            const nbc  = hexCenter(nc, nr);
+            const ls1  = cornerAt(nbc.x, nbc.z, (i + 4) % 6, SOLID_FACTOR);
+            const ls2  = cornerAt(nbc.x, nbc.z, (i + 3) % 6, SOLID_FACTOR);
+            const nbY  = wSurfaceY + (landCellY(nc, nr) - wSurfaceY) * 0.5;
 
-          addQuad(
-            c1.x,  c1.z,  wSurfaceY, 0, 0,
-            c2.x,  c2.z,  wSurfaceY, 0, 0,
-            ls1.x, ls1.z, nbY,       0, 1,
-            ls2.x, ls2.z, nbY,       0, 1,
-          );
+            addQuad(
+              c1.x,  c1.z,  wSurfaceY, 0, 0,
+              c2.x,  c2.z,  wSurfaceY, 0, 0,
+              ls1.x, ls1.z, nbY,       0, 1,
+              ls2.x, ls2.z, nbY,       0, 1,
+              false, false, true, true,
+            );
+          }
 
           // 3. Corner triangle: fill the three-way junction at corner i1.
           const d2v  = HEX_DIRECTIONS[edgeDirs[i1]];
@@ -209,6 +228,7 @@ export function buildShoreGeometry(
               c2.x,   c2.z,   wSurfaceY, 0, 0,
               ls2e.x, ls2e.z, ls2Y,      0, 1,
               v3.x,   v3.z,   v3Y,       0, v3V,
+              false, true, !nb2IsLiquidLike,
             );
           }
         }

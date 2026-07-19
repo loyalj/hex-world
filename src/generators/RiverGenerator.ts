@@ -1,4 +1,3 @@
-import { TerrainType } from '../map/HexCell.js';
 import type { HexMap } from '../map/HexMap.js';
 import { POINTY_TOP } from '../math/HexOrientation.js';
 import { offsetNeighbor } from '../math/HexCoord.js';
@@ -45,7 +44,9 @@ function traceClimateRiver(
   let length = 1; // counts the origin cell, matching tutorial budget semantics
 
   for (let step = 0; step < maxSteps; step++) {
-    if (map.getElevation(c, r) < 0) break; // reached water
+    // Reached open water or a lake formed by an earlier trace (elevated lakes
+    // have floor >= 0, so the terrain check is required too).
+    if (map.getElevation(c, r) < 0 || map.getTerrain(c, r) === waterIdx) break;
 
     const curElev = map.getElevation(c, r);
 
@@ -98,9 +99,12 @@ function traceClimateRiver(
     if (totalWeight === 0) {
       if (length === 1) return 0; // couldn't leave origin — don't consume budget
       if (minNbElev >= curElev) {
-        // Force elevation below sea level so the water surface renders correctly
+        // Terminal lake: floor one step below the current elevation so
+        // computeWaterSurfaces yields a surface at curElev, contained by the
+        // neighbours (all >= curElev here). Matches the elevated-lake
+        // convention: floor = desired surface - 1.
         map.setTerrain(c, r, waterIdx);
-        map.setElevation(c, r, -1);
+        map.setElevation(c, r, curElev - 1);
       }
       break;
     }
@@ -118,10 +122,11 @@ function traceClimateRiver(
     map.setRiverIncoming(nb.col, nb.row, (chosenFace + 3) % 6);
     length++;
 
-    // Extra lake at the current cell before moving on
+    // Extra lake at the current cell before moving on — same floor convention
+    // as terminal lakes, and the same configured liquid terrain.
     if (minNbElev >= curElev && rand() < lakeProbability) {
-      map.setTerrain(c, r, TerrainType.Water);
-      map.setElevation(c, r, -1); // below sea level so the water surface renders correctly
+      map.setTerrain(c, r, waterIdx);
+      map.setElevation(c, r, curElev - 1);
     }
 
     prevFace = chosenFace;
@@ -211,6 +216,9 @@ function traceRiver(map: HexMap, col: number, row: number, maxSteps: number, wat
       const nb = offsetNeighbor(c, r, EDGE_DIRS[i]);
       if (!map.inBounds(nb.col, nb.row)) continue;
       if (visited.has(nb.row * map.width + nb.col)) continue;
+      // Never overwrite another river's incoming connection — doing so leaves
+      // the other chain's channel dead-ending at a hex border.
+      if (map.hasIncomingRiver(nb.col, nb.row)) continue;
       const nbElev = map.getElevation(nb.col, nb.row);
       if (nbElev < bestElev) {
         bestElev = nbElev;
@@ -225,7 +233,10 @@ function traceRiver(map: HexMap, col: number, row: number, maxSteps: number, wat
     map.setRiverOutgoing(c, r, bestEdge);
     map.setRiverIncoming(bestNbC, bestNbR, (bestEdge + 3) % 6);
 
-    if (map.getTerrain(bestNbC, bestNbR) === TerrainType.Water) break;
+    if (map.getTerrain(bestNbC, bestNbR) === waterIdx) break;
+    // Joined an existing river's origin — stop instead of re-tracing (and
+    // rerouting) its downstream chain.
+    if (map.hasOutgoingRiver(bestNbC, bestNbR)) break;
 
     c = bestNbC;
     r = bestNbR;

@@ -101,7 +101,7 @@ let last = performance.now();
 | [Fog of War](guides/fog-of-war.md) | Reference-counted visibility, reveal animation, multi-unit integration |
 | [Pathfinding and Movement](guides/pathfinding-and-movement.md) | A\*, movement range, LOS, path smoothing, MoveCostFn design |
 
-API reference (TypeDoc): `docs/index.html` after running `npm run docs`.
+API reference (TypeDoc): `docs/index.html` after running `npm run docs`, or live at [loyalj.github.io/hex-world/docs](https://loyalj.github.io/hex-world/docs).
 
 Live demo: [loyalj.github.io/hex-world](https://loyalj.github.io/hex-world/)
 

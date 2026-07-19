@@ -80,6 +80,8 @@ export class ChunkManager {
   private readonly liquidDescriptors:  Map<string, LiquidTypeDescriptor>;
   private readonly liquidTerrainSets:  Map<string, Set<number>>;
   private readonly allWaterTerrains:   Set<number>;
+  private readonly liquidPriorityByTerrain: Map<number, number>;
+  private readonly defaultRiverLiquidId:    string | null;
   private fogData:                     FogData | null;
   private hideUnexplored            = true;
   private dimExplored               = true;
@@ -122,6 +124,27 @@ export class ChunkManager {
     const descriptorList   = opts.liquidDescriptors ?? DEFAULT_LIQUID_DESCRIPTORS;
     this.liquidDescriptors = new Map(descriptorList.map(d => [d.id, d]));
 
+    // Liquid-level priorities: every terrain index of a liquid shares the liquid's
+    // lowest index, so multi-index liquids resolve boundaries consistently.
+    this.liquidPriorityByTerrain = new Map();
+    for (const set of this.liquidTerrainSets.values()) {
+      const p = Math.min(...set);
+      for (const idx of set) this.liquidPriorityByTerrain.set(idx, p);
+    }
+
+    // Unclassified rivers (drainage target unknown) are rendered by exactly one
+    // liquid: the highest-priority one that has a river material.
+    let defaultRiver: string | null = null;
+    let bestPriority = Infinity;
+    for (const [id, mats] of this.liquidMaterials) {
+      if (!mats.river) continue;
+      const set = this.liquidTerrainSets.get(id);
+      if (!set || set.size === 0) continue;
+      const p = Math.min(...set);
+      if (p < bestPriority) { bestPriority = p; defaultRiver = id; }
+    }
+    this.defaultRiverLiquidId = defaultRiver;
+
     this.geoOptions      = { ...opts.geometryOptions, terrainDefinitions: terrainDefs };
     this.waterGeoOptions = { ...opts.waterGeometryOptions };
 
@@ -139,8 +162,14 @@ export class ChunkManager {
       ...(desc?.noiseScale      !== undefined ? { noiseScale:      desc.noiseScale }      : {}),
       ...(desc?.perturbStrength !== undefined ? { perturbStrength: desc.perturbStrength } : {}),
       ...(desc?.surfaceLift     !== undefined ? { surfaceLift:     desc.surfaceLift }     : {}),
+      // Terrain noise parameters so land-side liquid vertices track the terrain mesh.
+      ...(this.geoOptions.noiseScale          !== undefined ? { terrainNoiseScale:          this.geoOptions.noiseScale }          : {}),
+      ...(this.geoOptions.perturbStrength     !== undefined ? { terrainPerturbStrength:     this.geoOptions.perturbStrength }     : {}),
+      ...(this.geoOptions.elevPerturbStrength !== undefined ? { terrainElevPerturbStrength: this.geoOptions.elevPerturbStrength } : {}),
       waterTerrains:    this.liquidTerrainSets.get(liquidId) ?? new Set(),
       allLiquidTerrains: this.allWaterTerrains,
+      liquidPriorityByTerrain: this.liquidPriorityByTerrain,
+      ownsUnclassifiedRivers:  liquidId === this.defaultRiverLiquidId,
     };
   }
 
@@ -470,7 +499,7 @@ export class ChunkManager {
         this.scatterChunks.delete(k);
       }
       if (this.hashGrid && this.scatterDefinitions && this.scatterDefinitions.length > 0) {
-        const newScMeshes = buildScatterMeshes(this.map, this.layout, b, this.hashGrid, this.scatterDefinitions);
+        const newScMeshes = buildScatterMeshes(this.map, this.layout, b, this.hashGrid, this.scatterDefinitions, this.allWaterTerrains);
         if (newScMeshes.length > 0) {
           for (const m of newScMeshes) this.scene.add(m);
           this.scatterChunks.set(k, newScMeshes);

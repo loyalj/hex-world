@@ -29,6 +29,32 @@ export interface WaterGeometryOptions {
    * only owns the rivers that flow into it.
    */
   allLiquidTerrains?: Set<number>;
+  /**
+   * Terrain-mesh noise parameters, matching the ChunkGeometryOptions used to build
+   * the terrain. Land-side shore/estuary vertices and river channels are perturbed
+   * with these — not the liquid's own noiseScale/perturbStrength — so they stay
+   * glued to the terrain even when a liquid overrides its surface noise settings.
+   * ChunkManager injects these automatically from its geometryOptions.
+   */
+  terrainNoiseScale?: number;
+  terrainPerturbStrength?: number;
+  terrainElevPerturbStrength?: number;
+  /**
+   * When true, this liquid also renders river chains whose drainage target could
+   * not be classified (the river dries out on land, leaves the map, or exceeds
+   * the trace limit). ChunkManager sets this on exactly one liquid — the
+   * highest-priority one with a river material — so unclassified rivers are
+   * drawn once instead of once per liquid type. Ignored when allLiquidTerrains
+   * is unset (single-liquid backward-compat mode renders everything).
+   */
+  ownsUnclassifiedRivers?: boolean;
+  /**
+   * Terrain index → liquid priority (the lowest terrain index of the liquid that
+   * index belongs to). Used at liquid-liquid boundaries so liquids spanning
+   * multiple terrain indices compare at the liquid level. Falls back to the raw
+   * terrain index when absent.
+   */
+  liquidPriorityByTerrain?: Map<number, number>;
 }
 
 const SOLID_FACTOR   = 0.8;
@@ -128,11 +154,15 @@ export function buildRiverGeometry(
   bounds: ChunkBounds,
   opts: WaterGeometryOptions = {},
 ): THREE.BufferGeometry | null {
-  const noiseScale     = opts.noiseScale      ?? 0.35;
-  const perturbStr     = opts.perturbStrength ?? 0.8;
-  const elevScale      = opts.elevationScale  ?? 0.5;
-  const surfaceLift    = opts.surfaceLift     ?? 0.02;
-  const elevPerturbStr = 0.2;
+  // River channels overlay land terrain, so ALL their perturbation must match the
+  // terrain mesh (which uses ChunkGeometryOptions), not the liquid's surface noise —
+  // otherwise a per-liquid noiseScale override would wiggle the channel out of the
+  // stream bed carved by HexChunk.
+  const noiseScale     = opts.terrainNoiseScale          ?? 0.35;
+  const perturbStr     = opts.terrainPerturbStrength     ?? 0.8;
+  const elevScale      = opts.elevationScale             ?? 0.5;
+  const surfaceLift    = opts.surfaceLift                ?? 0.02;
+  const elevPerturbStr = opts.terrainElevPerturbStrength ?? 0.2;
   const edgeDirs       = layout.orientation.edgeDirections;
   const waterTerrains    = opts.waterTerrains    ?? new Set([DEFAULT_WATER_TERRAIN_INDEX]);
   const allLiquidTerrains = opts.allLiquidTerrains;
@@ -181,7 +211,7 @@ export function buildRiverGeometry(
       c = nb.col;
       r = nb.row;
     }
-    return resolve(null); // unclassified — include in all liquid types rather than dropping
+    return resolve(null); // unclassified — rendered only by the owning default liquid
   };
 
   const landCellY = (c: number, r: number): number => {
@@ -247,6 +277,9 @@ export function buildRiverGeometry(
 
       const drains = drainsIntoThisLiquid(col, row);
       if (drains === false) continue; // belongs to a different liquid type
+      // Unclassified rivers are owned by exactly one liquid (see
+      // ownsUnclassifiedRivers) so they aren't drawn once per liquid type.
+      if (drains === null && allLiquidTerrains && !opts.ownsUnclassifiedRivers) continue;
 
       curCi = row * map.width + col;
 

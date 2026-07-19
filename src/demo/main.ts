@@ -27,6 +27,7 @@ import { findPath, getMovementRange, getVisibleCells, hasLineOfSight, type MoveC
 import { smoothPath } from '../pathfinding/PathSmoothing.js';
 import { hexToOffset } from '../math/HexCoord.js';
 import { serializeMapJSON, deserializeMapJSON } from '../map/MapSerializer.js';
+import { renderMapImage, getMapWorldBounds, type MapWorldBounds } from '../map/MapImageRenderer.js';
 import { HexUnit } from '../units/HexUnit.js';
 import { UnitManager } from '../units/UnitManager.js';
 
@@ -42,14 +43,19 @@ const TERRAIN_NAMES: Record<number, string> = {
   [TerrainType.Snow]:      'Snow',
   6: 'Lava',
   7: 'Acid',
+  8: 'Deep Acid',
 };
 
-// Extended terrain descriptors — default six plus lava (6) and acid (7).
+// Extended terrain descriptors — default six plus lava (6) and acid (7, deep 8).
+// Deep Acid shares liquidType 'acid' with Acid: one liquid spanning two terrain
+// indices (no internal foam line; the pool floor dips at the deep cells).
 const DEMO_TERRAIN_DESCRIPTORS = [
   ...DEFAULT_TERRAIN_DESCRIPTORS,
   { index: 6, id: 'lava', name: 'Lava', color: 0xd44010 as number,
     liquidType: 'lava', texture: { type: 'procedural' as const } },
   { index: 7, id: 'acid', name: 'Acid', color: 0x55cc22 as number,
+    liquidType: 'acid', texture: { type: 'procedural' as const } },
+  { index: 8, id: 'acid-deep', name: 'Deep Acid', color: 0x2f7a12 as number,
     liquidType: 'acid', texture: { type: 'procedural' as const } },
 ];
 const DEMO_TERRAIN_DEFINITIONS = resolveTerrainDefinitions(DEMO_TERRAIN_DESCRIPTORS);
@@ -285,6 +291,91 @@ async function start() {
     }
   }
 
+  // --- Minimap ---
+  const MINIMAP_SCALE   = 2;
+  const MINIMAP_PADDING = 2;
+  const MINIMAP_WIDTH   = 220; // CSS display width in px
+
+  const minimapContainer = document.createElement('div');
+  minimapContainer.style.cssText = `
+    position: fixed; bottom: 12px; right: 12px;
+    width: ${MINIMAP_WIDTH}px;
+    border: 1px solid rgba(255,255,255,0.2); border-radius: 4px;
+    overflow: hidden;
+  `;
+  document.body.appendChild(minimapContainer);
+
+  const minimapImg = document.createElement('img');
+  minimapImg.style.cssText = `display: block; width: 100%; height: auto; image-rendering: pixelated;`;
+  minimapContainer.appendChild(minimapImg);
+
+  const viewportCanvas = document.createElement('canvas');
+  viewportCanvas.style.cssText = `position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none;`;
+  minimapContainer.appendChild(viewportCanvas);
+
+  let minimapUrl  = '';
+  let mapBounds: MapWorldBounds | null = null;
+  let minimapDimExplored    = true;
+  let minimapHideUnexplored = true;
+
+  function updateMinimap(): void {
+    mapBounds = getMapWorldBounds(map, layout);
+
+    // Size the canvas buffer to match the image pixels so world→canvas coords are 1:1.
+    const imgW = Math.ceil((mapBounds.maxX - mapBounds.minX) * MINIMAP_SCALE) + MINIMAP_PADDING * 2;
+    const imgH = Math.ceil((mapBounds.maxZ - mapBounds.minZ) * MINIMAP_SCALE) + MINIMAP_PADDING * 2;
+    viewportCanvas.width  = imgW;
+    viewportCanvas.height = imgH;
+
+    renderMapImage(map, layout, DEMO_TERRAIN_DEFINITIONS, {
+      scale:              MINIMAP_SCALE,
+      padding:            MINIMAP_PADDING,
+      elevationShading:   0.05,
+      fog:                fogData,
+      fogDimOpacity:      minimapDimExplored    ? 0.55 : 0,
+      fogHideUnexplored:  minimapHideUnexplored,
+    }).then(blob => {
+      const url = URL.createObjectURL(blob);
+      minimapImg.src = url;
+      if (minimapUrl) URL.revokeObjectURL(minimapUrl);
+      minimapUrl = url;
+    });
+  }
+
+  function drawViewportOverlay(): void {
+    if (!mapBounds || viewportCanvas.width === 0) return;
+    const ctx = viewportCanvas.getContext('2d')!;
+    ctx.clearRect(0, 0, viewportCanvas.width, viewportCanvas.height);
+
+    // Project each screen corner through the camera onto the Y=0 ground plane.
+    const ndcCorners: [number, number][] = [[-1, 1], [1, 1], [1, -1], [-1, -1]];
+    const pts: { cx: number; cy: number }[] = [];
+    const _near = new THREE.Vector3();
+    const _far  = new THREE.Vector3();
+    const _dir  = new THREE.Vector3();
+
+    for (const [nx, ny] of ndcCorners) {
+      _near.set(nx, ny, -1).unproject(camera);
+      _far .set(nx, ny,  1).unproject(camera);
+      _dir .copy(_far).sub(_near);
+      if (Math.abs(_dir.y) < 1e-6) return; // parallel to ground — skip
+      const t = -_near.y / _dir.y;
+      if (t < 0) return; // corner points above the horizon — skip
+      pts.push({
+        cx: (_near.x + _dir.x * t - mapBounds.minX) * MINIMAP_SCALE + MINIMAP_PADDING,
+        cy: (_near.z + _dir.z * t - mapBounds.minZ) * MINIMAP_SCALE + MINIMAP_PADDING,
+      });
+    }
+
+    ctx.beginPath();
+    ctx.moveTo(pts[0].cx, pts[0].cy);
+    for (let i = 1; i < 4; i++) ctx.lineTo(pts[i].cx, pts[i].cy);
+    ctx.closePath();
+    ctx.strokeStyle = 'rgba(255,255,255,0.85)';
+    ctx.lineWidth   = 2;
+    ctx.stroke();
+  }
+
   // --- Save / Load ---
   const SAVE_KEY = 'hexworld-save';
   let saveStatus = localStorage.getItem(SAVE_KEY)
@@ -332,6 +423,7 @@ async function start() {
       lastHoveredForPath = null;
       chunkManager.dispose();
       saveStatus = `Loaded: ${metadata.name ?? 'map'}`;
+      updateMinimap();
     } catch (e) {
       console.error('Load failed:', e);
       saveStatus = 'Load failed';
@@ -400,9 +492,11 @@ async function start() {
     u.onMoveEnd   = () => {
       mat.color.setHex(idleColor);
       if (selectedUnit === u) { rangeNeedsUpdate = true; lastHoveredForPath = null; }
+      updateMinimap();
     };
     u.onCellEnter = () => {
       if (selectedUnit === u) { rangeNeedsUpdate = true; lastHoveredForPath = null; }
+      updateMinimap();
     };
 
     units.push(u);
@@ -462,12 +556,14 @@ async function start() {
       resetUnits();
       resetFog();
       chunkManager.dispose();
+      updateMinimap();
     } else if (e.key === 'g' || e.key === 'G') {
       activeGenIndex = (activeGenIndex + 1) % GENERATORS.length;
       runGenerator();
       resetUnits();
       resetFog();
       chunkManager.dispose();
+      updateMinimap();
     } else if (e.key === 'e' || e.key === 'E') {
       hideUnexplored = !hideUnexplored;
       chunkManager.setHideUnexplored(hideUnexplored);
@@ -480,6 +576,12 @@ async function start() {
       saveMap();
     } else if (e.key === 'l' || e.key === 'L') {
       loadMap();
+    } else if (e.key === '1') {
+      minimapDimExplored = !minimapDimExplored;
+      updateMinimap();
+    } else if (e.key === '2') {
+      minimapHideUnexplored = !minimapHideUnexplored;
+      updateMinimap();
     }
   });
 
@@ -519,6 +621,8 @@ async function start() {
       lastHoveredForPath   = null;
     }
   });
+
+  updateMinimap();
 
   // --- Render loop ---
   let lastFrameTime = performance.now();
@@ -592,9 +696,12 @@ async function start() {
       `Hide unexplored: ${hideUnexplored ? 'ON  [E] toggle' : 'OFF  [E] toggle'}\n` +
       `Dim explored:    ${dimExplored    ? 'ON  [F] toggle' : 'OFF  [F] toggle'}\n` +
       `Save: [S]  Load: [L]  ${saveStatus}\n` +
+      `Minimap fog dim: ${minimapDimExplored    ? 'ON  [1] toggle' : 'OFF  [1] toggle'}\n` +
+      `Minimap unexplored: ${minimapHideUnexplored ? 'ON  [2] toggle' : 'OFF  [2] toggle'}\n` +
       `\n${unitLine}\n${hoverLine}`;
 
     renderer.render(scene, camera);
+    drawViewportOverlay();
   }
   animate();
 }

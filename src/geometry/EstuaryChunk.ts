@@ -36,7 +36,11 @@ export function buildEstuaryGeometry(
   const perturbStr     = opts.perturbStrength    ?? 0.8;
   const elevScale      = opts.elevationScale     ?? 0.5;
   const surfaceLift    = opts.surfaceLift        ?? 0.02;
-  const elevPerturbStr = 0.2; // must match HexChunk elevPerturbStrength default
+  // Land-side (e2) vertices must track the terrain mesh, which perturbs with its
+  // own ChunkGeometryOptions — not the liquid's (possibly overridden) settings.
+  const terrainNoiseScale = opts.terrainNoiseScale          ?? 0.35;
+  const terrainPerturbStr = opts.terrainPerturbStrength     ?? 0.8;
+  const elevPerturbStr    = opts.terrainElevPerturbStrength ?? 0.2;
   const edgeDirs       = layout.orientation.edgeDirections;
   const waterTerrains  = opts.waterTerrains ?? new Set([DEFAULT_WATER_TERRAIN_INDEX]);
   const isWater = (t: number) => waterTerrains.has(t);
@@ -58,21 +62,29 @@ export function buildEstuaryGeometry(
     return [(n[0] * 2 - 1) * perturbStr, (n[2] * 2 - 1) * perturbStr];
   };
 
+  /** XZ perturbation matching HexChunk's terrain vertices — used for land-side vertices. */
+  const perturbLand = (x: number, z: number): [number, number] => {
+    const n = sampleNoise(x * terrainNoiseScale, z * terrainNoiseScale);
+    return [(n[0] * 2 - 1) * terrainPerturbStr, (n[2] * 2 - 1) * terrainPerturbStr];
+  };
+
   /** Y matching HexChunk.cellElevY — samples at cell center, same formula. */
   const landCellY = (col: number, row: number): number => {
     const q  = col - (row - (row & 1)) / 2;
     const wc = hexToWorld(layout, { q, r: row });
-    const n  = sampleNoise(wc.x * noiseScale, wc.z * noiseScale);
+    const n  = sampleNoise(wc.x * terrainNoiseScale, wc.z * terrainNoiseScale);
     const dy = (n[1] * 2 - 1) * elevPerturbStr;
     return map.getElevation(col, row) * elevScale + dy;
   };
 
+  /** `land` selects the terrain-matched perturbation for land-side (e2) vertices. */
   const addVert = (
     x: number, z: number, y: number,
     u1: number, v1: number,
     u2: number, v2: number,
+    land = false,
   ) => {
-    const [dx, dz] = perturb(x, z);
+    const [dx, dz] = land ? perturbLand(x, z) : perturb(x, z);
     positions[vi++] = x + dx;
     positions[vi++] = y;
     positions[vi++] = z + dz;
@@ -85,10 +97,11 @@ export function buildEstuaryGeometry(
     x0: number, z0: number, y0: number, u10: number, v10: number, u20: number, v20: number,
     x1: number, z1: number, y1: number, u11: number, v11: number, u21: number, v21: number,
     x2: number, z2: number, y2: number, u12: number, v12: number, u22: number, v22: number,
+    l0 = false, l1 = false, l2 = false,
   ) => {
-    addVert(x0, z0, y0, u10, v10, u20, v20);
-    addVert(x1, z1, y1, u11, v11, u21, v21);
-    addVert(x2, z2, y2, u12, v12, u22, v22);
+    addVert(x0, z0, y0, u10, v10, u20, v20, l0);
+    addVert(x1, z1, y1, u11, v11, u21, v21, l1);
+    addVert(x2, z2, y2, u12, v12, u22, v22, l2);
   };
 
   const cornerAt = (cx: number, cz: number, j: number, factor: number) => {
@@ -161,11 +174,13 @@ export function buildEstuaryGeometry(
           e2v1.x, e2v1.z, e2Y,  0, 1,  fu(1.5),  fv(1.00),
           e1v2.x, e1v2.z, wl,   0, 0,  fu(0.7),  fv(1.15),
           e2v2.x, e2v2.z, e2Y,  1, 1,  fu(1.0),  fv(0.80),
+          true, false, true,
         );
         addTri(
           e2v1.x, e2v1.z, e2Y,  0, 1,  fu(1.5),  fv(1.00),
           e2v2.x, e2v2.z, e2Y,  1, 1,  fu(1.0),  fv(0.80),
           e1v3.x, e1v3.z, wl,   0, 0,  fu(0.5),  fv(1.10),
+          true, true, false,
         );
 
         // Middle triangle: e1v3, e2v2, e2v4
@@ -173,6 +188,7 @@ export function buildEstuaryGeometry(
           e1v3.x, e1v3.z, wl,   0, 0,  fu(0.5),  fv(1.10),
           e2v2.x, e2v2.z, e2Y,  1, 1,  fu(1.0),  fv(0.80),
           e2v4.x, e2v4.z, e2Y,  1, 1,  fu(0.0),  fv(0.80),
+          false, true, true,
         );
 
         // Right quad: e1v3, e1v4, e2v4, e2v5
@@ -180,11 +196,13 @@ export function buildEstuaryGeometry(
           e1v3.x, e1v3.z, wl,   0, 0,  fu(0.5),   fv(1.10),
           e1v4.x, e1v4.z, wl,   0, 0,  fu(0.3),   fv(1.15),
           e2v4.x, e2v4.z, e2Y,  1, 1,  fu(0.0),   fv(0.80),
+          false, false, true,
         );
         addTri(
           e1v3.x, e1v3.z, wl,   0, 0,  fu(0.5),   fv(1.10),
           e2v4.x, e2v4.z, e2Y,  1, 1,  fu(0.0),   fv(0.80),
           e2v5.x, e2v5.z, e2Y,  0, 1,  fu(-0.5),  fv(1.00),
+          false, true, true,
         );
 
         // Corner gap triangles: the left quad starts at e1v2 and the right quad
@@ -194,11 +212,13 @@ export function buildEstuaryGeometry(
           e1v1.x, e1v1.z, wl,   0, 0,  fu(1.5),   fv(1.15),
           e1v2.x, e1v2.z, wl,   0, 0,  fu(0.7),   fv(1.15),
           e2v1.x, e2v1.z, e2Y,  0, 1,  fu(1.5),   fv(1.00),
+          false, false, true,
         );
         addTri(
           e1v5.x, e1v5.z, wl,   0, 0,  fu(-0.5),  fv(1.15),
           e1v4.x, e1v4.z, wl,   0, 0,  fu(0.3),   fv(1.15),
           e2v5.x, e2v5.z, e2Y,  0, 1,  fu(-0.5),  fv(1.00),
+          false, false, true,
         );
       }
     }

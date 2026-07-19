@@ -8,11 +8,24 @@ const MAGIC   = [0x48, 0x58, 0x4d, 0x50]; // "HXMP"
 const VERSION = 1;
 const HEADER_SIZE = 14; // 4 magic + 1 version + 4 width + 4 height + 1 featureLayerCount
 
-/** Optional metadata attached to a saved map (name, generator, seed). */
+/** Metadata attached to a saved map. All fields are optional; `createdAt` is auto-populated by serializeMapJSON. */
 export interface MapMetadata {
+  /** Display name shown in map pickers and campaign screens. */
   name?:        string;
+  /** RNG seed used during generation. */
   seed?:        number;
+  /** Stable ID of the generator plugin that produced this map (e.g. 'fbm', 'chunk', 'hand-crafted'). */
   generatorId?: string;
+  /** ISO 8601 creation timestamp. Set automatically by serializeMapJSON when not provided. */
+  createdAt?:   string;
+  /** Author name or identifier. */
+  author?:      string;
+  /** Short human-readable description of the map. */
+  description?: string;
+  /** Recommended player count. */
+  playerCount?: number;
+  /** Free-form tags for filtering and categorisation (e.g. ['pvp', 'large', 'island']). */
+  tags?:        string[];
 }
 
 /** Result of deserializing a JSON map — includes the map, metadata, and descriptor sets. */
@@ -87,16 +100,21 @@ export function deserializeMap(data: Uint8Array, isWater?: (terrain: number) => 
 // --- JSON ---
 
 interface MapJSON {
-  version: number;
-  width: number;
-  height: number;
+  version:           number;
+  width:             number;
+  height:            number;
   featureLayerCount: number;
-  cells: string;
-  roads: string;
-  features: string;
-  name?:                 string;
-  seed?:                 number;
-  generatorId?:          string;
+  cells:             string;
+  roads:             string;
+  features:          string;
+  name?:             string;
+  seed?:             number;
+  generatorId?:      string;
+  createdAt?:        string;
+  author?:           string;
+  description?:      string;
+  playerCount?:      number;
+  tags?:             string[];
   scatterDescriptors?:   ScatterDescriptor[];
   terrainDescriptors?:   TerrainDescriptor[];
   liquidDescriptors?:    LiquidTypeDescriptor[];
@@ -139,6 +157,7 @@ export function serializeMapJSON(
     roads:    uint8ToBase64(map.roadBits),
     features: map.featureData ? uint8ToBase64(map.featureData) : '',
     ...metadata,
+    createdAt: metadata.createdAt ?? new Date().toISOString(),
     ...(scatterDescriptors && scatterDescriptors.length > 0 ? { scatterDescriptors } : {}),
     ...(terrainDescriptors && terrainDescriptors.length > 0 ? { terrainDescriptors } : {}),
     ...(liquidDescriptors  && liquidDescriptors.length  > 0 ? { liquidDescriptors }  : {}),
@@ -177,7 +196,16 @@ export function deserializeMapJSON(json: string): DeserializedMap {
 
   return {
     map,
-    metadata:           { name: p.name, seed: p.seed, generatorId: p.generatorId },
+    metadata: {
+      name:        p.name,
+      seed:        p.seed,
+      generatorId: p.generatorId,
+      createdAt:   p.createdAt,
+      author:      p.author,
+      description: p.description,
+      playerCount: p.playerCount,
+      tags:        p.tags,
+    },
     scatterDescriptors: p.scatterDescriptors ?? [],
     terrainDescriptors: p.terrainDescriptors ?? [],
     liquidDescriptors:  p.liquidDescriptors  ?? [],
