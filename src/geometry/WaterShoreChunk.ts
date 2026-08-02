@@ -17,9 +17,12 @@ const SOLID_FACTOR = 0.8;
 /**
  * Builds the shore water geometry for a chunk.
  *
- * Water-side vertices are flat at the per-body water surface Y. Land-side vertices use the actual
- * terrain Y so the foamy V=1 edge sits on the terrain surface and is rendered
- * on top via polygonOffset rather than being hidden underground.
+ * Water-side vertices are flat at the per-body water surface Y. Land-side
+ * vertices stop halfway between the water surface and the terrain Y of the land
+ * cell, so the foamy V=1 edge hugs the terrain slope without climbing all the
+ * way onto the tile surface. The mesh must render after the full-hex surface
+ * mesh (ChunkManager assigns an explicit renderOrder) — the surface overlaps
+ * the fan and most of the strip, and would wash the foam out otherwise.
  *
  * For every water cell edge bordering land we emit:
  *   1. A fan triangle (center → water-side corners) — V=0 throughout.

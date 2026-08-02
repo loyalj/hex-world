@@ -24,6 +24,47 @@ npm install three @types/three
 
 ## Minimal setup
 
+`HexWorld` is the batteries-included entry point: renderer, RTS camera,
+lighting, terrain + liquid materials, chunk streaming, per-frame hover picking,
+and a cell overlay layer, all wired with sensible defaults:
+
+```ts
+import { HexWorld, FbmPlugin } from '@loyalj/hex-world';
+
+const world = await HexWorld.create({ container: document.body });
+FbmPlugin.generate(world.map, FbmPlugin.defaultConfig, Date.now());
+```
+
+Everything stays reachable — `world.scene`, `world.camera`, `world.renderer`,
+`world.chunks`, `world.controls`, `world.map`, `world.overlays`,
+`world.picker` — so you can drop to the à-la-carte API below at any point.
+Common hooks:
+
+```ts
+// Per-frame logic (hover cell is already picked for you)
+world.onFrame = dt => {
+  if (world.hoveredCell) world.overlays.set('hover', [world.hoveredCell]);
+};
+
+// Options: custom terrain, scatter, fog, camera limits, chunk sizing…
+const world = await HexWorld.create({
+  container,
+  map: myMap,                          // or width/height for a blank map
+  terrainDescriptors: MY_TERRAIN_DESCRIPTORS,
+  scatterDefinitions: [pineDefinition],
+  camera: { initialDistance: 60, maxDistance: 120 },
+});
+
+// Runtime swaps
+world.setMap(otherMap);                          // chunks rebuild, camera recenters
+await world.setTerrainDescriptors(descriptors);  // new terrain set / textures
+world.dispose();                                 // tear everything down
+```
+
+### À-la-carte setup
+
+The same wiring by hand, when you want full control over each piece:
+
 ```ts
 import * as THREE from 'three';
 import {
@@ -76,7 +117,7 @@ const chunks = new ChunkManager({
   loadRadius:         5,
 });
 
-// 6. Render loop
+// 7. Render loop
 function animate() {
   requestAnimationFrame(animate);
   chunks.update(camera);     // streams chunks in/out based on camera position

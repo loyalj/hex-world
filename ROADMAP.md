@@ -13,6 +13,12 @@ the library so both the editor and games built on hex-world get it.
 
 ### Liquids correctness
 
+- [x] **Shore foam washed out by camera-dependent draw order** — three.js sorts
+  transparent meshes back-to-front by bounding-sphere depth, and the full-hex water
+  surface mesh overlaps the shore strip, so for many camera positions whole chunks
+  composited the deep surface *over* the foam (shore/estuary meshes had no
+  `renderOrder`, unlike rivers/roads). Fixed with an explicit transparent stack in
+  `ChunkManager`: surface 0 → shore 1 → estuary 2 → river 3 → roads 4.
 - [x] **Shoreline seam coupling** — `buildShoreGeometry`, `buildEstuaryGeometry`, and
   `buildRiverGeometry` hard-code `elevPerturbStr = 0.2` and sample land-edge Y with the
   *liquid's* `noiseScale`, while terrain uses `ChunkGeometryOptions.elevPerturbStrength`
@@ -161,11 +167,41 @@ water) with richer motion, at equal or better performance.
   multi-tributary water cells render an estuary per incoming edge; and
   `computeRiverFlow` accumulates flow volume down every network (derived, not
   stored).
-- [ ] **Flow-dependent channel width rendering** — visually widen channels with
-  accumulated flow (`computeRiverFlow` provides the data). Deferred because the
-  water channel and the terrain's carved stream bed (`HexChunk` river-edge
-  triangulation) must widen in lockstep with matching widths across cell
-  borders — a visual-iteration job, not a data change.
+- [x] **Flow-dependent channel width rendering** — rivers now widen downstream
+  with accumulated flow, on by default (`flowWidenedRivers: false` on
+  ChunkManager/HexWorld restores fixed widths). `src/geometry/RiverWidth.ts`
+  holds the shared mapping: half-width = `0.16 · flow^0.22` clamped to
+  [0.16, 0.32] of the edge span — headwaters render SLIMMER than the old fixed
+  0.25, major rivers up to 2× a source, saturating around flow ~23 so
+  hand-painted maps use the whole range (the first cut used a log curve that
+  capped at flow ~10, making every river look uniformly wide). `riverEdgeFlow`
+  resolves each edge's width from the UPSTREAM cell so both cells of a shared
+  edge always agree — this keeps widths continuous across cell and chunk
+  borders — and interior flanks/junction mouths all scale by the same
+  per-cell factor, so confluence-basin proportions match the original design
+  at every flow. Both builders parameterize the same points: HexChunk widens
+  the groove notch (`ie2/ie4` in both edge-strip variants, `e2/e4` on river
+  faces), the interior flank factors and matching bank-face offsets; WaterChunk
+  widens `eL/eR` and the identical inner flank formulas, so the water tiles the
+  widened bed exactly (vertex-level lockstep asserted in
+  `tests/river-width.test.ts`, including every face of a confluence). Flow is
+  cached map-wide in ChunkManager; because one edit changes flow far
+  downstream, invalidation diffs the recomputed flow and marks every cell whose
+  flow changed, so downstream chunks rebuild instead of keeping stale widths
+  (regression test in `tests/chunk-manager.test.ts`). Tuning knobs are the four
+  constants in RiverWidth.ts. Fixing this also surfaced two PRE-EXISTING
+  confluence-cell bugs (found with an offline top-down rasterizer over the real
+  builder output): (1) the water junction cap only fanned BETWEEN mouths — the
+  per-edge "mouth triangle" is degenerate by construction — leaving a hole at
+  every mouth-chord sector; the cap now also fans center → each cL–cR chord.
+  (2) The terrain junction basin fanned straight from the bed-depth center up
+  to the bank-top B ring, and each junction channel face converged its groove
+  to a single bed point — both put walls above the river water surface across
+  most of the pool, pinching channels to slits at the junction. The basin now
+  has a flat bed floor out to 60% of the ring with a narrow rising rim, and
+  junction mouths carry a bed-depth strip across 70% of the chord, so the
+  water cuts only a thin shoreline band. Regression-tested in
+  `tests/river-width.test.ts` (mouth sector triangle + mouth bed strip).
 
 ### Performance / infrastructure
 
@@ -192,38 +228,58 @@ a promotion queue — each item shrinks the editor and gives games the same feat
 
 ### Promotion queue
 
-- [ ] **`HexPicker` — robust picking with fallback chain** — promote the ~45 lines
-  from editor `src/scene.ts:289-330`: mesh pick → flat-plane fallback (while chunks
-  build) → water-surface re-pick (seabed-depth terrain makes raw picks land on the
-  wrong water cell) → last-elevation retry at map edges → short hold to prevent
-  hover flicker at chunk seams. Every consumer needs exactly this; the editor then
-  deletes its copy.
-- [ ] **Cell overlay / highlight layer** — promote and generalize the editor's
-  hover-footprint mesh and path preview line (`src/scene.ts:144-185`, `:334-358`)
-  into a library `CellOverlayLayer`: hover highlight, selected-cell outline,
-  movement-range tint, path preview, territory/ownership borders. Water-surface
-  aware like the editor's version. The fog system's per-cell data-texture pattern
-  is the substrate. Highest-demand feature for games built on the library.
-- [ ] **Edit transactions with automatic dirty marking** — a library-level
-  `map.edit(tx => …)` that snapshots touched cells, applies changes, and marks
-  dirty chunks INCLUDING neighbor chunks when edge cells change. Fixes a live
-  editor bug: stroke commands (`src/commands.ts`) call `markDirty` only on edited
-  cells, so chunk-border edits leave the adjacent chunk's shore/skirt/road geometry
-  stale. Also collapses the editor's six near-identical command classes into one
-  generic cell-snapshot command, and gives games undo/redo for free.
-- [ ] **ChunkManager in-place swaps** — `setMap()` and `setTerrainDefinitions()`
-  so consumers stop dispose-and-recreate: the editor does this dance in three
-  places (`replaceMap`, `rebuildTerrainFromDescriptors`, `loadAndApplyHexPack` in
-  `src/scene.ts`).
-- [ ] **Paired road-edge helper** — `setRoadEdge(col, row, edge, state)` that sets
-  both half-edges and reports both dirty cells; the pairing invariant currently
-  lives in the editor's `RoadPaintStrokeCommand` and is easy for consumers to get
-  wrong.
-- [ ] **`HexWorld` façade** — batteries-included entry class extracted from the
-  editor's `initScene()` (`src/scene.ts:41-365`): renderer, lighting, camera
-  controller, chunk wiring, animate loop, with the à-la-carte API unchanged
-  underneath. `initScene` is the spec; the quick start should drop from ~40 lines
-  to ~5.
+- [x] **`HexPicker` — robust picking with fallback chain** — promoted to
+  `src/geometry/HexPicker.ts`: stateful class running mesh pick → flat-plane
+  fallback → water-surface re-pick → last-elevation retry → short hold
+  (`holdFrames`, default 4). Takes accessors for map/meshes so editors that swap
+  maps stay correct, plus a bounds guard + `reset()` for map swaps (fixes a
+  latent editor bug where a held cell from a larger map could read out of
+  bounds). Editor now calls `picker.pick(mouseX, mouseY)` per frame and deleted
+  its ~45-line copy.
+- [x] **Cell overlay / highlight layer** — `src/geometry/CellOverlayLayer.ts`:
+  named overlays (`set(id, cells, {style, color, opacity})`) with `'fill'`
+  (hover highlight, movement-range tint) and `'outline'` (selected cell,
+  territory borders — draws only boundary edges of the set) styles, plus
+  `setPath(id, path)` smoothed path previews. Water-surface aware via `isWater`.
+  Went with overlay meshes (depth-test-off, like the editor's implementation)
+  rather than the fog data-texture substrate — no terrain-shader coupling, and
+  outlines/paths need geometry anyway; a shader tint channel can still be added
+  later if whole-map tints outgrow meshes. Editor deleted its three hand-built
+  overlay meshes (~80 lines); covered by `tests/cell-overlay.test.ts`.
+- [x] **Edit transactions with automatic dirty marking** — `src/map/MapEdit.ts`:
+  `map.edit(tx => …)` (one-shot) and `map.beginEdit()`/`tx.commit()` (multi-event
+  strokes) snapshot every touched cell across all channels — terrain, elevation,
+  flags, rivers *including confluence masks*, roads, scatter — and return a
+  replayable `MapEdit` with `undo()`/`redo()` + `cells` for dirty marking. The
+  chunk-border staleness bug was fixed at the root instead: `ChunkManager.markDirty`
+  is now neighbor-aware (border cells also mark the adjacent chunk whose
+  shore/skirt/bridge/road geometry samples them), so every edit path benefits;
+  `markDirtyCells(edit.cells)` added for batches. Editor's six command classes
+  collapsed into one 20-line `MapEditCommand`; this also fixed the old
+  `RiverPaintStrokeCommand` losing confluence masks on undo (it only restored the
+  primary incoming direction). Covered by `tests/map-edit.test.ts`.
+- [x] **ChunkManager in-place swaps** — `setMap(map)` and
+  `setTerrainDefinitions(defs, material?)` unload all chunks, swap the derived
+  state (`chunksX/chunksY` are now computed getters; terrain-definition lookups
+  recompute via a shared `applyTerrainDefinitions`), and recompute water
+  surfaces with the new liquid membership; chunks stream back in on the next
+  `update()`/`loadAll()`. The editor's three dispose-and-recreate sites
+  (`replaceMap`, `rebuildTerrainFromDescriptors`, `loadAndApplyHexPack`) now
+  swap in place. Covered in `tests/chunk-manager.test.ts`.
+- [x] **Paired road-edge helper** — `HexMap.setRoadEdge(col, row, edge, state,
+  orientation)` sets both half-edges and returns the affected cells (one at the
+  map border), with `roadEdgeNeighbor()` exposing the edge↔neighbor mapping.
+  Mirrored on `MapTransaction.setRoadEdge` so road strokes snapshot both cells.
+  The editor's road tool now uses it; symmetry covered in `tests/map-edit.test.ts`.
+- [x] **`HexWorld` façade** — `src/world/HexWorld.ts`: `HexWorld.create(opts)`
+  wires renderer, RTS camera controller, lighting, terrain/liquid materials,
+  ChunkManager, per-frame `HexPicker`, `CellOverlayLayer`, resize handling, and
+  the animate loop (`onFrame` hook, `start`/`stop`/`dispose`). Runtime swaps
+  built on the new in-place APIs: `setMap`, `setTerrainDescriptors`,
+  `applyTerrainDefinitions` (for `loadHexPack` results). Every piece stays
+  public so consumers can drop to the à-la-carte API. Editor's `initScene`
+  shrank from ~365 lines to ~115 (only scatter defs + editor-specific API
+  remain); quick start now starts with the 4-line `HexWorld` path.
 
 ### Workflow
 
@@ -239,14 +295,26 @@ a promotion queue — each item shrinks the editor and gives games the same feat
 
 ### Editor follow-ups unlocked by library work
 
-- [ ] **Liquid painting palette** — lava/acid/custom liquids in the editor terrain
-  palette (the editor currently ships only `DEFAULT_LIQUID_DESCRIPTORS`), including
-  save/load of custom liquid descriptors.
-- [ ] **Liquid appearance editing** — the Part 2 descriptor fields (opacity, flow
-  speed, emissive, waveScale, foamIntensity) exist; expose them in the editor UI
-  so packs carry the look.
-- [ ] **Confluence-aware river tool** — the editor's river paint/undo
-  (`src/commands.ts` RiverPaintStrokeCommand) snapshots a single incoming
-  direction; update it to snapshot/restore the full incoming mask
-  (`getIncomingRiverMask`) and use `removeRiverIncoming`/`removeRiverOutgoing`
-  for partial detaches.
+- [x] **Liquid painting palette** — the editor palette now ships Lava (index 6)
+  and Acid (index 7) terrain entries linked to the built-in liquid descriptors,
+  paintable out of the box alongside Water. The editor also manages a live
+  `liquidDescriptors` array: the add-terrain dialog's liquid dropdown is
+  populated from it (so custom liquids are paintable via liquid-typed terrain),
+  map JSON saves and `.hexpack` exports carry it, and loads adopt the file's
+  liquids (JSON via `deserializeMapJSON`, packs via `loadHexPack`'s resolved
+  descriptors + materials). Library support: `ChunkManager.setLiquids()` and
+  `HexWorld.setLiquidDescriptors()` swap liquid types in place (covered in
+  `tests/chunk-manager.test.ts`).
+- [x] **Liquid appearance editing** — new 💧 "Liquid Types" dialog in the
+  terrain palette: edit any liquid's name, shallow/deep/foam colors, opacity,
+  flow speed, wave scale, foam intensity, and emissive color/strength, or
+  create new liquids ("+ New liquid…"). Applies live through
+  `setLiquidDescriptors` and rides the same save/load paths as the palette
+  item, so packs carry the look.
+- [x] **Confluence-aware river tool** — undo/redo now snapshots the full
+  incoming mask for free via `MapEdit`. Tool behavior updated for partial
+  detaches: painting merges with existing rivers (incoming edges are additive;
+  replacing a cell's outgoing detaches the old downstream neighbour's matching
+  incoming), path-erase removes only the half-edges along the drawn path so
+  tributaries at confluences survive, and brush-erase detaches every neighbour
+  half-edge pointing at the erased cell (no dangling channel stubs).

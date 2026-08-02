@@ -22,11 +22,16 @@
       "Bash(curl -s \"https://catlikecoding.com/unity/tutorials/hex-map/part-21/\")",
       "Bash(npm install *)",
       "Bash(npx typedoc *)",
-      "Bash(npm run *)"
+      "Bash(npm run *)",
+      "Bash(npx tsx *)",
+      "Bash(node -p \"require\\('three/package.json'\\).version\")",
+      "Bash(npx vitest *)",
+      "PowerShell(npm test)"
     ],
     "additionalDirectories": [
       "C:\\Users\\loyal\\.claude\\projects\\d--Coding-hex-world\\ef551f1b-c5cb-4cf2-8696-3be1d9fe7853\\tool-results",
-      "d:\\Coding\\hex-world-editor"
+      "d:\\Coding\\hex-world-editor",
+      "d:\\Coding\\hex-world-editor\\src"
     ]
   }
 }

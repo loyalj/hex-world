@@ -8,3 +8,4 @@ export * from './camera/index.js';
 export * from './generators/index.js';
 export * from './pathfinding/index.js';
 export * from './units/index.js';
+export * from './world/HexWorld.js';

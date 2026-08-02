@@ -2,9 +2,10 @@ import * as THREE from 'three';
 import type { HexMap } from '../map/HexMap.js';
 import type { HexLayout } from '../math/HexLayout.js';
 import { worldToHex } from '../math/HexLayout.js';
+import { HEX_DIRECTIONS } from '../math/HexCoord.js';
 import { buildChunkGeometry, type ChunkBounds, type ChunkGeometryOptions, type TerrainColorMode } from './HexChunk.js';
 export type { TerrainColorMode };
-import { buildWaterGeometry, buildRiverGeometry, computeRiverOwnership, type WaterGeometryOptions } from './WaterChunk.js';
+import { buildWaterGeometry, buildRiverGeometry, computeRiverOwnership, computeRiverFlow, type WaterGeometryOptions } from './WaterChunk.js';
 import { buildShoreGeometry } from './WaterShoreChunk.js';
 import { buildEstuaryGeometry } from './EstuaryChunk.js';
 import { buildScatterMeshes } from './ScatterBuilder.js';
@@ -15,6 +16,21 @@ import type { TerrainDefinition } from './TerrainTypes.js';
 import { DEFAULT_TERRAIN_DEFINITIONS, buildWaterTerrainSet, buildLiquidTerrainSets } from './TerrainTypes.js';
 import type { LiquidTypeDescriptor, LiquidMaterialSet } from './LiquidTypes.js';
 import { DEFAULT_LIQUID_DESCRIPTORS } from './LiquidTypes.js';
+
+/**
+ * Explicit renderOrder for the transparent mesh layers, bottom → top.
+ *
+ * three.js sorts transparent objects back-to-front by bounding-sphere depth,
+ * which changes with the camera. The full-hex water surface mesh overlaps the
+ * shore strip, so without a fixed order it can composite OVER the shore and
+ * wash out the foam for whole chunks. The liquid surface stays at the default
+ * order 0; everything layered on top of it gets an explicit slot. Demo-level
+ * overlays (hover, selection, …) start at 5.
+ */
+export const RENDER_ORDER_SHORE   = 1;
+export const RENDER_ORDER_ESTUARY = 2;
+export const RENDER_ORDER_RIVER   = 3;
+export const RENDER_ORDER_ROADS   = 4;
 
 export interface ChunkManagerOptions {
   map: HexMap;
@@ -50,6 +66,13 @@ export interface ChunkManagerOptions {
   /** If provided, fog-of-war uniforms are set on all shader materials. */
   fogData?: FogData;
   /**
+   * Widen river channels (water AND carved stream bed, in lockstep) with
+   * accumulated flow from `computeRiverFlow` — tributaries joining a river
+   * make it visibly wider downstream. Default true; set false for the
+   * fixed-width channels of earlier versions.
+   */
+  flowWidenedRivers?: boolean;
+  /**
    * Terrain type definitions controlling vertex colors, road colors, and water geometry.
    * Defaults to the built-in six types. Pass a merged or custom array to extend terrain.
    */
@@ -69,7 +92,7 @@ export interface ChunkManagerOptions {
  * for the affected chunk on the next `update()`.
  */
 export class ChunkManager {
-  private readonly map: HexMap;
+  private map: HexMap;
   private readonly layout: HexLayout;
   private readonly scene: THREE.Scene;
   private material: THREE.Material;
@@ -78,13 +101,20 @@ export class ChunkManager {
   private readonly scatterDefinitions: ScatterDefinition[] | null;
   private readonly liquidMaterials:    Map<string, LiquidMaterialSet>;
   private readonly liquidDescriptors:  Map<string, LiquidTypeDescriptor>;
-  private readonly liquidTerrainSets:  Map<string, Set<number>>;
-  private readonly allWaterTerrains:   Set<number>;
-  private readonly liquidPriorityByTerrain: Map<number, number>;
-  private readonly liquidIdByTerrain:       Map<number, string>;
-  private readonly defaultRiverLiquidId:    string | null;
+  private liquidTerrainSets:  Map<string, Set<number>>;
+  private allWaterTerrains:   Set<number>;
+  private liquidPriorityByTerrain: Map<number, number>;
+  private liquidIdByTerrain:       Map<number, string>;
+  private defaultRiverLiquidId:    string | null;
   /** Map-wide river ownership cache — per-liquid sets of owned river cells. Null = stale. */
   private riverCellsByLiquid: Map<string, Set<number>> | null = null;
+  /** Map-wide accumulated river flow cache for flow-dependent channel widths. Null = stale. */
+  private riverFlowCache: Map<number, number> | null = null;
+  /** The flow map used for the currently-rendered geometry — kept (unlike the
+   *  cache, which is nulled on markDirty) so a recompute can diff against it
+   *  and dirty every cell whose flow changed. */
+  private lastRiverFlow: Map<number, number> | null = null;
+  private readonly flowWidenedRivers: boolean;
   private fogData:                     FogData | null;
   private hideUnexplored            = true;
   private dimExplored               = true;
@@ -105,9 +135,9 @@ export class ChunkManager {
   private elapsedSeconds         = 0;
 
   /** Total number of chunks across the map width */
-  readonly chunksX: number;
+  get chunksX(): number { return Math.ceil(this.map.width / this.chunkSize); }
   /** Total number of chunks across the map height */
-  readonly chunksY: number;
+  get chunksY(): number { return Math.ceil(this.map.height / this.chunkSize); }
 
   constructor(opts: ChunkManagerOptions) {
     this.map          = opts.map;
@@ -119,13 +149,69 @@ export class ChunkManager {
     this.scatterDefinitions = opts.scatterDefinitions ?? null;
     this.fogData            = opts.fogData            ?? null;
 
-    const terrainDefs       = opts.terrainDefinitions ?? DEFAULT_TERRAIN_DEFINITIONS;
-    this.liquidTerrainSets  = buildLiquidTerrainSets(terrainDefs);
-    this.allWaterTerrains   = buildWaterTerrainSet(terrainDefs);
-
     this.liquidMaterials   = opts.liquidMaterials ?? new Map();
     const descriptorList   = opts.liquidDescriptors ?? DEFAULT_LIQUID_DESCRIPTORS;
     this.liquidDescriptors = new Map(descriptorList.map(d => [d.id, d]));
+
+    this.geoOptions      = { ...opts.geometryOptions };
+    this.waterGeoOptions = { ...opts.waterGeometryOptions };
+
+    // Definite assignment happens in applyTerrainDefinitions; these initializers
+    // keep the compiler satisfied without duplicating the derivation.
+    this.liquidTerrainSets       = new Map();
+    this.allWaterTerrains        = new Set();
+    this.liquidPriorityByTerrain = new Map();
+    this.liquidIdByTerrain       = new Map();
+    this.defaultRiverLiquidId    = null;
+    this.applyTerrainDefinitions(opts.terrainDefinitions ?? DEFAULT_TERRAIN_DEFINITIONS);
+
+    this.chunkSize  = opts.chunkSize  ?? 32;
+    this.loadRadius = opts.loadRadius ?? 4;
+    this.flowWidenedRivers = opts.flowWidenedRivers ?? true;
+  }
+
+  /**
+   * Lazily computes the map-wide accumulated flow used for flow-dependent
+   * channel widths. Invalidated by markDirty alongside the ownership cache.
+   */
+  private riverFlow(): Map<number, number> | undefined {
+    if (!this.flowWidenedRivers) return undefined;
+    if (!this.riverFlowCache) {
+      this.riverFlowCache = computeRiverFlow(this.map, this.layout.orientation.edgeDirections);
+      this.lastRiverFlow  = this.riverFlowCache;
+    }
+    return this.riverFlowCache;
+  }
+
+  /**
+   * Flow is a MAP-WIDE property: one edit can change the accumulated flow —
+   * and therefore the rendered channel width — of every cell downstream, far
+   * outside the edited chunk. After an edit invalidates the flow cache,
+   * recompute and mark every cell whose flow changed, so downstream chunks
+   * rebuild instead of keeping stale widths (visible as abrupt channel steps
+   * at chunk borders and mismatched confluences).
+   */
+  private refreshFlowAndMarkChanged(): void {
+    const next = computeRiverFlow(this.map, this.layout.orientation.edgeDirections);
+    const prev = this.lastRiverFlow;
+    if (prev) {
+      const w = this.map.width;
+      for (const [k, v] of next) {
+        if (prev.get(k) !== v) this.markDirty(k % w, (k / w) | 0);
+      }
+      for (const k of prev.keys()) {
+        if (!next.has(k)) this.markDirty(k % w, (k / w) | 0);
+      }
+    }
+    // After the markDirty calls above (each nulls the cache field).
+    this.riverFlowCache = next;
+    this.lastRiverFlow  = next;
+  }
+
+  /** Recompute every terrain-definition-derived lookup. */
+  private applyTerrainDefinitions(terrainDefs: TerrainDefinition[]): void {
+    this.liquidTerrainSets = buildLiquidTerrainSets(terrainDefs);
+    this.allWaterTerrains  = buildWaterTerrainSet(terrainDefs);
 
     // Liquid-level priorities: every terrain index of a liquid shares the liquid's
     // lowest index, so multi-index liquids resolve boundaries consistently.
@@ -140,8 +226,17 @@ export class ChunkManager {
       for (const idx of set) this.liquidIdByTerrain.set(idx, id);
     }
 
-    // Unclassified rivers (drainage target unknown) are rendered by exactly one
-    // liquid: the highest-priority one that has a river material.
+    this.computeDefaultRiverLiquid();
+
+    this.geoOptions.terrainDefinitions = terrainDefs;
+    this.riverCellsByLiquid = null;
+  }
+
+  /**
+   * Unclassified rivers (drainage target unknown) are rendered by exactly one
+   * liquid: the highest-priority one that has a river material.
+   */
+  private computeDefaultRiverLiquid(): void {
     let defaultRiver: string | null = null;
     let bestPriority = Infinity;
     for (const [id, mats] of this.liquidMaterials) {
@@ -152,14 +247,6 @@ export class ChunkManager {
       if (p < bestPriority) { bestPriority = p; defaultRiver = id; }
     }
     this.defaultRiverLiquidId = defaultRiver;
-
-    this.geoOptions      = { ...opts.geometryOptions, terrainDefinitions: terrainDefs };
-    this.waterGeoOptions = { ...opts.waterGeometryOptions };
-
-    this.chunkSize  = opts.chunkSize  ?? 32;
-    this.loadRadius = opts.loadRadius ?? 4;
-    this.chunksX    = Math.ceil(opts.map.width  / this.chunkSize);
-    this.chunksY    = Math.ceil(opts.map.height / this.chunkSize);
   }
 
   /** Merge global water geometry options with per-liquid overrides and inject the terrain set. */
@@ -180,6 +267,7 @@ export class ChunkManager {
       liquidPriorityByTerrain: this.liquidPriorityByTerrain,
       ownsUnclassifiedRivers:  liquidId === this.defaultRiverLiquidId,
       riverCells: this.riverCellsFor(liquidId),
+      riverFlow:  this.riverFlow(),
     };
   }
 
@@ -284,6 +372,7 @@ export class ChunkManager {
     if (this.chunks.has(k)) return;
 
     const b    = this.bounds(cx, cy);
+    this.geoOptions.riverFlow = this.riverFlow();
     const { terrain: geo, roads: roadsGeo } = buildChunkGeometry(this.map, this.layout, b, this.geoOptions);
     this.applyFog(this.material);
     const mesh = new THREE.Mesh(geo, this.material);
@@ -312,6 +401,7 @@ export class ChunkManager {
         if (sGeo) {
           const m = new THREE.Mesh(sGeo, mats.shore);
           m.frustumCulled = true;
+          m.renderOrder = RENDER_ORDER_SHORE;
           this.scene.add(m);
           this.liquidShoreChunks.set(lk, m);
         }
@@ -323,6 +413,7 @@ export class ChunkManager {
         if (eGeo) {
           const m = new THREE.Mesh(eGeo, mats.estuary);
           m.frustumCulled = true;
+          m.renderOrder = RENDER_ORDER_ESTUARY;
           this.scene.add(m);
           this.liquidEstuaryChunks.set(lk, m);
         }
@@ -334,7 +425,7 @@ export class ChunkManager {
         if (rGeo) {
           const m = new THREE.Mesh(rGeo, mats.river);
           m.frustumCulled = true;
-          m.renderOrder = 1;
+          m.renderOrder = RENDER_ORDER_RIVER;
           this.scene.add(m);
           this.liquidRiverChunks.set(lk, m);
         }
@@ -345,7 +436,7 @@ export class ChunkManager {
       this.applyFog(this.roadMaterial);
       const rdMesh = new THREE.Mesh(roadsGeo, this.roadMaterial);
       rdMesh.frustumCulled = true;
-      rdMesh.renderOrder = 2;
+      rdMesh.renderOrder = RENDER_ORDER_ROADS;
       this.scene.add(rdMesh);
       this.roadChunks.set(k, rdMesh);
     }
@@ -425,6 +516,12 @@ export class ChunkManager {
       if (scatterNeedsRefresh) this.updateScatterFog();
     }
 
+    // Widen/narrow downstream channels whose accumulated flow changed BEFORE
+    // snapshotting dirty regions, so their chunks join this frame's rebuild.
+    if (this.flowWidenedRivers && this.dirty.size > 0 && this.riverFlowCache === null) {
+      this.refreshFlowAndMarkChanged();
+    }
+
     if (this.dirty.size > 0) {
       // Incremental: only water bodies intersecting the dirty chunks (expanded
       // by one cell so bodies merely adjacent to an edit re-seed) are re-flooded.
@@ -445,6 +542,7 @@ export class ChunkManager {
       const [cx, cy] = k.split(',').map(Number);
       const b = this.bounds(cx, cy);
       mesh.geometry.dispose();
+      this.geoOptions.riverFlow = this.riverFlow();
       const { terrain: newGeo, roads: newRoadsGeo } = buildChunkGeometry(this.map, this.layout, b, this.geoOptions);
       mesh.geometry = newGeo;
 
@@ -481,6 +579,7 @@ export class ChunkManager {
             this.applyFog(mats.shore);
             const m = new THREE.Mesh(sGeo, mats.shore);
             m.frustumCulled = true;
+            m.renderOrder = RENDER_ORDER_SHORE;
             this.scene.add(m);
             this.liquidShoreChunks.set(lk, m);
           }
@@ -498,6 +597,7 @@ export class ChunkManager {
             this.applyFog(mats.estuary);
             const m = new THREE.Mesh(eGeo, mats.estuary);
             m.frustumCulled = true;
+            m.renderOrder = RENDER_ORDER_ESTUARY;
             this.scene.add(m);
             this.liquidEstuaryChunks.set(lk, m);
           }
@@ -515,7 +615,7 @@ export class ChunkManager {
             this.applyFog(mats.river);
             const m = new THREE.Mesh(rGeo, mats.river);
             m.frustumCulled = true;
-            m.renderOrder = 1;
+            m.renderOrder = RENDER_ORDER_RIVER;
             this.scene.add(m);
             this.liquidRiverChunks.set(lk, m);
           }
@@ -534,7 +634,7 @@ export class ChunkManager {
       } else if (newRoadsGeo && this.roadMaterial) {
         const newRdMesh = new THREE.Mesh(newRoadsGeo, this.roadMaterial);
         newRdMesh.frustumCulled = true;
-        newRdMesh.renderOrder = 2;
+        newRdMesh.renderOrder = RENDER_ORDER_ROADS;
         this.scene.add(newRdMesh);
         this.roadChunks.set(k, newRdMesh);
       }
@@ -590,12 +690,34 @@ export class ChunkManager {
   /**
    * Mark the chunk containing cell (col, row) as needing a geometry rebuild.
    * Call after modifying map cell data.
+   *
+   * Cells on a chunk border also mark the adjacent chunk(s): their shore
+   * strips, skirts, bridges, and road geometry sample this cell, so rebuilding
+   * only the edited cell's chunk would leave the neighbour's geometry stale.
    */
   markDirty(col: number, row: number): void {
-    const cx = Math.floor(col / this.chunkSize);
-    const cy = Math.floor(row / this.chunkSize);
-    this.dirty.add(this.key(cx, cy));
+    const cs = this.chunkSize;
+    this.dirty.add(this.key(Math.floor(col / cs), Math.floor(row / cs)));
     this.riverCellsByLiquid = null; // river ownership may have changed
+    this.riverFlowCache     = null; // accumulated flow may have changed
+
+    // Interior cells can't affect another chunk's geometry.
+    const lc = col % cs, lr = row % cs;
+    if (lc > 0 && lc < cs - 1 && lr > 0 && lr < cs - 1) return;
+
+    const q = col - (row - (row & 1)) / 2;
+    for (let d = 0; d < 6; d++) {
+      const nq = q   + HEX_DIRECTIONS[d].q;
+      const nr = row + HEX_DIRECTIONS[d].r;
+      const nc = nq  + (nr - (nr & 1)) / 2;
+      if (nc < 0 || nc >= this.map.width || nr < 0 || nr >= this.map.height) continue;
+      this.dirty.add(this.key(Math.floor(nc / cs), Math.floor(nr / cs)));
+    }
+  }
+
+  /** `markDirty` for a batch of cells — pairs with `MapEdit.cells` after undo/redo. */
+  markDirtyCells(cells: Iterable<{ col: number; row: number }>): void {
+    for (const c of cells) this.markDirty(c.col, c.row);
   }
 
   /** Force-load all chunks (use for small maps or offline baking). */
@@ -685,6 +807,60 @@ export class ChunkManager {
     // Dispose-and-reload is the documented way to refresh after regenerating
     // the map in place, so every map-derived cache must reset here too.
     this.riverCellsByLiquid = null;
+    this.riverFlowCache     = null;
+    this.lastRiverFlow      = null;
+  }
+
+  /**
+   * Swap in a different `HexMap` without recreating the manager: all loaded
+   * chunks are unloaded and chunks for the new map stream in on the next
+   * `update()` (or `loadAll()`). Materials, terrain definitions, and options
+   * are kept. Water surfaces are recomputed so the new map renders correctly
+   * even if it was edited without a `computeWaterSurfaces` call.
+   */
+  setMap(map: HexMap): void {
+    this.dispose();
+    this.dirty.clear();
+    this.map = map;
+    map.computeWaterSurfaces(t => this.allWaterTerrains.has(t));
+  }
+
+  /**
+   * Swap terrain definitions (and optionally the terrain material) in place —
+   * e.g. after the user defines custom terrain or loads a pack. All loaded
+   * chunks are unloaded and rebuilt with the new definitions on the next
+   * `update()` / `loadAll()`; water surfaces are recomputed because liquid
+   * terrain membership may have changed.
+   *
+   * The caller keeps ownership of the previous material (dispose it yourself
+   * if it is no longer used elsewhere).
+   */
+  setTerrainDefinitions(terrainDefs: TerrainDefinition[], material?: THREE.Material): void {
+    this.dispose();
+    this.dirty.clear();
+    this.applyTerrainDefinitions(terrainDefs);
+    if (material) this.material = material;
+    this.map.computeWaterSurfaces(t => this.allWaterTerrains.has(t));
+  }
+
+  /**
+   * Swap the liquid types (descriptors + material sets) in place — e.g. after
+   * the user edits a liquid's appearance or defines a new one. All loaded
+   * chunks are unloaded and rebuilt with the new liquids on the next
+   * `update()` / `loadAll()`.
+   *
+   * The caller keeps ownership of the previous materials (dispose the ones
+   * that are no longer used).
+   */
+  setLiquids(descriptors: LiquidTypeDescriptor[], materials: Map<string, LiquidMaterialSet>): void {
+    this.dispose();
+    this.dirty.clear();
+    const entries = [...materials]; // snapshot first — caller may pass the map we already hold
+    this.liquidMaterials.clear();
+    for (const [id, m] of entries) this.liquidMaterials.set(id, m);
+    this.liquidDescriptors.clear();
+    for (const d of descriptors) this.liquidDescriptors.set(d.id, d);
+    this.computeDefaultRiverLiquid();
   }
 
   /**

@@ -7,6 +7,7 @@ import { RIVER_SURFACE_ELEVATION_OFFSET, ELEVATION_SCALE } from '../map/HexCell.
 import { DEFAULT_WATER_TERRAIN_INDEX } from './TerrainTypes.js';
 import { sampleNoise } from '../math/Noise.js';
 import type { ChunkBounds } from './HexChunk.js';
+import { RIVER_BASE_HALF_WIDTH, riverWidthScale, riverEdgeFlow } from './RiverWidth.js';
 
 export interface WaterGeometryOptions {
   noiseScale?: number;
@@ -74,6 +75,13 @@ export interface WaterGeometryOptions {
    * ChunkGeometryOptions.cliffThreshold; ChunkManager injects it. Default 2.
    */
   cliffThreshold?: number;
+  /**
+   * Accumulated river flow per cell (cellKey → flow, from `computeRiverFlow`).
+   * When provided, river channels widen with flow (see RiverWidth.ts). Must be
+   * the SAME map passed to `buildChunkGeometry` so the carved stream bed
+   * widens in lockstep. ChunkManager injects its cached flow automatically.
+   */
+  riverFlow?: Map<number, number>;
 }
 
 const SOLID_FACTOR   = 0.8;
@@ -334,6 +342,11 @@ export function buildRiverGeometry(
       const isBeginEnd = map.hasRiverBeginOrEnd(col, row);
       const outDir     = map.getOutgoingRiverDir(col, row);
 
+      // Flow-dependent widening — same formulas as the stream bed carve in
+      // buildChunkGeometry so the water tiles the widened groove exactly.
+      const riverFlow = opts.riverFlow;
+      const cellW = riverFlow ? riverWidthScale(riverFlow.get(cellKey) ?? 1) : 1;
+
       // Junction cells (3+ channels) use symmetric channel mouths matching the
       // terrain basin in HexChunk, so the water tiles the carved bed.
       let riverEdgeCount = 0;
@@ -352,10 +365,13 @@ export function buildRiverGeometry(
         const i1         = (i + 1) % 6;
         const isOutgoing = (i === outDir);
 
-        const eLx = crns[i].x * 0.75 + crns[i1].x * 0.25;
-        const eLz = crns[i].z * 0.75 + crns[i1].z * 0.25;
-        const eRx = crns[i].x * 0.25 + crns[i1].x * 0.75;
-        const eRz = crns[i].z * 0.25 + crns[i1].z * 0.75;
+        const hw = riverFlow
+          ? RIVER_BASE_HALF_WIDTH * riverWidthScale(riverEdgeFlow(map, riverFlow, col, row, i, edgeDirs))
+          : RIVER_BASE_HALF_WIDTH;
+        const eLx = crns[i].x + (crns[i1].x - crns[i].x) * (0.5 - hw);
+        const eLz = crns[i].z + (crns[i1].z - crns[i].z) * (0.5 - hw);
+        const eRx = crns[i].x + (crns[i1].x - crns[i].x) * (0.5 + hw);
+        const eRz = crns[i].z + (crns[i1].z - crns[i].z) * (0.5 + hw);
 
         let   nbRy            = ry;
         let   nbIsWater       = false;
@@ -405,30 +421,32 @@ export function buildRiverGeometry(
           let cLx: number, cLz: number, cRx: number, cRz: number;
 
           if (isJunctionCell) {
-            cLx = center.x + ox[i]  * SOLID_FACTOR * 0.4;
-            cLz = center.z + oz[i]  * SOLID_FACTOR * 0.4;
-            cRx = center.x + ox[i1] * SOLID_FACTOR * 0.4;
-            cRz = center.z + oz[i1] * SOLID_FACTOR * 0.4;
+            cLx = center.x + ox[i]  * SOLID_FACTOR * 0.4 * cellW;
+            cLz = center.z + oz[i]  * SOLID_FACTOR * 0.4 * cellW;
+            cRx = center.x + ox[i1] * SOLID_FACTOR * 0.4 * cellW;
+            cRz = center.z + oz[i1] * SOLID_FACTOR * 0.4 * cellW;
           } else if (map.hasRiverThroughEdge(col, row, (i + 3) % 6)) {
-            cLx = center.x + ox[ip]  * SOLID_FACTOR * 0.25;
-            cLz = center.z + oz[ip]  * SOLID_FACTOR * 0.25;
-            cRx = center.x + ox[in2] * SOLID_FACTOR * 0.25;
-            cRz = center.z + oz[in2] * SOLID_FACTOR * 0.25;
+            cLx = center.x + ox[ip]  * SOLID_FACTOR * 0.25 * cellW;
+            cLz = center.z + oz[ip]  * SOLID_FACTOR * 0.25 * cellW;
+            cRx = center.x + ox[in2] * SOLID_FACTOR * 0.25 * cellW;
+            cRz = center.z + oz[in2] * SOLID_FACTOR * 0.25 * cellW;
           } else if (map.hasRiverThroughEdge(col, row, i1)) {
+            const f = Math.min(0.85, (2 / 3) * cellW);
             cLx = center.x; cLz = center.z;
-            cRx = center.x + ox[i1] * SOLID_FACTOR * (2 / 3);
-            cRz = center.z + oz[i1] * SOLID_FACTOR * (2 / 3);
+            cRx = center.x + ox[i1] * SOLID_FACTOR * f;
+            cRz = center.z + oz[i1] * SOLID_FACTOR * f;
           } else if (map.hasRiverThroughEdge(col, row, ip)) {
-            cLx = center.x + ox[i] * SOLID_FACTOR * (2 / 3);
-            cLz = center.z + oz[i] * SOLID_FACTOR * (2 / 3);
+            const f = Math.min(0.85, (2 / 3) * cellW);
+            cLx = center.x + ox[i] * SOLID_FACTOR * f;
+            cLz = center.z + oz[i] * SOLID_FACTOR * f;
             cRx = center.x; cRz = center.z;
           } else if (map.hasRiverThroughEdge(col, row, in2)) {
             cLx = center.x; cLz = center.z;
-            cRx = center.x + (ox[i1] + ox[in2]) * SOLID_FACTOR * 0.25 * INNER_TO_OUTER;
-            cRz = center.z + (oz[i1] + oz[in2]) * SOLID_FACTOR * 0.25 * INNER_TO_OUTER;
+            cRx = center.x + (ox[i1] + ox[in2]) * SOLID_FACTOR * 0.25 * INNER_TO_OUTER * cellW;
+            cRz = center.z + (oz[i1] + oz[in2]) * SOLID_FACTOR * 0.25 * INNER_TO_OUTER * cellW;
           } else {
-            cLx = center.x + (ox[ip] + ox[i]) * SOLID_FACTOR * 0.25 * INNER_TO_OUTER;
-            cLz = center.z + (oz[ip] + oz[i]) * SOLID_FACTOR * 0.25 * INNER_TO_OUTER;
+            cLx = center.x + (ox[ip] + ox[i]) * SOLID_FACTOR * 0.25 * INNER_TO_OUTER * cellW;
+            cLz = center.z + (oz[ip] + oz[i]) * SOLID_FACTOR * 0.25 * INNER_TO_OUTER * cellW;
             cRx = center.x; cRz = center.z;
           }
 
@@ -458,13 +476,21 @@ export function buildRiverGeometry(
       }
 
       // Confluence junction cap: with 3+ channels meeting in one cell, the
-      // per-edge segments no longer share their inner corner points, leaving a
-      // hole at the cell center. Fan-fill between consecutive segments (a.cR →
+      // per-edge segments no longer share their inner corner points, leaving
+      // holes at the cell center. Two fans are needed: the mouth sectors
+      // (center → each segment's cL–cR chord — the per-edge "mouth triangle"
+      // is degenerate by construction, so the channel quads stop AT the
+      // chord), and the bank sectors between consecutive segments (a.cR →
       // next segment's cL, going around in edge order).
       if (ringPts.length >= 3) {
         for (let k = 0; k < ringPts.length; k++) {
           const a = ringPts[k];
           const b = ringPts[(k + 1) % ringPts.length];
+          addTri(
+            center.x, ry, center.z, 0.5, 0.8,
+            a.cLx,    ry, a.cLz,    0.3, 0.8,
+            a.cRx,    ry, a.cRz,    0.7, 0.8,
+          );
           addTri(
             center.x, ry, center.z, 0.5, 0.8,
             a.cRx,    ry, a.cRz,    0.5, 0.8,
@@ -549,10 +575,10 @@ export function computeRiverOwnership(
  * the flow of every upstream cell draining into it, so confluences sum their
  * tributaries. Returns cellKey (row * width + col) → flow (≥ 1).
  *
- * Derived data — nothing is stored on the map. Intended for gameplay (bridge
- * costs, fishing yields, …) and as the input for future flow-dependent channel
- * width rendering (which also requires the terrain stream bed to widen in
- * lockstep — see ROADMAP).
+ * Derived data — nothing is stored on the map. Used for gameplay (bridge
+ * costs, fishing yields, …) and as the input for flow-dependent channel width
+ * rendering: ChunkManager caches this map-wide and injects it into both
+ * geometry builders as `riverFlow` (see RiverWidth.ts).
  *
  * @param edgeDirs Edge-index → HEX_DIRECTIONS mapping (layout.orientation.edgeDirections).
  */

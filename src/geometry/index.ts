@@ -1,6 +1,8 @@
 export * from './HexGeometry.js';
 export type { WaterGeometryOptions } from './WaterChunk.js';
 export * from './HexPicking.js';
+export * from './HexPicker.js';
+export * from './CellOverlayLayer.js';
 export * from './HexChunk.js';
 export * from './ChunkManager.js';
 export * from './FogData.js';
@@ -16,3 +18,4 @@ export * from './ScatterTypes.js';
 export * from './ScatterBuilder.js';
 export * from './TerrainTypes.js';
 export * from './LiquidTypes.js';
+export * from './RiverWidth.js';

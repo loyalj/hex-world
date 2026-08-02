@@ -7,6 +7,8 @@ import {
   TerrainType,
 } from './HexCell.js';
 import { HEX_DIRECTIONS } from '../math/HexCoord.js';
+import type { HexOrientation } from '../math/HexOrientation.js';
+import { MapTransaction, type MapEdit } from './MapEdit.js';
 
 export interface HexMapOptions {
   width: number;
@@ -280,6 +282,82 @@ export class HexMap {
     } else {
       this.roadBits[idx] &= ~(1 << edgeIndex);
     }
+  }
+
+  /**
+   * The cell on the other side of the given edge, plus that cell's edge index
+   * for the shared edge. Returns `null` when the neighbour is off-map.
+   * Needs the layout orientation because edge indices are orientation-specific.
+   */
+  roadEdgeNeighbor(
+    col: number,
+    row: number,
+    edgeIndex: number,
+    orientation: HexOrientation,
+  ): { col: number; row: number; edge: number } | null {
+    const dir = orientation.edgeDirections[edgeIndex];
+    const q   = col - (row - (row & 1)) / 2;
+    const nq  = q   + HEX_DIRECTIONS[dir].q;
+    const nr  = row + HEX_DIRECTIONS[dir].r;
+    const nc  = nq  + (nr - (nr & 1)) / 2;
+    if (!this.inBounds(nc, nr)) return null;
+    const nEdge = orientation.edgeDirections.indexOf((dir + 3) % 6);
+    return { col: nc, row: nr, edge: nEdge };
+  }
+
+  /**
+   * Set or clear a road through an edge on BOTH cells that share it — road
+   * rendering requires the half-edges to agree, and keeping that invariant by
+   * hand is error-prone. Returns the affected cells (one if the neighbour is
+   * off-map) so callers can mark them dirty.
+   */
+  setRoadEdge(
+    col: number,
+    row: number,
+    edgeIndex: number,
+    state: boolean,
+    orientation: HexOrientation,
+  ): Array<{ col: number; row: number }> {
+    this.setRoad(col, row, edgeIndex, state);
+    const affected: Array<{ col: number; row: number }> = [{ col, row }];
+    const n = this.roadEdgeNeighbor(col, row, edgeIndex, orientation);
+    if (n) {
+      this.setRoad(n.col, n.row, n.edge, state);
+      affected.push({ col: n.col, row: n.row });
+    }
+    return affected;
+  }
+
+  // --- Edit transactions ---
+
+  /**
+   * Start a transaction for a multi-event interaction (e.g. a paint stroke):
+   * mutate through the returned `MapTransaction` as events arrive, then call
+   * `commit()` once to get a replayable {@link MapEdit} for undo/redo.
+   * Mutations apply to the map immediately; the transaction only records
+   * before/after snapshots of the touched cells.
+   */
+  beginEdit(): MapTransaction {
+    return new MapTransaction(this);
+  }
+
+  /**
+   * Run a batch of edits as a single undoable unit.
+   * Returns a {@link MapEdit}; pass its `cells` to
+   * `ChunkManager.markDirtyCells()` and keep it for undo/redo.
+   *
+   * @example
+   * const edit = map.edit(tx => {
+   *   tx.setTerrain(4, 4, TerrainType.Water);
+   *   tx.setElevation(4, 4, -1);
+   * });
+   * chunks.markDirtyCells(edit.cells);
+   * // later: edit.undo(); chunks.markDirtyCells(edit.cells);
+   */
+  edit(fn: (tx: MapTransaction) => void): MapEdit {
+    const tx = this.beginEdit();
+    fn(tx);
+    return tx.commit();
   }
 
   // --- Iteration ---
