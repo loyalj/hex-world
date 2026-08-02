@@ -3,7 +3,7 @@ import type { HexLayout } from '../math/HexLayout.js';
 import { hexToWorld, hexCorners } from '../math/HexLayout.js';
 import { HEX_DIRECTIONS } from '../math/HexCoord.js';
 import type { HexMap } from '../map/HexMap.js';
-import { STREAM_BED_ELEVATION_OFFSET } from '../map/HexCell.js';
+import { STREAM_BED_ELEVATION_OFFSET, ELEVATION_SCALE } from '../map/HexCell.js';
 import { sampleNoise } from '../math/Noise.js';
 import type { TerrainDefinition } from './TerrainTypes.js';
 import { DEFAULT_TERRAIN_LOOKUP } from './TerrainTypes.js';
@@ -64,13 +64,32 @@ export interface ChunkGeometries {
   roads: THREE.BufferGeometry | null;
 }
 
+// ---------------------------------------------------------------------------
+// Reusable scratch buffers, grown on demand and shared across builds. Worst-case
+// sizing for a 32×32 chunk is ~69 MB across the four vertex arrays — allocating
+// that per build (and retaining it via subarray views) dominated streaming cost.
+// buildChunkGeometry is synchronous and single-threaded; the returned geometry
+// copies (`.slice`) only the used range, so the scratch is free for reuse the
+// moment the function returns.
+// ---------------------------------------------------------------------------
+let scratchVertCap      = 0;
+let scratchPositions    = new Float32Array(0);
+let scratchColors       = new Float32Array(0);
+let scratchTerrainTypes = new Float32Array(0);
+let scratchCellIndices  = new Float32Array(0);
+let scratchRoadCap = 0;
+let scratchRPos = new Float32Array(0);
+let scratchRUV  = new Float32Array(0);
+let scratchRCol = new Float32Array(0);
+let scratchRCi  = new Float32Array(0);
+
 export function buildChunkGeometry(
   map: HexMap,
   layout: HexLayout,
   bounds: ChunkBounds,
   opts: ChunkGeometryOptions = {},
 ): ChunkGeometries {
-  const elevScale           = opts.elevationScale      ?? 0.5;
+  const elevScale           = opts.elevationScale      ?? ELEVATION_SCALE;
   const perturbStrength     = opts.perturbStrength      ?? 0.8;
   const elevPerturbStrength = opts.elevPerturbStrength  ?? 0.2;
   const noiseScale          = opts.noiseScale           ?? 0.35;
@@ -90,20 +109,34 @@ export function buildChunkGeometry(
   const { colStart, colEnd, rowStart, rowEnd } = bounds;
   const hexCount  = (colEnd - colStart) * (rowEnd - rowStart);
 
-  const maxVerts  = hexCount * 1400;
-  const positions = new Float32Array(maxVerts * 3);
-  const colors    = new Float32Array(maxVerts * 3);
-  const terrainTypes = isSplat ? new Float32Array(maxVerts * 3) : null;
-  const cellIndices  = new Float32Array(maxVerts * 3);
+  const maxVerts = hexCount * 1400;
+  if (maxVerts > scratchVertCap) {
+    scratchVertCap  = maxVerts;
+    scratchPositions    = new Float32Array(maxVerts * 3);
+    scratchColors       = new Float32Array(maxVerts * 3);
+    scratchTerrainTypes = new Float32Array(maxVerts * 3);
+    scratchCellIndices  = new Float32Array(maxVerts * 3);
+  }
+  const positions    = scratchPositions;
+  const colors       = scratchColors;
+  const terrainTypes = isSplat ? scratchTerrainTypes : null;
+  const cellIndices  = scratchCellIndices;
   let vi = 0, tti = 0, cii = 0;
   let curCx = 0, curCy = 0, curCz = 0;
   const setCi = (cx: number, cy: number, cz: number) => { curCx = cx; curCy = cy; curCz = cz; };
 
   const maxRoadVerts = hexCount * 300;
-  const rPos = new Float32Array(maxRoadVerts * 3);
-  const rUV  = new Float32Array(maxRoadVerts * 2);
-  const rCol = new Float32Array(maxRoadVerts * 3);
-  const rCi  = new Float32Array(maxRoadVerts);
+  if (maxRoadVerts > scratchRoadCap) {
+    scratchRoadCap = maxRoadVerts;
+    scratchRPos = new Float32Array(maxRoadVerts * 3);
+    scratchRUV  = new Float32Array(maxRoadVerts * 2);
+    scratchRCol = new Float32Array(maxRoadVerts * 3);
+    scratchRCi  = new Float32Array(maxRoadVerts);
+  }
+  const rPos = scratchRPos;
+  const rUV  = scratchRUV;
+  const rCol = scratchRCol;
+  const rCi  = scratchRCi;
   let rvi = 0, rui = 0, rCii = 0;
 
   // ---- perturbation ----
@@ -558,6 +591,16 @@ export function buildChunkGeometry(
       const ownBedY      = streamBedY(col, row);
       const hasRiverCell = map.hasRiver(col, row);
 
+      // 3+ channels meeting in one cell (confluence): the pairwise channel
+      // cases below can't tile the center — junction cells use symmetric
+      // channel mouths plus a sunken basin cap emitted after the edge loop.
+      let riverEdgeCount = 0;
+      if (hasRiverCell) {
+        for (let f = 0; f < 6; f++) if (map.hasRiverThroughEdge(col, row, f)) riverEdgeCount++;
+      }
+      const isJunction = riverEdgeCount >= 3 && !map.hasRiverBeginOrEnd(col, row);
+      const junctionRing: Array<{ x: number; y: number; z: number }> = [];
+
       const AO_STRENGTH = 0.4;
       const faceAO: number[] = [];
       for (let f = 0; f < 6; f++) {
@@ -612,6 +655,20 @@ export function buildChunkGeometry(
               ownCi, nbRoadCi,
             );
           }
+
+        } else if (isJunction && !map.hasRiverThroughEdge(col, row, i)) {
+          // Junction bank wedge: flat strip from the corner chord (B_i–B_i1)
+          // to the outer edge ring. Its flanks run straight down the corner
+          // radials — exactly the adjacent channels' flank lines — so every
+          // seam of the junction shares endpoints and is colinear (no slivers).
+          const bIx = center.x + ox[i]  * SOLID_FACTOR * 0.4, bIz = center.z + oz[i]  * SOLID_FACTOR * 0.4;
+          const bJx = center.x + ox[i1] * SOLID_FACTOR * 0.4, bJz = center.z + oz[i1] * SOLID_FACTOR * 0.4;
+          addTri(bIx,ownY,bIz,sr,sg,sb, e1x,ownY,e1z,sr,sg,sb, e2x,ownY,e2z,sr,sg,sb, tt,ot,ot);
+          addTri(bIx,ownY,bIz,sr,sg,sb, e2x,ownY,e2z,sr,sg,sb, e3x,ownY,e3z,sr,sg,sb, tt,ot,ot);
+          addTri(bIx,ownY,bIz,sr,sg,sb, e3x,ownY,e3z,sr,sg,sb, bJx,ownY,bJz,sr,sg,sb, tt,ot,ot);
+          addTri(bJx,ownY,bJz,sr,sg,sb, e3x,ownY,e3z,sr,sg,sb, e4x,ownY,e4z,sr,sg,sb, tt,ot,ot);
+          addTri(bJx,ownY,bJz,sr,sg,sb, e4x,ownY,e4z,sr,sg,sb, e5x,ownY,e5z,sr,sg,sb, tt,ot,ot);
+          junctionRing.push({ x: bIx, y: ownY, z: bIz }, { x: bJx, y: ownY, z: bJz });
 
         } else if (!map.hasRiverThroughEdge(col, row, i)) {
           const in1 = i1, ip = (i + 5) % 6, ip2 = (i + 4) % 6, in2 = (i + 2) % 6;
@@ -709,6 +766,26 @@ export function buildChunkGeometry(
             if (nextHasRiver)     triangulateRoadEdge(rcx,ownY,rcz, mRx,ownY,mRz, cx,ownY,cz, roadColor(ownTerrain), ownCi);
           })();
 
+        } else if (isJunction) {
+          // Junction channel edge: direct triangulation of the 8-gon
+          // (B_i, e1..e5, B_i1, cc) with a V-groove running from the mouth
+          // center (cc, at bed depth) to the outer bed point (e3). Flanks run
+          // straight down the corner radials, matching the bank wedges above.
+          const bIx = center.x + ox[i]  * SOLID_FACTOR * 0.4, bIz = center.z + oz[i]  * SOLID_FACTOR * 0.4;
+          const bJx = center.x + ox[i1] * SOLID_FACTOR * 0.4, bJz = center.z + oz[i1] * SOLID_FACTOR * 0.4;
+          const ccx = (bIx + bJx) * 0.5, ccz = (bIz + bJz) * 0.5;
+          addTri(bIx,ownY,bIz,sr,sg,sb,     e1x,ownY,e1z,sr,sg,sb,     e2x,ownY,e2z,sr,sg,sb, tt,ot,ot);
+          addTri(bIx,ownY,bIz,sr,sg,sb,     e2x,ownY,e2z,sr,sg,sb,     ccx,ownBedY,ccz,sr,sg,sb, tt,ot,ot);
+          addTri(ccx,ownBedY,ccz,sr,sg,sb,  e2x,ownY,e2z,sr,sg,sb,     e3x,ownBedY,e3z,sr,sg,sb, tt,ot,ot);
+          addTri(ccx,ownBedY,ccz,sr,sg,sb,  e3x,ownBedY,e3z,sr,sg,sb,  e4x,ownY,e4z,sr,sg,sb, tt,ot,ot);
+          addTri(ccx,ownBedY,ccz,sr,sg,sb,  e4x,ownY,e4z,sr,sg,sb,     bJx,ownY,bJz,sr,sg,sb, tt,ot,ot);
+          addTri(bJx,ownY,bJz,sr,sg,sb,     e4x,ownY,e4z,sr,sg,sb,     e5x,ownY,e5z,sr,sg,sb, tt,ot,ot);
+          junctionRing.push(
+            { x: bIx, y: ownY, z: bIz },
+            { x: ccx, y: ownBedY, z: ccz },
+            { x: bJx, y: ownY, z: bJz },
+          );
+
         } else if (map.hasRiverBeginOrEnd(col, row)) {
           const e3y = ownBedY;
           const m1x = (center.x + e1x) * 0.5, m1z = (center.z + e1z) * 0.5;
@@ -768,6 +845,23 @@ export function buildChunkGeometry(
           addQuad(cLx,ownY,cLz,sr,sg,sb, ccx,ccy,ccz,sr,sg,sb, m2x,ownY,m2z,sr,sg,sb, m3x,m3y,m3z,sr,sg,sb, tt,ot,ot);
           addQuad(ccx,ccy,ccz,sr,sg,sb, cRx,ownY,cRz,sr,sg,sb, m3x,m3y,m3z,sr,sg,sb, m4x,ownY,m4z,sr,sg,sb, tt,ot,ot);
           addTri (cRx,ownY,cRz,sr,sg,sb, m4x,ownY,m4z,sr,sg,sb, m5x,ownY,m5z,sr,sg,sb, tt,ot,ot);
+        }
+      }
+
+      // Confluence basin: fan from a sunken center over the ring of channel
+      // mouths and bank points, so junction cells have no hole or crossing
+      // slivers at the center. The river water surface renders above this bed.
+      if (isJunction && junctionRing.length >= 3) {
+        setCi(ownCi, ownCi, ownCi);
+        for (let k = 0; k < junctionRing.length; k++) {
+          const a = junctionRing[k];
+          const b = junctionRing[(k + 1) % junctionRing.length];
+          addTri(
+            center.x, ownBedY, center.z, sr, sg, sb,
+            a.x, a.y, a.z, sr, sg, sb,
+            b.x, b.y, b.z, sr, sg, sb,
+            ownType, ownType, ownType,
+          );
         }
       }
 
@@ -920,13 +1014,16 @@ export function buildChunkGeometry(
     }
   }
 
+  // .slice (not .subarray): a subarray view would pin the entire scratch
+  // allocation in memory for the lifetime of the geometry AND alias the next
+  // build's writes. slice copies exactly the used range.
   const n   = vi / 3;
   const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position',   new THREE.BufferAttribute(positions.subarray(0, n * 3), 3));
-  geo.setAttribute('color',      new THREE.BufferAttribute(colors.subarray(0, n * 3), 3));
-  geo.setAttribute('cellIndex',  new THREE.BufferAttribute(cellIndices.subarray(0, n * 3), 3));
+  geo.setAttribute('position',   new THREE.BufferAttribute(positions.slice(0, n * 3), 3));
+  geo.setAttribute('color',      new THREE.BufferAttribute(colors.slice(0, n * 3), 3));
+  geo.setAttribute('cellIndex',  new THREE.BufferAttribute(cellIndices.slice(0, n * 3), 3));
   if (isSplat && terrainTypes) {
-    geo.setAttribute('terrainType', new THREE.BufferAttribute(terrainTypes.subarray(0, n * 3), 3));
+    geo.setAttribute('terrainType', new THREE.BufferAttribute(terrainTypes.slice(0, n * 3), 3));
   }
   geo.computeVertexNormals();
 
@@ -934,10 +1031,10 @@ export function buildChunkGeometry(
   if (rvi > 0) {
     const rn = rvi / 3;
     roadsGeo = new THREE.BufferGeometry();
-    roadsGeo.setAttribute('position',  new THREE.BufferAttribute(rPos.subarray(0, rvi), 3));
-    roadsGeo.setAttribute('uv',        new THREE.BufferAttribute(rUV.subarray(0, rui), 2));
-    roadsGeo.setAttribute('color',     new THREE.BufferAttribute(rCol.subarray(0, rvi), 3));
-    roadsGeo.setAttribute('cellIndex', new THREE.BufferAttribute(rCi.subarray(0, rn), 1));
+    roadsGeo.setAttribute('position',  new THREE.BufferAttribute(rPos.slice(0, rvi), 3));
+    roadsGeo.setAttribute('uv',        new THREE.BufferAttribute(rUV.slice(0, rui), 2));
+    roadsGeo.setAttribute('color',     new THREE.BufferAttribute(rCol.slice(0, rvi), 3));
+    roadsGeo.setAttribute('cellIndex', new THREE.BufferAttribute(rCi.slice(0, rn), 1));
     roadsGeo.computeVertexNormals();
   }
 

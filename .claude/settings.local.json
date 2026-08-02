@@ -25,7 +25,8 @@
       "Bash(npm run *)"
     ],
     "additionalDirectories": [
-      "C:\\Users\\loyal\\.claude\\projects\\d--Coding-hex-world\\ef551f1b-c5cb-4cf2-8696-3be1d9fe7853\\tool-results"
+      "C:\\Users\\loyal\\.claude\\projects\\d--Coding-hex-world\\ef551f1b-c5cb-4cf2-8696-3be1d9fe7853\\tool-results",
+      "d:\\Coding\\hex-world-editor"
     ]
   }
 }

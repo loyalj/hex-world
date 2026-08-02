@@ -11,3 +11,5 @@ export * from './TemperatureModel.js';
 export * from './BiomeAssigner.js';
 export * from './RiverGenerator.js';
 export * from './RoadGenerator.js';
+export * from './MountainLakePlugin.js';
+export * from './LiquidShowcasePlugin.js';

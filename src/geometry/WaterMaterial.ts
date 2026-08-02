@@ -114,6 +114,24 @@ export const WATER_GLSL = /* glsl */`
 
 // ---------------------------------------------------------------------------
 
+/** Shared appearance uniform declarations + final-color helper for liquid shaders. */
+export const LIQUID_APPEARANCE_GLSL = /* glsl */`
+  uniform float uOpacity;
+  uniform float uFlowSpeed;
+  uniform float uWaveScale;
+  uniform float uFoamIntensity;
+  uniform vec3  uEmissive;
+  uniform float uEmissiveStrength;
+
+  // Emissive is nearly exempt from fog dimming — a glowing surface should
+  // punch through explored-but-unseen darkness at close to full strength
+  // (hidden unexplored cells still vanish via the explored alpha term).
+  vec4 liquidOutput(vec3 color, float visibility, float explored) {
+    vec3 lit = color * visibility + uEmissive * uEmissiveStrength * mix(0.75, 1.0, visibility);
+    return vec4(lit, uOpacity * explored);
+  }
+`;
+
 const vertexShader = /* glsl */`
   ${FOG_VERT_DECL}
   attribute float depth;
@@ -137,16 +155,17 @@ const fragmentShader = /* glsl */`
   varying float vDepth;
 
   ${WATER_GLSL}
+  ${LIQUID_APPEARANCE_GLSL}
 
   void main() {
     vec3 color = mix(uShallow, uDeep, vDepth);
-    float hl = waterNoise(vec3(vWorldXZ * 4.5, uTime * 0.2));
+    float hl = waterNoise(vec3(vWorldXZ * 4.5 * uWaveScale, uTime * uFlowSpeed * 0.2));
     color += hl * 0.2;
-    gl_FragColor = vec4(color * vVisibility, 0.82 * vExplored);
+    gl_FragColor = liquidOutput(color, vVisibility, vExplored);
   }
 `;
 
-/** Per-liquid color options for createWaterMaterial / createWaterShoreMaterial / createEstuaryMaterial. */
+/** Per-liquid color and appearance options for the four liquid material factories. */
 export interface LiquidColorOptions {
   /** Shallow-water / surface liquid color. Default: blue-green water. */
   shallow?: THREE.Color;
@@ -154,6 +173,33 @@ export interface LiquidColorOptions {
   deep?: THREE.Color;
   /** Foam / crest color (shore and estuary materials). Default: near-white. */
   foam?: THREE.Color;
+  /** Surface alpha 0–1. Default 0.82 (0.78 for the river material). */
+  opacity?: number;
+  /** Animation time multiplier for waves/foam/flow. Default 1. */
+  flowSpeed?: number;
+  /** Self-illumination color, scaled by emissiveStrength. Default black. */
+  emissive?: THREE.Color;
+  /** Emissive intensity; only partially dimmed by fog-of-war. Default 0. */
+  emissiveStrength?: number;
+  /** Surface-noise frequency multiplier. Default 1. */
+  waveScale?: number;
+  /** Shore/estuary foam intensity multiplier. Default 1. */
+  foamIntensity?: number;
+}
+
+/** Builds the uniform set matching LIQUID_APPEARANCE_GLSL. */
+export function liquidAppearanceUniforms(
+  colors: LiquidColorOptions | undefined,
+  defaultOpacity: number,
+): Record<string, THREE.IUniform> {
+  return {
+    uOpacity:          { value: colors?.opacity          ?? defaultOpacity },
+    uFlowSpeed:        { value: colors?.flowSpeed        ?? 1 },
+    uWaveScale:        { value: colors?.waveScale        ?? 1 },
+    uFoamIntensity:    { value: colors?.foamIntensity    ?? 1 },
+    uEmissive:         { value: colors?.emissive         ?? new THREE.Color(0, 0, 0) },
+    uEmissiveStrength: { value: colors?.emissiveStrength ?? 0 },
+  };
 }
 
 export function createWaterMaterial(colors?: LiquidColorOptions): THREE.ShaderMaterial {
@@ -164,6 +210,7 @@ export function createWaterMaterial(colors?: LiquidColorOptions): THREE.ShaderMa
       uTime:    { value: 0 },
       uShallow: { value: shallow },
       uDeep:    { value: deep },
+      ...liquidAppearanceUniforms(colors, 0.82),
       ...fogUniforms(),
     },
     vertexShader,

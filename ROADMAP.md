@@ -51,71 +51,71 @@ the library so both the editor and games built on hex-world get it.
   `allWaterTerrains` argument that `loadChunk` passes
   (`src/geometry/ChunkManager.ts:473` vs `:293`), so after any `markDirty` edit,
   scatter can spawn on custom liquid cells (lava/acid). One-line fix.
-- [ ] **Scratch buffer churn** — `buildChunkGeometry` allocates ~69 MB of transient
+- [x] **Scratch buffer churn** — `buildChunkGeometry` allocates ~69 MB of transient
   `Float32Array`s per 32×32 chunk build and discards them
   (`src/geometry/HexChunk.ts:93`). Hoist to reusable module-scope buffers; this is the
   dominant GC/perf cost during streaming.
-- [ ] **Unguarded `uTime` uniform access** — `ChunkManager.update()` sets
+- [x] **Unguarded `uTime` uniform access** — `ChunkManager.update()` sets
   `uniforms.uTime.value` on any liquid `ShaderMaterial`
   (`src/geometry/ChunkManager.ts:351`). A custom material without `uTime` throws every
   frame. Guard with `'uTime' in uniforms` like `_pushFogUniform` does.
-- [ ] **Document `dispose()` scope** — `ChunkManager.dispose()` unloads chunks but
+- [x] **Document `dispose()` scope** — `ChunkManager.dispose()` unloads chunks but
   never frees the terrain material, texture array, liquid materials, or
   `FogData.texture` (`src/geometry/ChunkManager.ts:597`). Document that the caller
   owns what it passed in (or add an `ownsMaterials` option).
 
 ### Generators
 
-- [ ] **`POINTY_TOP` hard-coded in generation** — `RoadGenerator` and `RiverGenerator`
+- [x] **`POINTY_TOP` hard-coded in generation** — `RoadGenerator` and `RiverGenerator`
   capture `POINTY_TOP.edgeDirections` at module load (`src/generators/RoadGenerator.ts:6`,
   `src/generators/RiverGenerator.ts:7`), breaking flat-top layouts silently. Accept the
   orientation (or layout) as a parameter.
-- [ ] **Non-reentrant module state** — `ChunkTerrainGenerator` keeps `frontier` /
+- [x] **Non-reentrant module state** — `ChunkTerrainGenerator` keeps `frontier` /
   `inFrontier` as module singletons (`src/generators/ChunkTerrainGenerator.ts:50`).
   Make them instance-local or document non-reentrancy.
-- [ ] **Silent `guard < 10000` cap** — high `landPercentage` on small maps can spin the
+- [x] **Silent `guard < 10000` cap** — high `landPercentage` on small maps can spin the
   raise loop to the cap with no signal (`src/generators/ChunkTerrainGenerator.ts:174`).
   Warn or surface the shortfall.
-- [ ] **Plugin exposure inconsistency** — `MountainLakePlugin` and
+- [x] **Plugin exposure inconsistency** — `MountainLakePlugin` and
   `LiquidShowcasePlugin` live in `src/generators` but are not exported from
   `generators/index.ts`. Either export them or move them under `src/demo`.
 
 ### Map / serialization
 
-- [ ] **Version compatibility strategy** — both deserializers hard-throw on
+- [x] **Version compatibility strategy** — both deserializers hard-throw on
   `version !== 1` (`src/map/MapSerializer.ts:77`, `:175`) with no migration hook. Add a
   supported-version range + per-version migration before `VERSION` ever bumps;
   otherwise every saved map and `.hexpack` is one bump from unloadable. Raised
   priority: hex-world-editor saves maps users invest real time in.
-- [ ] **Truncated binary loads silently** — `deserializeMap` copies via `subarray`
+- [x] **Truncated binary loads silently** — `deserializeMap` copies via `subarray`
   with no length validation (`src/map/MapSerializer.ts:88`), so a short file yields a
   partially zero-filled map instead of an error. Validate expected byte length (and
   consider a checksum).
-- [ ] **Binary format drops metadata** — `serializeMap` keeps only
+- [x] **Binary format drops metadata** — `serializeMap` keeps only
   width/height/featureLayerCount; name/seed/generator are lost, and binary is the
   default pack format (`src/pack/HexPack.ts:273`). Persist metadata in binary too, or
   document the limitation and steer packs to JSON when metadata matters.
-- [ ] **`OffscreenCanvas` without feature detection** — `MapImageRenderer` throws on
+- [x] **`OffscreenCanvas` without feature detection** — `MapImageRenderer` throws on
   platforms without it (`src/map/MapImageRenderer.ts:99`). Feature-detect and fall back
   to a DOM canvas. Also remove the stale `// Pass 2` comment.
 
 ### Pathfinding / units / camera
 
-- [ ] **Single-source the elevation scale** — `0.5` is independently hard-coded in
+- [x] **Single-source the elevation scale** — `0.5` is independently hard-coded in
   `src/units/HexUnit.ts:7`, `src/pathfinding/Pathfinding.ts:3`,
   `src/geometry/ScatterBuilder.ts:21`, and defaulted in `src/geometry/HexChunk.ts:73`.
   Any custom `elevationScale` makes units/scatter/LOS disagree with the rendered
   terrain. Export one constant and thread it through. hex-world-editor carries a
   fourth copy (`src/scene.ts:21`) — external proof the constant leaks to consumers.
-- [ ] **A\* heuristic admissibility** — `findPath` uses raw `hexDistance`
+- [x] **A\* heuristic admissibility** — `findPath` uses raw `hexDistance`
   (`src/pathfinding/Pathfinding.ts:118`), which assumes step cost ≥ 1, but `roadCost`
   invites cheaper roads. Document the ≥ 1 contract loudly or scale the heuristic by the
   minimum possible cost.
-- [ ] **Unit Y-placement ignores terrain perturbation and water surfaces** —
+- [x] **Unit Y-placement ignores terrain perturbation and water surfaces** —
   `HexUnit._loadSegment` uses raw `getElevation * 0.5`
   (`src/units/HexUnit.ts:162`), so units don't sit exactly on the perturbed surface and
   have no notion of water-surface height. Consult the same Y formula the terrain uses.
-- [ ] **`getVisibleCells` uses `Array.shift()`** — O(n) per pop in the fog hot path
+- [x] **`getVisibleCells` uses `Array.shift()`** — O(n) per pop in the fog hot path
   (`src/pathfinding/Pathfinding.ts:252`). Use an index cursor.
 
 ---
@@ -127,48 +127,57 @@ water) with richer motion, at equal or better performance.
 
 ### Descriptor-driven appearance (highest visual payoff)
 
-- [ ] **`opacity`** — currently hard-coded at 0.82 in all four shaders. Lava wants
+- [x] **`opacity`** — currently hard-coded at 0.82 in all four shaders. Lava wants
   ~1.0; per-liquid alpha is the single biggest "tinted water" tell.
-- [ ] **`flowSpeed` / animation time scale** — wave, foam, and river-flow rates are
+- [x] **`flowSpeed` / animation time scale** — wave, foam, and river-flow rates are
   constants in `WATER_GLSL`. Lava should crawl; acid could pulse. One per-liquid time
   multiplier uniform covers all four materials.
-- [ ] **`emissive` + `emissiveStrength`** — lava doesn't glow and fog-of-war dims it
+- [x] **`emissive` + `emissiveStrength`** — lava doesn't glow and fog-of-war dims it
   like water. An emissive term in the fragment shaders (exempt or partially exempt
   from fog dimming) would transform it.
-- [ ] **`waveScale` / foam tuning** — expose the surface-noise frequency and foam
+- [x] **`waveScale` / foam tuning** — expose the surface-noise frequency and foam
   band parameters that are currently baked into the GLSL.
-- [ ] All new fields live on `LiquidTypeDescriptor` (JSON-safe, serialized with maps,
+- [x] All new fields live on `LiquidTypeDescriptor` (JSON-safe, serialized with maps,
   resolved by `resolveLiquidMaterials`), so packs and saves carry the look.
 
 ### Depth and color
 
-- [ ] **Revive the shallow→deep gradient** — every generator places floors at exactly
+- [x] **Revive the shallow→deep gradient** — every generator places floors at exactly
   surface − 1, so `depth ≈ 0.11` everywhere and `deepColor` never shows
   (`src/geometry/WaterChunk.ts:100`). Derive depth from distance-to-shore (BFS from
   land cells, cheap at build time) or actual bathymetry where generators carve deeper.
 
 ### Rivers
 
-- [ ] **Waterfall geometry** — a river crossing a cliff currently renders as one
+- [x] **Waterfall geometry** — a river crossing a cliff currently renders as one
   steep stretched quad. Emit dedicated waterfall geometry (and faster UV flow) when
   the elevation drop exceeds the cliff threshold.
-- [ ] **Confluences / width / flow volume** — the packed river byte allows one
-  incoming + one outgoing edge per cell (`src/map/HexCell.ts:20`), so tributaries
-  can't join mid-stream and all channels are uniform width. Requires a data-model
-  extension (e.g. incoming edge bitmask + width tier); design before implementing —
-  this touches serialization.
+- [x] **Confluences / flow volume** — `HexMap.riverInBits` stores a per-cell
+  incoming-edge bitmask (multiple tributaries per cell); `setRiverIncoming` is
+  additive with `removeRiverIncoming` / `removeRiverOutgoing` for editing; the
+  cell byte keeps the lowest incoming as the primary. Serialization bumped to
+  v2 with v1→v2 migrations for both formats (first real use of the migration
+  machinery). Generators merge mid-stream; junction cells get a center-cap fan;
+  multi-tributary water cells render an estuary per incoming edge; and
+  `computeRiverFlow` accumulates flow volume down every network (derived, not
+  stored).
+- [ ] **Flow-dependent channel width rendering** — visually widen channels with
+  accumulated flow (`computeRiverFlow` provides the data). Deferred because the
+  water channel and the terrain's carved stream bed (`HexChunk` river-edge
+  triangulation) must widen in lockstep with matching widths across cell
+  borders — a visual-iteration job, not a data change.
 
 ### Performance / infrastructure
 
-- [ ] **Map-wide river ownership cache** — drainage classification is re-traced per
+- [x] **Map-wide river ownership cache** — drainage classification is re-traced per
   chunk × per liquid on every rebuild (`src/geometry/WaterChunk.ts:147`). Classify
   once map-wide, invalidate via `markDirty`.
-- [ ] **Incremental `computeWaterSurfaces`** — currently re-floods the entire map
+- [x] **Incremental `computeWaterSurfaces`** — currently re-floods the entire map
   whenever any chunk is dirty (`src/geometry/ChunkManager.ts:364`). Track dirty water
   bodies and re-flood only those.
-- [ ] **Indexed liquid geometry** — all builders emit non-indexed triangles
+- [x] **Indexed liquid geometry** (surface builder done; shore/estuary/river remain non-indexed) — all builders emit non-indexed triangles
   (18 verts/hex for surfaces); vertex sharing would cut memory 2–3×.
-- [ ] **Wrap `uTime`** — `elapsedSeconds` grows unbounded; float precision degrades
+- [x] **Wrap `uTime`** — `elapsedSeconds` grows unbounded; float precision degrades
   shader animation in long sessions (`src/geometry/ChunkManager.ts:349`). Wrap at a
   period that all animation frequencies divide.
 
@@ -218,15 +227,26 @@ a promotion queue — each item shrinks the editor and gives games the same feat
 
 ### Workflow
 
-- [ ] **Link the editor to library HEAD** — the editor depends on published
-  `^0.2.0`, so library changes (e.g. today's liquids fixes) don't reach it until a
-  release. Set up `npm link` or a workspace so the editor tracks HEAD and doubles
-  as the library's integration test.
+- [x] **Link the editor to library HEAD** — done via a conditional Vite alias
+  (not `npm link`): the editor's `vite.config.ts` + `tsconfig.json` `paths` map
+  `@loyalj/hex-world` → `../hex-world/src/index.ts` when the sibling repo exists,
+  falling back to the published npm package otherwise. `package.json` is
+  untouched, so cloners of the editor repo get the npm version with a plain
+  `npm install`. Side effect: the editor now typechecks library HEAD source,
+  which surfaced and fixed two non-erasable syntax issues in the library
+  (`TerrainType` exported `const enum` → `as const` object + widened type;
+  `MinHeap` constructor parameter property → explicit field).
 
 ### Editor follow-ups unlocked by library work
 
 - [ ] **Liquid painting palette** — lava/acid/custom liquids in the editor terrain
   palette (the editor currently ships only `DEFAULT_LIQUID_DESCRIPTORS`), including
   save/load of custom liquid descriptors.
-- [ ] **Liquid appearance editing** — once Part 2 descriptor fields (opacity, flow
-  speed, emissive) land, expose them in the editor UI so packs carry the look.
+- [ ] **Liquid appearance editing** — the Part 2 descriptor fields (opacity, flow
+  speed, emissive, waveScale, foamIntensity) exist; expose them in the editor UI
+  so packs carry the look.
+- [ ] **Confluence-aware river tool** — the editor's river paint/undo
+  (`src/commands.ts` RiverPaintStrokeCommand) snapshots a single incoming
+  direction; update it to snapshot/restore the full incoming mask
+  (`getIncomingRiverMask`) and use `removeRiverIncoming`/`removeRiverOutgoing`
+  for partial detaches.

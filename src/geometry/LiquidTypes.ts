@@ -31,6 +31,28 @@ export interface LiquidTypeDescriptor {
   shallowColor?: number;
   deepColor?: number;
   foamColor?: number;
+  /**
+   * Surface alpha, 0–1. Default 0.82 (0.78 for rivers). Lava wants ~1.0 —
+   * translucency is the biggest "tinted water" tell for thick liquids.
+   */
+  opacity?: number;
+  /**
+   * Animation time multiplier for waves, foam, and river flow. 1 = water
+   * default. Lava crawls around 0.2–0.3; energetic liquids go above 1.
+   */
+  flowSpeed?: number;
+  /**
+   * Hex color added as self-illumination, scaled by emissiveStrength.
+   * Emissive light is only partially dimmed by fog-of-war so lava keeps a
+   * glow in explored-but-unseen cells.
+   */
+  emissiveColor?: number;
+  /** Emissive intensity, 0 = none (default). The built-in lava uses 0.6. */
+  emissiveStrength?: number;
+  /** Surface-noise frequency multiplier. <1 = broader, slower-looking swells. Default 1. */
+  waveScale?: number;
+  /** Shore/estuary foam intensity multiplier. 0 disables foam. Default 1. */
+  foamIntensity?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -64,10 +86,16 @@ export interface LiquidMaterialSet {
 export const DEFAULT_LIQUID_DESCRIPTORS: LiquidTypeDescriptor[] = [
   { id: 'water', name: 'Water',
     shallowColor: 0x527fb3, deepColor: 0x1e477a, foamColor: 0xeaf3ff },
+  // Lava inverts the usual depth reading: deepColor is HOTTER, not darker, so
+  // the pool center looks molten while the edges read as cooling crust.
   { id: 'lava',  name: 'Lava',
-    shallowColor: 0xe6670d, deepColor: 0x8c1a04, foamColor: 0xf2b24c },
+    shallowColor: 0xd45a10, deepColor: 0xffb832, foamColor: 0xf2b24c,
+    opacity: 1.0, flowSpeed: 0.25, waveScale: 0.5,
+    emissiveColor: 0xff5a00, emissiveStrength: 0.6 },
   { id: 'acid',  name: 'Acid',
-    shallowColor: 0x4db318, deepColor: 0x266608, foamColor: 0xb3f266 },
+    shallowColor: 0x4db318, deepColor: 0x266608, foamColor: 0xb3f266,
+    opacity: 0.9, flowSpeed: 0.6,
+    emissiveColor: 0x66ff33, emissiveStrength: 0.15 },
 ];
 
 // ---------------------------------------------------------------------------
@@ -76,18 +104,26 @@ export const DEFAULT_LIQUID_DESCRIPTORS: LiquidTypeDescriptor[] = [
 
 /**
  * Builds a complete LiquidMaterialSet from a LiquidTypeDescriptor.
- * Uses the descriptor's shallowColor / deepColor / foamColor fields if present,
- * falling back to the built-in water defaults for any omitted value.
+ * Colors and appearance fields (opacity, flowSpeed, emissive, waveScale,
+ * foamIntensity) are read from the descriptor; anything omitted falls back to
+ * the built-in water defaults.
  */
 export function resolveLiquidMaterials(descriptor: LiquidTypeDescriptor): LiquidMaterialSet {
-  const shallow = descriptor.shallowColor != null ? new THREE.Color(descriptor.shallowColor) : undefined;
-  const deep    = descriptor.deepColor    != null ? new THREE.Color(descriptor.deepColor)    : undefined;
-  const foam    = descriptor.foamColor    != null ? new THREE.Color(descriptor.foamColor)    : undefined;
-  const colors  = (shallow || deep || foam) ? { shallow, deep, foam } : undefined;
+  const appearance = {
+    shallow: descriptor.shallowColor  != null ? new THREE.Color(descriptor.shallowColor)  : undefined,
+    deep:    descriptor.deepColor     != null ? new THREE.Color(descriptor.deepColor)     : undefined,
+    foam:    descriptor.foamColor     != null ? new THREE.Color(descriptor.foamColor)     : undefined,
+    emissive: descriptor.emissiveColor != null ? new THREE.Color(descriptor.emissiveColor) : undefined,
+    opacity:          descriptor.opacity,
+    flowSpeed:        descriptor.flowSpeed,
+    emissiveStrength: descriptor.emissiveStrength,
+    waveScale:        descriptor.waveScale,
+    foamIntensity:    descriptor.foamIntensity,
+  };
   return {
-    surface: createWaterMaterial(colors),
-    shore:   createWaterShoreMaterial(colors),
-    estuary: createEstuaryMaterial(colors),
-    river:   createRiverMaterial(colors),
+    surface: createWaterMaterial(appearance),
+    shore:   createWaterShoreMaterial(appearance),
+    estuary: createEstuaryMaterial(appearance),
+    river:   createRiverMaterial(appearance),
   };
 }

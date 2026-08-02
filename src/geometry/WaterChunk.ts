@@ -3,7 +3,7 @@ import type { HexLayout } from '../math/HexLayout.js';
 import { hexToWorld, hexCorners } from '../math/HexLayout.js';
 import { HEX_DIRECTIONS } from '../math/HexCoord.js';
 import type { HexMap } from '../map/HexMap.js';
-import { RIVER_SURFACE_ELEVATION_OFFSET } from '../map/HexCell.js';
+import { RIVER_SURFACE_ELEVATION_OFFSET, ELEVATION_SCALE } from '../map/HexCell.js';
 import { DEFAULT_WATER_TERRAIN_INDEX } from './TerrainTypes.js';
 import { sampleNoise } from '../math/Noise.js';
 import type { ChunkBounds } from './HexChunk.js';
@@ -55,6 +55,25 @@ export interface WaterGeometryOptions {
    * terrain index when absent.
    */
   liquidPriorityByTerrain?: Map<number, number>;
+  /**
+   * Cells (row * width + col) whose river channels this liquid should render —
+   * the pre-computed ownership set from ChunkManager's map-wide river
+   * classification cache. When provided, buildRiverGeometry skips its own
+   * per-chunk drainage tracing entirely.
+   */
+  riverCells?: Set<number>;
+  /**
+   * Shore distance (in cells) at which the surface reaches full deep color.
+   * Depth blends the larger of bathymetric depth and shore-distance depth, so
+   * both carved basins and wide bodies read as deep. Default 6.
+   */
+  depthShoreFalloff?: number;
+  /**
+   * Elevation difference at which a river edge renders as a waterfall (level
+   * lip + steep drop) instead of one smooth slope. Should match the terrain's
+   * ChunkGeometryOptions.cliffThreshold; ChunkManager injects it. Default 2.
+   */
+  cliffThreshold?: number;
 }
 
 const SOLID_FACTOR   = 0.8;
@@ -79,27 +98,32 @@ export function buildWaterGeometry(
 ): THREE.BufferGeometry | null {
   const noiseScale    = opts.noiseScale      ?? 0.35;
   const perturbStr    = opts.perturbStrength ?? 0.8;
-  const elevScale     = opts.elevationScale  ?? 0.5;
+  const elevScale     = opts.elevationScale  ?? ELEVATION_SCALE;
   const surfaceLift   = opts.surfaceLift     ?? 0.02;
+  const depthFalloff  = opts.depthShoreFalloff ?? 6;
   const waterTerrains = opts.waterTerrains ?? new Set([DEFAULT_WATER_TERRAIN_INDEX]);
   const isWater = (t: number) => waterTerrains.has(t);
 
   const { colStart, colEnd, rowStart, rowEnd } = bounds;
   const hexCount = (colEnd - colStart) * (rowEnd - rowStart);
-  const maxVerts = hexCount * 18;
+  // Indexed: 7 unique vertices per hex (center + 6 corners), 6 triangles.
+  const maxVerts   = hexCount * 7;
+  const maxIndices = hexCount * 18;
 
   const positions   = new Float32Array(maxVerts * 3);
   const uvs         = new Float32Array(maxVerts * 2);
   const depths      = new Float32Array(maxVerts);
   const cellIndices = new Float32Array(maxVerts);
-  let vi = 0, uvi = 0, di = 0, cii = 0;
+  const indices     = maxVerts > 65535 ? new Uint32Array(maxIndices) : new Uint16Array(maxIndices);
+  let vi = 0, uvi = 0, di = 0, cii = 0, ii = 0;
+  let vertCount = 0;
 
   const perturb = (x: number, z: number): [number, number] => {
     const n = sampleNoise(x * noiseScale, z * noiseScale);
     return [(n[0] * 2 - 1) * perturbStr, (n[2] * 2 - 1) * perturbStr];
   };
 
-  const addVertW = (x: number, z: number, y: number, depth: number, ci: number) => {
+  const addVertW = (x: number, z: number, y: number, depth: number, ci: number): number => {
     const [dx, dz] = perturb(x, z);
     positions[vi++] = x + dx;
     positions[vi++] = y;
@@ -108,7 +132,10 @@ export function buildWaterGeometry(
     uvs[uvi++] = z * UV_WATER_SCALE;
     depths[di++] = depth;
     cellIndices[cii++] = ci;
+    return vertCount++;
   };
+
+  const cornerVerts = new Array<number>(6);
 
   for (let row = rowStart; row < rowEnd; row++) {
     for (let col = colStart; col < colEnd; col++) {
@@ -123,25 +150,34 @@ export function buildWaterGeometry(
       const elev        = map.getElevation(col, row);
       const surfaceElev = map.getWaterSurface(col, row);
       const surfaceY    = surfaceElev * elevScale + surfaceLift;
-      const depth       = Math.min(1.0, Math.max(0.0, (surfaceElev - elev) / 9.0));
+      // Depth drives the shallow→deep color mix. Generators usually place
+      // floors at exactly surface−1, which alone gives a flat ~0.11 — blend in
+      // distance-to-shore so wide bodies actually read as deep.
+      const depthBathy  = (surfaceElev - elev) / 9.0;
+      const depthShore  = Math.min(1.0, map.getShoreDistance(col, row) / depthFalloff);
+      const depth       = Math.min(1.0, Math.max(0.0, Math.max(depthBathy, depthShore)));
 
+      const center = addVertW(c.x, c.z, surfaceY, depth, ci);
+      for (let i = 0; i < 6; i++) {
+        cornerVerts[i] = addVertW(crns[i].x, crns[i].z, surfaceY, depth, ci);
+      }
       for (let i = 0; i < 6; i++) {
         const i1 = (i + 1) % 6;
-        addVertW(c.x,        c.z,        surfaceY, depth, ci);
-        addVertW(crns[i1].x, crns[i1].z, surfaceY, depth, ci);
-        addVertW(crns[i].x,  crns[i].z,  surfaceY, depth, ci);
+        indices[ii++] = center;
+        indices[ii++] = cornerVerts[i1];
+        indices[ii++] = cornerVerts[i];
       }
     }
   }
 
-  if (vi === 0) return null;
+  if (vertCount === 0) return null;
 
-  const n   = vi / 3;
   const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position',  new THREE.BufferAttribute(positions.subarray(0, n * 3), 3));
-  geo.setAttribute('uv',        new THREE.BufferAttribute(uvs.subarray(0, n * 2), 2));
-  geo.setAttribute('depth',     new THREE.BufferAttribute(depths.subarray(0, n), 1));
-  geo.setAttribute('cellIndex', new THREE.BufferAttribute(cellIndices.subarray(0, n), 1));
+  geo.setAttribute('position',  new THREE.BufferAttribute(positions.slice(0, vertCount * 3), 3));
+  geo.setAttribute('uv',        new THREE.BufferAttribute(uvs.slice(0, vertCount * 2), 2));
+  geo.setAttribute('depth',     new THREE.BufferAttribute(depths.slice(0, vertCount), 1));
+  geo.setAttribute('cellIndex', new THREE.BufferAttribute(cellIndices.slice(0, vertCount), 1));
+  geo.setIndex(new THREE.BufferAttribute(indices.slice(0, ii), 1));
   return geo;
 }
 
@@ -160,9 +196,10 @@ export function buildRiverGeometry(
   // stream bed carved by HexChunk.
   const noiseScale     = opts.terrainNoiseScale          ?? 0.35;
   const perturbStr     = opts.terrainPerturbStrength     ?? 0.8;
-  const elevScale      = opts.elevationScale             ?? 0.5;
+  const elevScale      = opts.elevationScale             ?? ELEVATION_SCALE;
   const surfaceLift    = opts.surfaceLift                ?? 0.02;
   const elevPerturbStr = opts.terrainElevPerturbStrength ?? 0.2;
+  const cliffThreshold = opts.cliffThreshold             ?? 2;
   const edgeDirs       = layout.orientation.edgeDirections;
   const waterTerrains    = opts.waterTerrains    ?? new Set([DEFAULT_WATER_TERRAIN_INDEX]);
   const allLiquidTerrains = opts.allLiquidTerrains;
@@ -223,7 +260,7 @@ export function buildRiverGeometry(
 
   const { colStart, colEnd, rowStart, rowEnd } = bounds;
   const hexCount = (colEnd - colStart) * (rowEnd - rowStart);
-  const maxVerts = hexCount * 72;
+  const maxVerts = hexCount * 96; // per-edge segments + waterfall quads + junction cap
 
   const positions   = new Float32Array(maxVerts * 3);
   const uvs         = new Float32Array(maxVerts * 2);
@@ -275,13 +312,19 @@ export function buildRiverGeometry(
       const hasRiver    = map.hasRiver(col, row);
       if (!hasRiver || cellIsLiquid) continue;
 
-      const drains = drainsIntoThisLiquid(col, row);
-      if (drains === false) continue; // belongs to a different liquid type
-      // Unclassified rivers are owned by exactly one liquid (see
-      // ownsUnclassifiedRivers) so they aren't drawn once per liquid type.
-      if (drains === null && allLiquidTerrains && !opts.ownsUnclassifiedRivers) continue;
+      const cellKey = row * map.width + col;
+      if (opts.riverCells) {
+        // Fast path: membership in the pre-computed map-wide ownership set.
+        if (!opts.riverCells.has(cellKey)) continue;
+      } else {
+        const drains = drainsIntoThisLiquid(col, row);
+        if (drains === false) continue; // belongs to a different liquid type
+        // Unclassified rivers are owned by exactly one liquid (see
+        // ownsUnclassifiedRivers) so they aren't drawn once per liquid type.
+        if (drains === null && allLiquidTerrains && !opts.ownsUnclassifiedRivers) continue;
+      }
 
-      curCi = row * map.width + col;
+      curCi = cellKey;
 
       const q      = col - (row - (row & 1)) / 2;
       const center = hexToWorld(layout, { q, r: row });
@@ -291,8 +334,18 @@ export function buildRiverGeometry(
       const isBeginEnd = map.hasRiverBeginOrEnd(col, row);
       const outDir     = map.getOutgoingRiverDir(col, row);
 
+      // Junction cells (3+ channels) use symmetric channel mouths matching the
+      // terrain basin in HexChunk, so the water tiles the carved bed.
+      let riverEdgeCount = 0;
+      for (let f = 0; f < 6; f++) if (map.hasRiverThroughEdge(col, row, f)) riverEdgeCount++;
+      const isJunctionCell = riverEdgeCount >= 3 && !isBeginEnd;
+
       const ox = crns.map(c => c.x - center.x);
       const oz = crns.map(c => c.z - center.z);
+
+      // Inner channel-corner points per rendered edge, in edge order — used to
+      // cap the cell center when 3+ channels meet (a confluence junction).
+      const ringPts: Array<{ cLx: number; cLz: number; cRx: number; cRz: number }> = [];
 
       for (let i = 0; i < 6; i++) {
         if (!map.hasRiverThroughEdge(col, row, i)) continue;
@@ -351,7 +404,12 @@ export function buildRiverGeometry(
           const in2 = (i + 2) % 6;
           let cLx: number, cLz: number, cRx: number, cRz: number;
 
-          if (map.hasRiverThroughEdge(col, row, (i + 3) % 6)) {
+          if (isJunctionCell) {
+            cLx = center.x + ox[i]  * SOLID_FACTOR * 0.4;
+            cLz = center.z + oz[i]  * SOLID_FACTOR * 0.4;
+            cRx = center.x + ox[i1] * SOLID_FACTOR * 0.4;
+            cRz = center.z + oz[i1] * SOLID_FACTOR * 0.4;
+          } else if (map.hasRiverThroughEdge(col, row, (i + 3) % 6)) {
             cLx = center.x + ox[ip]  * SOLID_FACTOR * 0.25;
             cLz = center.z + oz[ip]  * SOLID_FACTOR * 0.25;
             cRx = center.x + ox[in2] * SOLID_FACTOR * 0.25;
@@ -375,11 +433,20 @@ export function buildRiverGeometry(
           }
 
           const ccx = (cLx + cRx) * 0.5, ccz = (cLz + cRz) * 0.5;
+          ringPts.push({ cLx, cLz, cRx, cRz });
 
           if (isOutgoing) {
             addTri(cLx, ry, cLz, 0.0, 0.8,  ccx, ry, ccz, 0.5, 0.8,  cRx, ry, cRz, 1.0, 0.8);
             if (nbIsWater) {
               addQuad(cLx, ry, cLz, 0.0, 0.8,  cRx, ry, cRz, 1.0, 0.8,  eLx, estuaryEdgeY, eLz, 0.0, 1.0,  eRx, estuaryEdgeY, eRz, 1.0, 1.0);
+            } else if (ry - nbRy >= cliffThreshold * elevScale * 0.999) {
+              // Waterfall: hold the channel level to the cliff lip, then drop
+              // steeply to the neighbor's level. The compressed V range on the
+              // drop quad makes the flow pattern read faster over the fall.
+              const lipLx = cLx + (eLx - cLx) * 0.6, lipLz = cLz + (eLz - cLz) * 0.6;
+              const lipRx = cRx + (eRx - cRx) * 0.6, lipRz = cRz + (eRz - cRz) * 0.6;
+              addQuad(cLx, ry, cLz, 0.0, 0.8,  cRx, ry, cRz, 1.0, 0.8,  lipLx, ry, lipLz, 0.0, 0.86,  lipRx, ry, lipRz, 1.0, 0.86);
+              addQuad(lipLx, ry, lipLz, 0.0, 0.86,  lipRx, ry, lipRz, 1.0, 0.86,  eLx, nbRy, eLz, 0.0, 1.0,  eRx, nbRy, eRz, 1.0, 1.0);
             } else {
               addQuad(cLx, ry, cLz, 0.0, 0.8,  cRx, ry, cRz, 1.0, 0.8,  eLx, nbRy, eLz, 0.0, 1.0,  eRx, nbRy, eRz, 1.0, 1.0);
             }
@@ -389,6 +456,22 @@ export function buildRiverGeometry(
           }
         }
       }
+
+      // Confluence junction cap: with 3+ channels meeting in one cell, the
+      // per-edge segments no longer share their inner corner points, leaving a
+      // hole at the cell center. Fan-fill between consecutive segments (a.cR →
+      // next segment's cL, going around in edge order).
+      if (ringPts.length >= 3) {
+        for (let k = 0; k < ringPts.length; k++) {
+          const a = ringPts[k];
+          const b = ringPts[(k + 1) % ringPts.length];
+          addTri(
+            center.x, ry, center.z, 0.5, 0.8,
+            a.cRx,    ry, a.cRz,    0.5, 0.8,
+            b.cLx,    ry, b.cLz,    0.5, 0.8,
+          );
+        }
+      }
     }
   }
 
@@ -396,8 +479,138 @@ export function buildRiverGeometry(
 
   const n   = vi / 3;
   const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position',  new THREE.BufferAttribute(positions.subarray(0, n * 3), 3));
-  geo.setAttribute('uv',        new THREE.BufferAttribute(uvs.subarray(0, n * 2), 2));
-  geo.setAttribute('cellIndex', new THREE.BufferAttribute(cellIndices.subarray(0, n), 1));
+  geo.setAttribute('position',  new THREE.BufferAttribute(positions.slice(0, n * 3), 3));
+  geo.setAttribute('uv',        new THREE.BufferAttribute(uvs.slice(0, n * 2), 2));
+  geo.setAttribute('cellIndex', new THREE.BufferAttribute(cellIndices.slice(0, n), 1));
   return geo;
+}
+
+// ---------------------------------------------------------------------------
+// Map-wide river ownership
+// ---------------------------------------------------------------------------
+
+/**
+ * Classifies every river cell on the map by the liquid its chain drains into.
+ * Returns cellKey (row * width + col) → liquid ID, or null when the chain
+ * never reaches a liquid (dries out, leaves the map, or loops).
+ *
+ * ChunkManager caches this once map-wide (invalidated by markDirty) and hands
+ * per-liquid membership sets to buildRiverGeometry via
+ * `WaterGeometryOptions.riverCells`, replacing the per-chunk-per-liquid
+ * drainage tracing fallback.
+ *
+ * @param edgeDirs Edge-index → HEX_DIRECTIONS mapping (layout.orientation.edgeDirections).
+ * @param liquidIdByTerrain Terrain index → liquid ID for every liquid terrain.
+ */
+export function computeRiverOwnership(
+  map: HexMap,
+  edgeDirs: readonly number[],
+  liquidIdByTerrain: ReadonlyMap<number, string>,
+): Map<number, string | null> {
+  const ownership = new Map<number, string | null>();
+  const w = map.width;
+
+  map.forEach((col, row) => {
+    const startKey = row * w + col;
+    if (ownership.has(startKey)) return;
+    if (!map.hasRiver(col, row)) return;
+    if (liquidIdByTerrain.has(map.getTerrain(col, row))) return; // liquid cells render no channel
+
+    // Follow the outgoing chain until it reaches a liquid, a cached cell, or ends.
+    const path: number[] = [startKey];
+    const seen = new Set<number>([startKey]);
+    let c = col, r = row;
+    let result: string | null = null;
+
+    for (let step = 0; step < 4096; step++) {
+      const outEdge = map.getOutgoingRiverDir(c, r);
+      if (outEdge === -1) break;
+      const nb = neighborOffset(c, r, edgeDirs[outEdge]);
+      if (!map.inBounds(nb.col, nb.row)) break;
+      const nbKey = nb.row * w + nb.col;
+      if (ownership.has(nbKey)) { result = ownership.get(nbKey)!; break; }
+      if (seen.has(nbKey)) break; // defensive: cycle
+      const owner = liquidIdByTerrain.get(map.getTerrain(nb.col, nb.row));
+      if (owner !== undefined) { result = owner; break; }
+      seen.add(nbKey);
+      path.push(nbKey);
+      c = nb.col;
+      r = nb.row;
+    }
+
+    for (const k of path) ownership.set(k, result);
+  });
+
+  return ownership;
+}
+
+/**
+ * Accumulates flow volume down every river network: each cell's flow is 1 plus
+ * the flow of every upstream cell draining into it, so confluences sum their
+ * tributaries. Returns cellKey (row * width + col) → flow (≥ 1).
+ *
+ * Derived data — nothing is stored on the map. Intended for gameplay (bridge
+ * costs, fishing yields, …) and as the input for future flow-dependent channel
+ * width rendering (which also requires the terrain stream bed to widen in
+ * lockstep — see ROADMAP).
+ *
+ * @param edgeDirs Edge-index → HEX_DIRECTIONS mapping (layout.orientation.edgeDirections).
+ */
+export function computeRiverFlow(
+  map: HexMap,
+  edgeDirs: readonly number[],
+): Map<number, number> {
+  const flow = new Map<number, number>();
+  const w = map.width;
+
+  /** Upstream cellKeys: incoming edges whose neighbor's outgoing points back at us. */
+  const upstreamOf = (col: number, row: number): number[] => {
+    const ups: number[] = [];
+    const mask = map.getIncomingRiverMask(col, row);
+    if (mask === 0) return ups;
+    for (let e = 0; e < 6; e++) {
+      if (!(mask & (1 << e))) continue;
+      const nb = neighborOffset(col, row, edgeDirs[e]);
+      if (!map.inBounds(nb.col, nb.row)) continue;
+      if (map.getOutgoingRiverDir(nb.col, nb.row) === (e + 3) % 6) {
+        ups.push(nb.row * w + nb.col);
+      }
+    }
+    return ups;
+  };
+
+  const onStack = new Set<number>();
+  const compute = (startKey: number): void => {
+    const stack = [startKey];
+    onStack.add(startKey);
+    while (stack.length > 0) {
+      const key = stack[stack.length - 1];
+      if (flow.has(key)) { stack.pop(); onStack.delete(key); continue; }
+      const col = key % w;
+      const row = (key / w) | 0;
+      let total = 1;
+      let pending = false;
+      for (const u of upstreamOf(col, row)) {
+        const f = flow.get(u);
+        if (f !== undefined) { total += f; continue; }
+        if (onStack.has(u)) continue; // defensive: data cycle — ignore that branch
+        stack.push(u);
+        onStack.add(u);
+        pending = true;
+      }
+      if (!pending) {
+        flow.set(key, total);
+        stack.pop();
+        onStack.delete(key);
+      }
+    }
+  };
+
+  map.forEach((col, row) => {
+    if (!map.hasRiver(col, row)) return;
+    const key = row * w + col;
+    if (!flow.has(key)) compute(key);
+  });
+
+  return flow;
 }

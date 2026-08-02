@@ -1,9 +1,7 @@
 import type { HexMap } from '../map/HexMap.js';
-import { POINTY_TOP } from '../math/HexOrientation.js';
+import { POINTY_TOP, type HexOrientation } from '../math/HexOrientation.js';
 import { offsetNeighbor } from '../math/HexCoord.js';
 import { DEFAULT_WATER_TERRAIN_INDEX } from '../geometry/TerrainTypes.js';
-
-const EDGE_DIRS = POINTY_TOP.edgeDirections;
 
 export interface RiverGeneratorOptions {
   /** Coarse grid spacing in cells between river seed candidates. Default 48. */
@@ -14,6 +12,12 @@ export interface RiverGeneratorOptions {
   maxSteps?: number;
   /** Terrain index assigned to lake cells. Default 5 (built-in Water). */
   waterTerrainIndex?: number;
+  /**
+   * Hex orientation providing the edge-index → direction mapping. Must match
+   * the layout used for rendering or river edges point at the wrong neighbors.
+   * Default POINTY_TOP.
+   */
+  orientation?: HexOrientation;
 }
 
 export interface ClimateRiverOptions {
@@ -27,6 +31,12 @@ export interface ClimateRiverOptions {
   elevationMax?: number;
   /** Terrain index assigned to lake cells. Default 5 (built-in Water). */
   waterTerrainIndex?: number;
+  /**
+   * Hex orientation providing the edge-index → direction mapping. Must match
+   * the layout used for rendering or river edges point at the wrong neighbors.
+   * Default POINTY_TOP.
+   */
+  orientation?: HexOrientation;
 }
 
 // ---- Climate-driven river generator ----
@@ -38,10 +48,13 @@ function traceClimateRiver(
   lakeProbability: number,
   rand: () => number,
   waterIdx: number,
+  EDGE_DIRS: readonly number[],
 ): number {
   let c = startCol, r = startRow;
   let prevFace = -1;
   let length = 1; // counts the origin cell, matching tutorial budget semantics
+  // Cells of THIS trace — merging back into our own chain would create a cycle.
+  const ownChain = new Set<number>([startRow * map.width + startCol]);
 
   for (let step = 0; step < maxSteps; step++) {
     // Reached open water or a lake formed by an earlier trace (elevated lakes
@@ -63,14 +76,14 @@ function traceClimateRiver(
       const nbElev = map.getElevation(nb.col, nb.row);
       if (nbElev < minNbElev) minNbElev = nbElev; // before any filter
 
-      if (nb.col === startCol && nb.row === startRow) continue; // skip origin
-      if (map.hasIncomingRiver(nb.col, nb.row)) continue;
+      if (ownChain.has(nb.row * map.width + nb.col)) continue; // never rejoin our own chain
 
       const delta = nbElev - curElev;
       if (delta > 0) continue; // no uphill
 
-      // Merge into an existing river origin (it has outgoing but no incoming yet)
-      if (map.hasOutgoingRiver(nb.col, nb.row)) {
+      // Merge into ANY existing river network — the incoming-edge bitmask
+      // supports multiple tributaries per cell (confluences).
+      if (map.hasRiver(nb.col, nb.row)) {
         mergeFace = face;
         break;
       }
@@ -132,6 +145,7 @@ function traceClimateRiver(
     prevFace = chosenFace;
     c = nb.col;
     r = nb.row;
+    ownChain.add(r * map.width + c);
   }
 
   return length;
@@ -152,6 +166,7 @@ export function generateClimateRivers(
   const maxSteps  = opts.maxSteps             ?? 100;
   const elevMax   = opts.elevationMax         ?? 12;
   const waterIdx  = opts.waterTerrainIndex    ?? DEFAULT_WATER_TERRAIN_INDEX;
+  const edgeDirs  = (opts.orientation ?? POINTY_TOP).edgeDirections;
 
   // Build weighted origin list using additive ifs (matching tutorial exactly)
   const origins: [number, number][] = [];
@@ -190,13 +205,16 @@ export function generateClimateRivers(
     }
     if (tooClose) continue;
 
-    budget -= traceClimateRiver(map, col, row, maxSteps, lakePct, rand, waterIdx);
+    budget -= traceClimateRiver(map, col, row, maxSteps, lakePct, rand, waterIdx, edgeDirs);
   }
 }
 
 // ---- Simple grid-seeded river generator (used by FBM generator) ----
 
-function traceRiver(map: HexMap, col: number, row: number, maxSteps: number, waterIdx: number): void {
+function traceRiver(
+  map: HexMap, col: number, row: number, maxSteps: number, waterIdx: number,
+  EDGE_DIRS: readonly number[],
+): void {
   let c = col, r = row;
   const visited = new Set<number>();
 
@@ -216,9 +234,6 @@ function traceRiver(map: HexMap, col: number, row: number, maxSteps: number, wat
       const nb = offsetNeighbor(c, r, EDGE_DIRS[i]);
       if (!map.inBounds(nb.col, nb.row)) continue;
       if (visited.has(nb.row * map.width + nb.col)) continue;
-      // Never overwrite another river's incoming connection — doing so leaves
-      // the other chain's channel dead-ending at a hex border.
-      if (map.hasIncomingRiver(nb.col, nb.row)) continue;
       const nbElev = map.getElevation(nb.col, nb.row);
       if (nbElev < bestElev) {
         bestElev = nbElev;
@@ -234,8 +249,8 @@ function traceRiver(map: HexMap, col: number, row: number, maxSteps: number, wat
     map.setRiverIncoming(bestNbC, bestNbR, (bestEdge + 3) % 6);
 
     if (map.getTerrain(bestNbC, bestNbR) === waterIdx) break;
-    // Joined an existing river's origin — stop instead of re-tracing (and
-    // rerouting) its downstream chain.
+    // Merged into an existing flowing river (confluence) — stop here; the
+    // joined chain carries the water on downstream.
     if (map.hasOutgoingRiver(bestNbC, bestNbR)) break;
 
     c = bestNbC;
@@ -252,13 +267,14 @@ export function generateRivers(map: HexMap, opts: RiverGeneratorOptions = {}): v
   const minSeedElevation = opts.minSeedElevation  ?? 5;
   const maxSteps         = opts.maxSteps          ?? 60;
   const waterIdx         = opts.waterTerrainIndex ?? DEFAULT_WATER_TERRAIN_INDEX;
+  const edgeDirs         = (opts.orientation ?? POINTY_TOP).edgeDirections;
 
   for (let row = gridSpacing / 2; row < map.height; row += gridSpacing) {
     for (let col = gridSpacing / 2; col < map.width; col += gridSpacing) {
       if (!map.inBounds(col, row)) continue;
       if (map.getTerrain(col, row) === waterIdx) continue;
       if (map.getElevation(col, row) >= minSeedElevation) {
-        traceRiver(map, col, row, maxSteps, waterIdx);
+        traceRiver(map, col, row, maxSteps, waterIdx, edgeDirs);
       }
     }
   }

@@ -4,6 +4,7 @@ import { hexToWorld } from '../math/HexLayout.js';
 import { HEX_DIRECTIONS } from '../math/HexCoord.js';
 import type { HexMap } from '../map/HexMap.js';
 import { DEFAULT_WATER_TERRAIN_INDEX } from './TerrainTypes.js';
+import { ELEVATION_SCALE } from '../map/HexCell.js';
 import { sampleNoise } from '../math/Noise.js';
 import type { ChunkBounds } from './HexChunk.js';
 import type { WaterGeometryOptions } from './WaterChunk.js';
@@ -36,7 +37,7 @@ export function buildShoreGeometry(
 ): THREE.BufferGeometry | null {
   const noiseScale     = opts.noiseScale         ?? 0.35;
   const perturbStr     = opts.perturbStrength    ?? 0.8;
-  const elevScale      = opts.elevationScale     ?? 0.5;
+  const elevScale      = opts.elevationScale     ?? ELEVATION_SCALE;
   const surfaceLift    = opts.surfaceLift        ?? 0.02;
   // Land-side vertices must track the terrain mesh, which perturbs with its own
   // ChunkGeometryOptions — not the liquid's (possibly overridden) noise settings.
@@ -240,8 +241,8 @@ export function buildShoreGeometry(
 
   const n   = vi / 3;
   const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position',  new THREE.BufferAttribute(positions.subarray(0, n * 3), 3));
-  geo.setAttribute('uv',        new THREE.BufferAttribute(uvs.subarray(0, n * 2), 2));
-  geo.setAttribute('cellIndex', new THREE.BufferAttribute(cellIndices.subarray(0, n), 1));
+  geo.setAttribute('position',  new THREE.BufferAttribute(positions.slice(0, n * 3), 3));
+  geo.setAttribute('uv',        new THREE.BufferAttribute(uvs.slice(0, n * 2), 2));
+  geo.setAttribute('cellIndex', new THREE.BufferAttribute(cellIndices.slice(0, n), 1));
   return geo;
 }

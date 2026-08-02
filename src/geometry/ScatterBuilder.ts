@@ -7,6 +7,7 @@ import type { HexHashGrid } from './HexHashGrid.js';
 import type { ScatterDefinition, ScatterLayerConfig, FeatureCollection } from './ScatterTypes.js';
 import type { ChunkBounds } from './HexChunk.js';
 import { DEFAULT_WATER_TERRAIN_INDEX } from './TerrainTypes.js';
+import { ELEVATION_SCALE } from '../map/HexCell.js';
 
 // Tutorial threshold table: index = level-1, values = per-tier hash cutoffs.
 // Tier 0 = highest density variant, tier 2 = lowest density variant.
@@ -18,7 +19,7 @@ const FEATURE_THRESHOLDS = [
 
 const NOISE_SCALE           = 0.35;
 const PERTURB_STRENGTH      = 0.4;
-const ELEV_SCALE            = 0.5;
+const ELEV_SCALE            = ELEVATION_SCALE;
 const ELEV_PERTURB_STRENGTH = 0.2;
 
 function cellWorldY(map: HexMap, layout: HexLayout, col: number, row: number): number {

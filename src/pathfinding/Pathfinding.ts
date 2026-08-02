@@ -1,11 +1,15 @@
 import { type HexCoord, hexDistance, hexNeighbors, hexEquals, hexToOffset, hexLine } from '../math/HexCoord.js';
-
-const LOS_ELEV_SCALE = 0.5;
+import { ELEVATION_SCALE } from '../map/HexCell.js';
 
 /**
  * Cost function supplied by the game. Called for each candidate move.
  * Return `Infinity` (or any non-finite value) to mark a cell as impassable.
  * Costs must be non-negative.
+ *
+ * IMPORTANT: `findPath`'s A* heuristic assumes every step costs at least 1.
+ * If your cost function can return values below 1 (e.g. cheap roads at 0.5),
+ * pass that minimum as `minMoveCost` in FindPathOptions — otherwise returned
+ * paths may not be optimal.
  *
  * @example
  * const cost: MoveCostFn = (from, to) => {
@@ -23,7 +27,8 @@ export type MoveCostFn = (from: HexCoord, to: HexCoord) => number;
 
 class MinHeap<T> {
   private readonly data: T[] = [];
-  constructor(private readonly priority: (item: T) => number) {}
+  private readonly priority: (item: T) => number;
+  constructor(priority: (item: T) => number) { this.priority = priority; }
 
   get size(): number { return this.data.length; }
   isEmpty(): boolean { return this.data.length === 0; }
@@ -100,13 +105,26 @@ function inBounds(h: HexCoord, map: { width: number; height: number }): boolean 
  *   map,
  * );
  */
+export interface FindPathOptions {
+  /**
+   * The smallest cost your MoveCostFn can return. Scales the A* heuristic so
+   * it never overestimates. Default 1 — if your cost function can return
+   * values below 1 (e.g. cheap roads at 0.5), pass that minimum here or the
+   * returned path may not be optimal.
+   */
+  minMoveCost?: number;
+}
+
 export function findPath(
   from: HexCoord,
   to: HexCoord,
   costFn: MoveCostFn,
   map: { width: number; height: number },
+  opts: FindPathOptions = {},
 ): HexCoord[] | null {
   if (hexEquals(from, to)) return [from];
+
+  const hScale = Math.max(0, opts.minMoveCost ?? 1);
 
   type Entry = { node: HexCoord; f: number };
   const open     = new MinHeap<Entry>(e => e.f);
@@ -115,7 +133,7 @@ export function findPath(
   const cameFrom = new Map<string, HexCoord>();
 
   gScore.set(key(from), 0);
-  open.push({ node: from, f: hexDistance(from, to) });
+  open.push({ node: from, f: hexDistance(from, to) * hScale });
 
   while (!open.isEmpty()) {
     const { node } = open.pop()!;
@@ -145,7 +163,7 @@ export function findPath(
       if (tentativeG < (gScore.get(nbk) ?? Infinity)) {
         cameFrom.set(nbk, node);
         gScore.set(nbk, tentativeG);
-        open.push({ node: nb, f: tentativeG + hexDistance(nb, to) });
+        open.push({ node: nb, f: tentativeG + hexDistance(nb, to) * hScale });
       }
     }
   }
@@ -245,11 +263,12 @@ export function getVisibleCells(
   const visited  = new Set<string>();
   const visible: HexCoord[] = [];
   const queue: Array<{ node: HexCoord; dist: number }> = [{ node: center, dist: 0 }];
+  let head = 0; // index cursor — avoids O(n) Array.shift() in this hot path
 
   visited.add(key(center));
 
-  while (queue.length > 0) {
-    const { node, dist } = queue.shift()!;
+  while (head < queue.length) {
+    const { node, dist } = queue[head++];
     visible.push(node);
 
     if (dist >= range) continue;
@@ -278,10 +297,11 @@ export function getVisibleCells(
  * and target are assumed to have their eyes at `eyeHeight` world units above
  * the terrain surface.
  *
- * Uses the same elevation scale (0.5 world units per elevation step) as the
- * terrain geometry.
+ * Uses the shared ELEVATION_SCALE by default — pass `elevationScale` if your
+ * terrain geometry uses a custom `elevationScale` so LOS matches the visuals.
  *
  * @param eyeHeight - Observer/target eye height above terrain, in world units. Default 1.5.
+ * @param elevationScale - World units per elevation step. Default ELEVATION_SCALE (0.5).
  *
  * @example
  * const canSee = hasLineOfSight(
@@ -295,6 +315,7 @@ export function hasLineOfSight(
   to:   HexCoord,
   map:  { getElevation(col: number, row: number): number; width: number; height: number },
   eyeHeight = 1.5,
+  elevationScale = ELEVATION_SCALE,
 ): boolean {
   const n = hexDistance(from, to);
   if (n <= 1) return true;
@@ -302,14 +323,14 @@ export function hasLineOfSight(
   const line    = hexLine(from, to);
   const fromOff = hexToOffset(from);
   const toOff   = hexToOffset(to);
-  const fromY   = map.getElevation(fromOff.col, fromOff.row) * LOS_ELEV_SCALE + eyeHeight;
-  const toY     = map.getElevation(toOff.col,   toOff.row)   * LOS_ELEV_SCALE + eyeHeight;
+  const fromY   = map.getElevation(fromOff.col, fromOff.row) * elevationScale + eyeHeight;
+  const toY     = map.getElevation(toOff.col,   toOff.row)   * elevationScale + eyeHeight;
 
   for (let i = 1; i < line.length - 1; i++) {
     const t   = i / n;
     const off = hexToOffset(line[i]);
     if (off.col < 0 || off.col >= map.width || off.row < 0 || off.row >= map.height) continue;
-    const cellY  = map.getElevation(off.col, off.row) * LOS_ELEV_SCALE;
+    const cellY  = map.getElevation(off.col, off.row) * elevationScale;
     const sightY = fromY + (toY - fromY) * t;
     if (cellY > sightY) return false;
   }

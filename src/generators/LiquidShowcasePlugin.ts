@@ -47,9 +47,6 @@ function traceDemoRiver(
       const nb = offsetNeighbor(c, r, EDGE_DIRS[i]);
       if (!map.inBounds(nb.col, nb.row)) continue;
       if (visited.has(nb.row * map.width + nb.col)) continue;
-      // Never overwrite another river's incoming connection — doing so leaves
-      // the other chain's channel dead-ending at a hex border.
-      if (map.hasIncomingRiver(nb.col, nb.row)) continue;
       const nbElev = map.getElevation(nb.col, nb.row);
       if (nbElev < bestElev) {
         bestElev = nbElev;

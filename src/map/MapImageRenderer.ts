@@ -96,13 +96,21 @@ export async function renderMapImage(
   const width  = Math.ceil((maxX - minX) * scale) + padding * 2;
   const height = Math.ceil((maxZ - minZ) * scale) + padding * 2;
 
-  const canvas = new OffscreenCanvas(width, height);
-  const ctx    = canvas.getContext('2d')!;
+  // OffscreenCanvas where available (workers, modern browsers); DOM canvas fallback.
+  const canvas = typeof OffscreenCanvas !== 'undefined'
+    ? new OffscreenCanvas(width, height)
+    : document.createElement('canvas');
+  if (canvas instanceof HTMLCanvasElement) {
+    canvas.width  = width;
+    canvas.height = height;
+  }
+  const ctx = (canvas as HTMLCanvasElement).getContext('2d');
+  if (!ctx) throw new Error('renderMapImage: could not acquire a 2d canvas context');
 
   ctx.fillStyle = background;
   ctx.fillRect(0, 0, width, height);
 
-  // Pass 2 — draw each hex as a filled polygon
+  // Draw each hex as a filled polygon
   for (let row = 0; row < map.height; row++) {
     for (let col = 0; col < map.width; col++) {
       const def = lookup.get(map.getTerrain(col, row));
@@ -147,5 +155,13 @@ export async function renderMapImage(
     }
   }
 
-  return canvas.convertToBlob({ type, quality });
+  if ('convertToBlob' in canvas) {
+    return canvas.convertToBlob({ type, quality });
+  }
+  return new Promise<Blob>((resolve, reject) => {
+    canvas.toBlob(
+      b => (b ? resolve(b) : reject(new Error('renderMapImage: canvas.toBlob produced no data'))),
+      type, quality,
+    );
+  });
 }

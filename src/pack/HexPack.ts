@@ -220,7 +220,12 @@ export interface ExportMapEntry {
   name?: string;
   map: HexMap;
   metadata?: MapMetadata;
-  /** Default: 'binary'. Use 'json' for human-readable / version-controlled packs. */
+  /**
+   * Serialization format for this map's file inside the pack.
+   * Defaults to 'json' when `metadata` is provided (the binary format cannot
+   * store metadata and would silently drop it), otherwise 'binary' for
+   * compactness. Set explicitly to override.
+   */
   format?: 'binary' | 'json';
 }
 
@@ -270,7 +275,9 @@ export async function exportHexPack(opts: ExportHexPackOptions): Promise<Blob> {
 
   // Maps
   const mapEntries: HexPackMapEntry[] = [];
-  for (const { id, name, map, metadata, format = 'binary' } of (opts.maps ?? [])) {
+  for (const { id, name, map, metadata, format: formatOpt } of (opts.maps ?? [])) {
+    // Metadata only survives in the JSON format — default to it when present.
+    const format = formatOpt ?? (metadata ? 'json' : 'binary');
     let data: Uint8Array;
     let path: string;
     if (format === 'json') {

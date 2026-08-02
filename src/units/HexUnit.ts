@@ -3,8 +3,7 @@ import type { HexLayout } from '../math/HexLayout.js';
 import { hexToWorld } from '../math/HexLayout.js';
 import type { HexCoord } from '../math/HexCoord.js';
 import { hexToOffset, offsetToHex } from '../math/HexCoord.js';
-
-const ELEV_SCALE = 0.5;
+import { cellSurfaceY, type CellSurfaceOptions } from '../map/CellSurface.js';
 
 export interface HexUnitOptions {
   col: number;
@@ -23,6 +22,13 @@ export interface HexUnitOptions {
    * 0 = unit does not reveal fog. Default 0.
    */
   fogRevealRange?: number;
+  /**
+   * Surface height parameters — pass the same values you gave the terrain
+   * geometry (elevationScale, noiseScale, elevPerturbStrength) if you
+   * customized them, plus an `isWater` predicate if units should ride the
+   * water surface instead of the seabed. Defaults match the default terrain.
+   */
+  surfaceOptions?: CellSurfaceOptions;
 }
 
 export class HexUnit {
@@ -34,6 +40,7 @@ export class HexUnit {
   readonly travelSpeed:   number;
   readonly heightOffset:  number;
   readonly fogRevealRange: number;
+  readonly surfaceOptions: CellSurfaceOptions;
 
   /** Smoothly interpolated world-space X. Read by UnitManager each frame. */
   worldX = 0;
@@ -76,6 +83,7 @@ export class HexUnit {
     this.travelSpeed   = opts.travelSpeed   ?? 4;
     this.heightOffset  = opts.heightOffset  ?? 0;
     this.fogRevealRange = opts.fogRevealRange ?? 0;
+    this.surfaceOptions = opts.surfaceOptions ?? {};
   }
 
   /**
@@ -158,11 +166,14 @@ export class HexUnit {
     const fOff = hexToOffset(fromCoord);
     const tOff = hexToOffset(toCoord);
 
+    // Same surface formula the terrain mesh uses, so units sit on the visible
+    // ground (including the per-cell noise perturbation) rather than the flat
+    // elevation plane.
     this._fx = fw.x;
-    this._fy = map.getElevation(fOff.col, fOff.row) * ELEV_SCALE;
+    this._fy = cellSurfaceY(map, layout, fOff.col, fOff.row, this.surfaceOptions);
     this._fz = fw.z;
     this._tx = tw.x;
-    this._ty = map.getElevation(tOff.col, tOff.row) * ELEV_SCALE;
+    this._ty = cellSurfaceY(map, layout, tOff.col, tOff.row, this.surfaceOptions);
     this._tz = tw.z;
 
     this.facing = Math.atan2(this._tx - this._fx, this._tz - this._fz);
@@ -171,7 +182,7 @@ export class HexUnit {
   private _snapToCell(map: HexMap, layout: HexLayout): void {
     const wp = hexToWorld(layout, offsetToHex(this.col, this.row));
     this.worldX = wp.x;
-    this.worldY = map.getElevation(this.col, this.row) * ELEV_SCALE + this.heightOffset;
+    this.worldY = cellSurfaceY(map, layout, this.col, this.row, this.surfaceOptions) + this.heightOffset;
     this.worldZ = wp.z;
   }
 }

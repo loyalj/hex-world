@@ -97,6 +97,10 @@ const EDGE_DIRS = POINTY_TOP.edgeDirections;
 /**
  * Connect a river from cell A out through face `face` into neighboring cell B.
  * Call this once per edge in the river's flow direction.
+ *
+ * `setRiverIncoming` is ADDITIVE — a cell can receive rivers across several
+ * edges at once (confluences), so connecting a new tributary never disturbs
+ * existing ones.
  */
 function connectRiverEdge(col: number, row: number, face: number): void {
   const nb      = offsetNeighbor(col, row, EDGE_DIRS[face]);
@@ -112,34 +116,30 @@ function connectRiverEdge(col: number, row: number, face: number): void {
 }
 
 /**
- * Clear all river data from a cell and remove the incoming link
- * from whichever neighbor was feeding it.
+ * Clear all river data from a cell and detach the links on every neighbor.
+ * Handles multiple upstream tributaries (confluences).
  */
 function clearRiverFromCell(col: number, row: number): void {
-  // Clear the outgoing link on the downstream neighbor
+  // Detach from the downstream neighbor — remove only OUR incoming edge there,
+  // since it may have other tributaries.
   const outFace = map.getOutgoingRiverDir(col, row);
   if (outFace >= 0) {
     const nb = offsetNeighbor(col, row, EDGE_DIRS[outFace]);
     if (map.inBounds(nb.col, nb.row)) {
-      map.clearRiver(nb.col, nb.row);
+      map.removeRiverIncoming(nb.col, nb.row, (outFace + 3) % 6);
       chunks.markDirty(nb.col, nb.row);
     }
   }
 
-  // Clear the incoming link on the upstream neighbor
-  const inFace = map.getIncomingRiverDir(col, row);
-  if (inFace >= 0) {
-    const oppFace = (inFace + 3) % 6;
-    const nb = offsetNeighbor(col, row, EDGE_DIRS[inFace]);
-    if (map.inBounds(nb.col, nb.row)) {
-      // Remove the outgoing flag from the upstream cell
-      const upByte = map.getOutgoingRiverDir(nb.col, nb.row);
-      if (upByte === oppFace) {
-        const idx = nb.row * map.width + nb.col;
-        // Clear only the outgoing bits (preserve incoming)
-        map.clearRiver(nb.col, nb.row);
-        chunks.markDirty(nb.col, nb.row);
-      }
+  // Detach every upstream tributary: clear the outgoing direction on each
+  // neighbor that flows into this cell (keeping their own incoming edges).
+  for (let face = 0; face < 6; face++) {
+    if (!map.hasRiverIncomingThroughEdge(col, row, face)) continue;
+    const nb = offsetNeighbor(col, row, EDGE_DIRS[face]);
+    if (!map.inBounds(nb.col, nb.row)) continue;
+    if (map.getOutgoingRiverDir(nb.col, nb.row) === (face + 3) % 6) {
+      map.removeRiverOutgoing(nb.col, nb.row);
+      chunks.markDirty(nb.col, nb.row);
     }
   }
 

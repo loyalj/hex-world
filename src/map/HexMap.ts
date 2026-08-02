@@ -33,6 +33,12 @@ export class HexMap {
   readonly uint8: Uint8Array;
   private readonly int8: Int8Array;
   readonly roadBits: Uint8Array;
+  /**
+   * Per-cell bitmask of incoming river edges (bit e = a river enters across
+   * edge e). Supports confluences — multiple tributaries entering one cell.
+   * The cell byte keeps only the primary (lowest) incoming for compatibility.
+   */
+  readonly riverInBits: Uint8Array;
   readonly featureData: Uint8Array | null;
   /**
    * Per-cell water surface elevation (elevation index, same units as `getElevation`).
@@ -40,6 +46,13 @@ export class HexMap {
    * Initialized to 0 (sea level). Non-water cells retain 0 and should not be queried.
    */
   readonly waterSurfaces: Int8Array;
+  /**
+   * Per-cell hex distance to the nearest land-adjacent cell of the same water
+   * body (0 = touches land, 255 = far open water / capped). Populated by
+   * `computeWaterSurfaces` alongside surfaces. Drives the shallow→deep color
+   * gradient in the water surface geometry. Non-water cells retain 0.
+   */
+  readonly shoreDistances: Uint8Array;
 
   constructor(options: HexMapOptions) {
     this.width = options.width;
@@ -48,11 +61,13 @@ export class HexMap {
     const buffer = new ArrayBuffer(this.width * this.height * CELL_STRIDE);
     this.uint8 = new Uint8Array(buffer);
     this.int8 = new Int8Array(buffer);
-    this.roadBits = new Uint8Array(this.width * this.height);
+    this.roadBits    = new Uint8Array(this.width * this.height);
+    this.riverInBits = new Uint8Array(this.width * this.height);
     this.featureData = this.featureLayerCount > 0
       ? new Uint8Array(this.width * this.height * this.featureLayerCount)
       : null;
-    this.waterSurfaces = new Int8Array(this.width * this.height);
+    this.waterSurfaces  = new Int8Array(this.width * this.height);
+    this.shoreDistances = new Uint8Array(this.width * this.height);
 
     if (options.defaultTerrain !== undefined && options.defaultTerrain !== TerrainType.Grassland) {
       for (let i = 0; i < this.width * this.height; i++) {
@@ -138,20 +153,35 @@ export class HexMap {
   }
 
   // --- River directions ---
-  // Byte layout: bits 2-0 = incoming+1, bits 5-3 = outgoing+1, 0 = none.
+  // Cell byte layout: bits 2-0 = PRIMARY incoming+1, bits 5-3 = outgoing+1, 0 = none.
+  // The full set of incoming edges lives in `riverInBits` (one bit per edge),
+  // enabling confluences — multiple tributaries entering one cell. The cell
+  // byte's incoming bits are maintained as the lowest set incoming edge (the
+  // "primary", used where a single flow direction is needed, e.g. estuary UVs).
 
   private riverByte(col: number, row: number): number {
     return this.uint8[this.index(col, row) + OFFSET_RIVER_DIR];
   }
 
-  /** Returns `true` if the cell has any river data (incoming or outgoing). */
-  hasRiver(col: number, row: number): boolean {
-    return this.riverByte(col, row) !== 0;
+  /** Re-derive the cell byte's primary incoming bits from the incoming mask. */
+  private syncPrimaryIncoming(col: number, row: number): void {
+    const mask = this.riverInBits[row * this.width + col];
+    let primary = 0; // encoded edge+1, 0 = none
+    for (let e = 0; e < 6; e++) {
+      if (mask & (1 << e)) { primary = e + 1; break; }
+    }
+    const idx = this.index(col, row) + OFFSET_RIVER_DIR;
+    this.uint8[idx] = (this.uint8[idx] & 0x38) | primary;
   }
 
-  /** Returns `true` if a river flows *into* this cell from a neighbour. */
+  /** Returns `true` if the cell has any river data (incoming or outgoing). */
+  hasRiver(col: number, row: number): boolean {
+    return this.riverByte(col, row) !== 0 || this.riverInBits[row * this.width + col] !== 0;
+  }
+
+  /** Returns `true` if at least one river flows *into* this cell from a neighbour. */
   hasIncomingRiver(col: number, row: number): boolean {
-    return (this.riverByte(col, row) & 0x07) !== 0;
+    return this.riverInBits[row * this.width + col] !== 0;
   }
 
   /** Returns `true` if a river flows *out of* this cell to a neighbour. */
@@ -161,11 +191,14 @@ export class HexMap {
 
   /** Returns `true` if the cell is a river source or terminus (has exactly one of incoming/outgoing). */
   hasRiverBeginOrEnd(col: number, row: number): boolean {
-    const b = this.riverByte(col, row);
-    return ((b & 0x07) !== 0) !== ((b & 0x38) !== 0);
+    return this.hasIncomingRiver(col, row) !== this.hasOutgoingRiver(col, row);
   }
 
-  /** Returns the incoming river edge index (0–5), or -1 if none. */
+  /**
+   * Returns the PRIMARY incoming river edge index (0–5), or -1 if none.
+   * With multiple tributaries this is the lowest-indexed incoming edge; use
+   * `hasRiverIncomingThroughEdge` / `getIncomingRiverMask` for the full set.
+   */
   getIncomingRiverDir(col: number, row: number): number {
     const raw = this.riverByte(col, row) & 0x07;
     return raw === 0 ? -1 : raw - 1;
@@ -177,10 +210,19 @@ export class HexMap {
     return raw === 0 ? -1 : raw - 1;
   }
 
+  /** Bitmask of ALL incoming river edges (bit e = edge e). */
+  getIncomingRiverMask(col: number, row: number): number {
+    return this.riverInBits[row * this.width + col];
+  }
+
+  /** Returns `true` if a river flows into this cell across the given edge. */
+  hasRiverIncomingThroughEdge(col: number, row: number, edgeIndex: number): boolean {
+    return (this.riverInBits[row * this.width + col] & (1 << edgeIndex)) !== 0;
+  }
+
   hasRiverThroughEdge(col: number, row: number, edgeIndex: number): boolean {
-    const b       = this.riverByte(col, row);
-    const encoded = edgeIndex + 1;
-    return (b & 0x07) === encoded || ((b >> 3) & 0x07) === encoded;
+    if (this.hasRiverIncomingThroughEdge(col, row, edgeIndex)) return true;
+    return ((this.riverByte(col, row) >> 3) & 0x07) === edgeIndex + 1;
   }
 
   /** Set the outgoing river direction for this cell (does NOT update the neighbour). */
@@ -189,15 +231,32 @@ export class HexMap {
     this.uint8[idx] = (this.uint8[idx] & 0x07) | ((edgeIndex + 1) << 3);
   }
 
-  /** Set the incoming river direction for this cell (does NOT update the neighbour). */
+  /**
+   * ADD an incoming river through the given edge (does NOT update the neighbour).
+   * Multiple incoming edges per cell are supported (confluences); adding an
+   * edge never disturbs existing ones. The primary incoming direction is kept
+   * as the lowest set edge.
+   */
   setRiverIncoming(col: number, row: number, edgeIndex: number): void {
-    const idx = this.index(col, row) + OFFSET_RIVER_DIR;
-    this.uint8[idx] = (this.uint8[idx] & 0x38) | (edgeIndex + 1);
+    this.riverInBits[row * this.width + col] |= (1 << edgeIndex);
+    this.syncPrimaryIncoming(col, row);
+  }
+
+  /** Remove one incoming river edge, keeping any others (does NOT update the neighbour). */
+  removeRiverIncoming(col: number, row: number, edgeIndex: number): void {
+    this.riverInBits[row * this.width + col] &= ~(1 << edgeIndex);
+    this.syncPrimaryIncoming(col, row);
+  }
+
+  /** Clear the outgoing river direction, keeping incoming tributaries (does NOT update the neighbour). */
+  removeRiverOutgoing(col: number, row: number): void {
+    this.uint8[this.index(col, row) + OFFSET_RIVER_DIR] &= 0x07;
   }
 
   /** Clear all river data for this cell. */
   clearRiver(col: number, row: number): void {
     this.uint8[this.index(col, row) + OFFSET_RIVER_DIR] = 0;
+    this.riverInBits[row * this.width + col] = 0;
   }
 
   // --- Roads ---
@@ -240,8 +299,10 @@ export class HexMap {
   clear(): void {
     this.uint8.fill(0);
     this.roadBits.fill(0);
+    this.riverInBits.fill(0);
     this.featureData?.fill(0);
     this.waterSurfaces.fill(0);
+    this.shoreDistances.fill(0);
   }
 
   // --- Water surfaces ---
@@ -256,8 +317,18 @@ export class HexMap {
   }
 
   /**
+   * Hex distance to the nearest land-adjacent cell of the same water body
+   * (0 = shore cell, larger = deeper open water, capped at 255).
+   * Populated by `computeWaterSurfaces`. Returns 0 for non-water cells.
+   */
+  getShoreDistance(col: number, row: number): number {
+    return this.shoreDistances[row * this.width + col];
+  }
+
+  /**
    * BFS flood-fill that finds every connected water body and records its surface
-   * elevation in `waterSurfaces`. The surface is `max(0, maxFloorElevation + 1)`:
+   * elevation in `waterSurfaces` plus each cell's distance-to-shore in
+   * `shoreDistances`. The surface is `max(0, maxFloorElevation + 1)`:
    * one step above the highest floor cell, clamped so ocean bodies (floor ≤ −1)
    * always surface at 0. Elevated lakes (floor ≥ 0) surface one step above their floor.
    *
@@ -269,54 +340,120 @@ export class HexMap {
    * @param isWater Predicate that returns `true` for liquid terrain indices.
    *   Defaults to the built-in water terrain (index 5). Pass a custom predicate
    *   when using additional liquid terrain types.
+   * @param dirtyRegions When provided, only water bodies intersecting these
+   *   cell-coordinate regions are re-flooded; everything else keeps its current
+   *   values. Regions MUST extend at least one cell beyond the edited cells so
+   *   bodies merely adjacent to an edit are re-seeded (`ChunkManager` passes
+   *   its dirty chunk bounds expanded by one). Requires surfaces to have been
+   *   fully computed once before.
    */
   computeWaterSurfaces(
     isWater: (terrain: number) => boolean = t => t === TerrainType.Water,
+    dirtyRegions?: ReadonlyArray<{ colStart: number; colEnd: number; rowStart: number; rowEnd: number }>,
   ): void {
     const w = this.width, h = this.height;
     const n = w * h;
     const visited = new Uint8Array(n);
-    const queue   = new Int32Array(n);
+    const body    = new Int32Array(n); // cells of the body being flooded
+    const queue   = new Int32Array(n); // scratch queue for the shore-distance BFS
 
-    for (let startRow = 0; startRow < h; startRow++) {
-      for (let startCol = 0; startCol < w; startCol++) {
-        const startIdx = startRow * w + startCol;
-        if (visited[startIdx] || !isWater(this.getTerrain(startCol, startRow))) continue;
+    const processBody = (startIdx: number): void => {
+      let bTail = 0, bHead = 0;
+      body[bTail++] = startIdx;
+      visited[startIdx] = 1;
+      let maxElev = -128;
 
-        let qHead = 0, qTail = 0;
-        queue[qTail++] = startIdx;
-        visited[startIdx] = 1;
-        let maxElev = -128;
+      while (bHead < bTail) {
+        const ci  = body[bHead++];
+        const row = (ci / w) | 0;
+        const col = ci % w;
+        const elev = this.getElevation(col, row);
+        if (elev > maxElev) maxElev = elev;
 
-        while (qHead < qTail) {
-          const ci  = queue[qHead++];
-          const row = (ci / w) | 0;
-          const col = ci % w;
-          const elev = this.getElevation(col, row);
-          if (elev > maxElev) maxElev = elev;
-
-          const q = col - (row - (row & 1)) / 2;
-          for (let d = 0; d < 6; d++) {
-            const nq = q   + HEX_DIRECTIONS[d].q;
-            const nr = row + HEX_DIRECTIONS[d].r;
-            const nc = nq  + (nr - (nr & 1)) / 2;
-            if (nc < 0 || nc >= w || nr < 0 || nr >= h) continue;
-            const ni = nr * w + nc;
-            if (!visited[ni] && isWater(this.getTerrain(nc, nr))) {
-              visited[ni] = 1;
-              queue[qTail++] = ni;
-            }
+        const q = col - (row - (row & 1)) / 2;
+        for (let d = 0; d < 6; d++) {
+          const nq = q   + HEX_DIRECTIONS[d].q;
+          const nr = row + HEX_DIRECTIONS[d].r;
+          const nc = nq  + (nr - (nr & 1)) / 2;
+          if (nc < 0 || nc >= w || nr < 0 || nr >= h) continue;
+          const ni = nr * w + nc;
+          if (!visited[ni] && isWater(this.getTerrain(nc, nr))) {
+            visited[ni] = 1;
+            body[bTail++] = ni;
           }
         }
+      }
 
-        // Surface is one step above the highest floor cell, clamped to ≥ 0 so that
-        // ocean bodies (floor cells at −1 or lower) always sit at sea level (0).
-        // Elevated lakes (floor cells at ≥ 0) surface one step above their floor.
-        const surfaceElev = Math.max(0, maxElev + 1);
-        for (let i = 0; i < qTail; i++) {
-          this.waterSurfaces[queue[i]] = surfaceElev;
+      // Surface is one step above the highest floor cell, clamped to ≥ 0 so that
+      // ocean bodies (floor cells at −1 or lower) always sit at sea level (0).
+      // Elevated lakes (floor cells at ≥ 0) surface one step above their floor.
+      const surfaceElev = Math.max(0, maxElev + 1);
+      for (let i = 0; i < bTail; i++) {
+        this.waterSurfaces[body[i]] = surfaceElev;
+      }
+
+      // Shore distances: multi-source BFS from the body's land-adjacent cells.
+      // Bodies are separated by land, so relaxing across liquid neighbors can
+      // never leak into another body's values.
+      let sHead = 0, sTail = 0;
+      for (let i = 0; i < bTail; i++) {
+        const ci  = body[i];
+        const row = (ci / w) | 0;
+        const col = ci % w;
+        const q = col - (row - (row & 1)) / 2;
+        let landAdjacent = false;
+        for (let d = 0; d < 6; d++) {
+          const nq = q   + HEX_DIRECTIONS[d].q;
+          const nr = row + HEX_DIRECTIONS[d].r;
+          const nc = nq  + (nr - (nr & 1)) / 2;
+          if (nc < 0 || nc >= w || nr < 0 || nr >= h) continue;
+          if (!isWater(this.getTerrain(nc, nr))) { landAdjacent = true; break; }
+        }
+        if (landAdjacent) {
+          this.shoreDistances[ci] = 0;
+          queue[sTail++] = ci;
+        } else {
+          this.shoreDistances[ci] = 255;
         }
       }
+      while (sHead < sTail) {
+        const ci   = queue[sHead++];
+        const next = Math.min(255, this.shoreDistances[ci] + 1);
+        const row  = (ci / w) | 0;
+        const col  = ci % w;
+        const q = col - (row - (row & 1)) / 2;
+        for (let d = 0; d < 6; d++) {
+          const nq = q   + HEX_DIRECTIONS[d].q;
+          const nr = row + HEX_DIRECTIONS[d].r;
+          const nc = nq  + (nr - (nr & 1)) / 2;
+          if (nc < 0 || nc >= w || nr < 0 || nr >= h) continue;
+          const ni = nr * w + nc;
+          if (isWater(this.getTerrain(nc, nr)) && this.shoreDistances[ni] > next) {
+            this.shoreDistances[ni] = next;
+            queue[sTail++] = ni;
+          }
+        }
+      }
+    };
+
+    const tryStart = (idx: number): void => {
+      if (visited[idx]) return;
+      const row = (idx / w) | 0;
+      const col = idx % w;
+      if (!isWater(this.getTerrain(col, row))) return;
+      processBody(idx);
+    };
+
+    if (dirtyRegions) {
+      for (const rg of dirtyRegions) {
+        const c0 = Math.max(0, rg.colStart), c1 = Math.min(w, rg.colEnd);
+        const r0 = Math.max(0, rg.rowStart), r1 = Math.min(h, rg.rowEnd);
+        for (let row = r0; row < r1; row++) {
+          for (let col = c0; col < c1; col++) tryStart(row * w + col);
+        }
+      }
+    } else {
+      for (let i = 0; i < n; i++) tryStart(i);
     }
   }
 

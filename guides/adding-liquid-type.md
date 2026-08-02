@@ -67,6 +67,13 @@ const MY_LIQUID_DESCRIPTORS: LiquidTypeDescriptor[] = [
     noiseScale:      0.8,    // surface noise frequency (lower = larger ripples)
     perturbStrength: 0.05,   // shore foam jitter amount
     surfaceLift:     0.02,   // how far above the cell floor the surface sits
+    // Optional appearance — this is what makes a liquid NOT look like tinted water
+    opacity:          0.98,  // thick liquids want ~1.0
+    flowSpeed:        0.35,  // slow, viscous animation
+    emissiveColor:    0xbfd4dd,
+    emissiveStrength: 0.1,   // subtle sheen; lava uses ~0.4
+    waveScale:        0.5,   // broader, slower-looking swells
+    foamIntensity:    0.4,   // subdued shore foam
   },
 ];
 ```
@@ -78,6 +85,15 @@ const MY_LIQUID_DESCRIPTORS: LiquidTypeDescriptor[] = [
 | `noiseScale` | global | Surface ripple frequency |
 | `perturbStrength` | global | Shore foam edge jitter |
 | `surfaceLift` | global | Surface Y offset above cell floor |
+| `opacity` | 0.82 (river 0.78) | Surface alpha — lava wants ~1.0 |
+| `flowSpeed` | 1 | Animation time multiplier for waves/foam/river flow |
+| `emissiveColor` | — | Self-illumination color (only partially dimmed by fog) |
+| `emissiveStrength` | 0 | Emissive intensity; the built-in lava uses 0.6 |
+| `waveScale` | 1 | Surface-noise frequency multiplier |
+| `foamIntensity` | 1 | Shore/estuary foam multiplier; 0 disables foam |
+
+All appearance fields are JSON-safe and travel with map saves and hexpacks, so a
+liquid's look is part of its definition, not the renderer's configuration.
 
 ---
 

@@ -4,6 +4,7 @@ import { hexToWorld } from '../math/HexLayout.js';
 import { HEX_DIRECTIONS } from '../math/HexCoord.js';
 import type { HexMap } from '../map/HexMap.js';
 import { DEFAULT_WATER_TERRAIN_INDEX } from './TerrainTypes.js';
+import { ELEVATION_SCALE } from '../map/HexCell.js';
 import { sampleNoise } from '../math/Noise.js';
 import type { ChunkBounds } from './HexChunk.js';
 import type { WaterGeometryOptions } from './WaterChunk.js';
@@ -34,7 +35,7 @@ export function buildEstuaryGeometry(
 ): THREE.BufferGeometry | null {
   const noiseScale     = opts.noiseScale         ?? 0.35;
   const perturbStr     = opts.perturbStrength    ?? 0.8;
-  const elevScale      = opts.elevationScale     ?? 0.5;
+  const elevScale      = opts.elevationScale     ?? ELEVATION_SCALE;
   const surfaceLift    = opts.surfaceLift        ?? 0.02;
   // Land-side (e2) vertices must track the terrain mesh, which perturbs with its
   // own ChunkGeometryOptions — not the liquid's (possibly overridden) settings.
@@ -147,7 +148,9 @@ export function buildEstuaryGeometry(
         // Incoming = river flows FROM land INTO this water cell.
         // Outgoing = river flows OUT OF this water cell into land.
         // UV2 mirrors: U → (1 − U), V → (0.8 − V) for outgoing (tutorial Part 8).
-        const incomingRiver = (map.getIncomingRiverDir(col, row) === i);
+        // Per-edge mask check so a water cell with several tributaries gets a
+        // correctly-oriented estuary on every incoming edge.
+        const incomingRiver = map.hasRiverIncomingThroughEdge(col, row, i);
         const fu = (u: number) => incomingRiver ? u : 1 - u;
         const fv = (v: number) => incomingRiver ? v : 0.8 - v;
 
@@ -228,9 +231,9 @@ export function buildEstuaryGeometry(
 
   const n   = vi / 3;
   const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position',  new THREE.BufferAttribute(positions.subarray(0, n * 3), 3));
-  geo.setAttribute('uv',        new THREE.BufferAttribute(uvs.subarray(0, n * 2), 2));
-  geo.setAttribute('uv2',       new THREE.BufferAttribute(uv2s.subarray(0, n * 2), 2));
-  geo.setAttribute('cellIndex', new THREE.BufferAttribute(cellIndices.subarray(0, n), 1));
+  geo.setAttribute('position',  new THREE.BufferAttribute(positions.slice(0, n * 3), 3));
+  geo.setAttribute('uv',        new THREE.BufferAttribute(uvs.slice(0, n * 2), 2));
+  geo.setAttribute('uv2',       new THREE.BufferAttribute(uv2s.slice(0, n * 2), 2));
+  geo.setAttribute('cellIndex', new THREE.BufferAttribute(cellIndices.slice(0, n), 1));
   return geo;
 }

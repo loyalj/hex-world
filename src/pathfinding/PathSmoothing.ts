@@ -2,8 +2,9 @@ import type { HexCoord } from '../math/HexCoord.js';
 import type { HexLayout } from '../math/HexLayout.js';
 import { hexToWorld } from '../math/HexLayout.js';
 import { hexToOffset } from '../math/HexCoord.js';
+import { ELEVATION_SCALE } from '../map/HexCell.js';
 
-const ELEV_SCALE = 0.5;
+const ELEV_SCALE = ELEVATION_SCALE;
 
 type Pt3 = { x: number; y: number; z: number };
 

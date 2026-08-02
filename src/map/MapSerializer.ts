@@ -5,8 +5,100 @@ import type { LiquidTypeDescriptor } from '../geometry/LiquidTypes.js';
 import { DEFAULT_WATER_TERRAIN_INDEX } from '../geometry/TerrainTypes.js';
 
 const MAGIC   = [0x48, 0x58, 0x4d, 0x50]; // "HXMP"
-const VERSION = 1;
 const HEADER_SIZE = 14; // 4 magic + 1 version + 4 width + 4 height + 1 featureLayerCount
+
+// ---------------------------------------------------------------------------
+// Versioning
+//
+// VERSION is the format written by serializeMap / serializeMapJSON. Files with
+// versions in [MIN_VERSION, VERSION] are accepted: older files are upgraded one
+// step at a time through the migration tables below before being read.
+//
+// When bumping VERSION:
+//   1. Increment VERSION here.
+//   2. Add a migration keyed by the OLD version that converts its payload to
+//      the next version's shape (binary migrations must also update the
+//      version byte at index 4). Never remove existing migrations.
+//   3. Only raise MIN_VERSION if you deliberately drop support for a format —
+//      doing so strands every map and .hexpack saved in older versions.
+// ---------------------------------------------------------------------------
+// Version history:
+//   1 — initial format: header, cells, roads, features.
+//   2 — adds the incoming-river bitmask section (`riverInBits`, one byte per
+//       cell) after features, enabling river confluences. v1 masks are derived
+//       from each cell byte's single incoming direction.
+const VERSION     = 2;
+const MIN_VERSION = 1;
+
+/** Derive a v2 incoming-river mask byte from a v1 cell byte (bits 2-0 = incoming+1). */
+function riverMaskFromCellByte(cellByte: number): number {
+  const incoming = cellByte & 0x07;
+  return incoming === 0 ? 0 : 1 << (incoming - 1);
+}
+
+const BINARY_MIGRATIONS: Record<number, (data: Uint8Array) => Uint8Array> = {
+  // v1 → v2: append the riverInBits section, derived from the cells' packed bytes.
+  1: (data) => {
+    const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+    const width  = view.getUint32(5, true);
+    const height = view.getUint32(9, true);
+    const n = width * height;
+
+    const out = new Uint8Array(data.byteLength + n);
+    out.set(data);
+    out[4] = 2;
+
+    const cellsStart = HEADER_SIZE;
+    const maskStart  = data.byteLength; // appended after the v1 payload
+    for (let i = 0; i < n; i++) {
+      out[maskStart + i] = riverMaskFromCellByte(data[cellsStart + i * 4 + 3]);
+    }
+    return out;
+  },
+};
+
+const JSON_MIGRATIONS: Record<number, (payload: Record<string, unknown>) => Record<string, unknown>> = {
+  // v1 → v2: derive the riverIn mask array from the base64 cell data.
+  1: (payload) => {
+    const cells = base64ToUint8(payload.cells as string);
+    const n = cells.byteLength / 4;
+    const masks = new Uint8Array(n);
+    for (let i = 0; i < n; i++) {
+      masks[i] = riverMaskFromCellByte(cells[i * 4 + 3]);
+    }
+    return { ...payload, version: 2, riverIn: uint8ToBase64(masks) };
+  },
+};
+
+/** Upgrades a parsed payload's version step-by-step until it reaches VERSION. */
+function migrateJSON(payload: Record<string, unknown>, label: string): Record<string, unknown> {
+  let version = payload.version as number;
+  while (version < VERSION) {
+    const migrate = JSON_MIGRATIONS[version];
+    if (!migrate) throw new Error(`${label}: no migration from version ${version} to ${version + 1}`);
+    payload = migrate(payload);
+    if ((payload.version as number) <= version) {
+      throw new Error(`${label}: migration from version ${version} did not advance the version`);
+    }
+    version = payload.version as number;
+  }
+  return payload;
+}
+
+/** Upgrades binary data's version step-by-step until it reaches VERSION. */
+function migrateBinary(data: Uint8Array, label: string): Uint8Array {
+  let version = data[4];
+  while (version < VERSION) {
+    const migrate = BINARY_MIGRATIONS[version];
+    if (!migrate) throw new Error(`${label}: no migration from version ${version} to ${version + 1}`);
+    data = migrate(data);
+    if (data[4] <= version) {
+      throw new Error(`${label}: migration from version ${version} did not advance the version byte`);
+    }
+    version = data[4];
+  }
+  return data;
+}
 
 /** Metadata attached to a saved map. All fields are optional; `createdAt` is auto-populated by serializeMapJSON. */
 export interface MapMetadata {
@@ -43,10 +135,17 @@ export interface DeserializedMap {
  * Serializes a HexMap to a compact binary Uint8Array.
  * Use for file saves, localStorage, or network transfer.
  * Pair with `deserializeMap`.
+ *
+ * The binary format stores CELL DATA ONLY — no MapMetadata and no descriptor
+ * arrays. Use `serializeMapJSON` when metadata or descriptors must travel with
+ * the map (HexPack does this automatically for entries that carry metadata).
  */
 export function serializeMap(map: HexMap): Uint8Array {
   const featureBytes = map.featureData ? map.featureData.byteLength : 0;
-  const out  = new Uint8Array(HEADER_SIZE + map.uint8.byteLength + map.roadBits.byteLength + featureBytes);
+  const out  = new Uint8Array(
+    HEADER_SIZE + map.uint8.byteLength + map.roadBits.byteLength + featureBytes
+    + map.riverInBits.byteLength,
+  );
   const view = new DataView(out.buffer);
 
   out[0] = MAGIC[0]; out[1] = MAGIC[1]; out[2] = MAGIC[2]; out[3] = MAGIC[3];
@@ -58,31 +157,55 @@ export function serializeMap(map: HexMap): Uint8Array {
   let offset = HEADER_SIZE;
   out.set(map.uint8,     offset); offset += map.uint8.byteLength;
   out.set(map.roadBits,  offset); offset += map.roadBits.byteLength;
-  if (map.featureData) out.set(map.featureData, offset);
+  if (map.featureData) { out.set(map.featureData, offset); offset += map.featureData.byteLength; }
+  out.set(map.riverInBits, offset);
 
   return out;
 }
 
 /**
  * Deserializes a HexMap from binary data produced by `serializeMap`.
- * Throws if the magic bytes or version are unrecognised.
+ * Accepts versions MIN_VERSION..VERSION, upgrading older files via migrations.
+ * Throws on invalid magic bytes, out-of-range versions, corrupt headers, or
+ * truncated data.
  */
 export function deserializeMap(data: Uint8Array, isWater?: (terrain: number) => boolean): HexMap {
-  const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
-
+  if (data.byteLength < HEADER_SIZE) {
+    throw new Error(`deserializeMap: data too short (${data.byteLength} bytes) to contain a map header`);
+  }
   if (data[0] !== MAGIC[0] || data[1] !== MAGIC[1] || data[2] !== MAGIC[2] || data[3] !== MAGIC[3]) {
     throw new Error('deserializeMap: invalid magic bytes — not a hex-world map file');
   }
-  const version = data[4];
-  if (version !== VERSION) {
-    throw new Error(`deserializeMap: unsupported version ${version} (expected ${VERSION})`);
+  const rawVersion = data[4];
+  if (rawVersion < MIN_VERSION || rawVersion > VERSION) {
+    throw new Error(
+      `deserializeMap: unsupported version ${rawVersion} (supported: ${MIN_VERSION}–${VERSION}). ` +
+      `Files newer than this library cannot be read — upgrade @loyalj/hex-world.`,
+    );
   }
+  data = migrateBinary(data, 'deserializeMap');
 
+  const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
   const width             = view.getUint32(5, true);
   const height            = view.getUint32(9, true);
   const featureLayerCount = data[13];
 
+  if (width === 0 || height === 0 || width > 0xffff || height > 0xffff) {
+    throw new Error(`deserializeMap: corrupt header — implausible map size ${width}×${height}`);
+  }
+
   const map = new HexMap({ width, height, featureLayerCount });
+
+  // Validate total length BEFORE copying — Uint8Array.set with a short
+  // subarray would otherwise silently produce a partially zero-filled map.
+  const expected = HEADER_SIZE + map.uint8.byteLength + map.roadBits.byteLength
+    + (map.featureData?.byteLength ?? 0) + map.riverInBits.byteLength;
+  if (data.byteLength < expected) {
+    throw new Error(
+      `deserializeMap: truncated data — a ${width}×${height} map with ` +
+      `${featureLayerCount} feature layer(s) needs ${expected} bytes, got ${data.byteLength}`,
+    );
+  }
 
   let offset = HEADER_SIZE;
   map.uint8.set(data.subarray(offset, offset + map.uint8.byteLength));
@@ -91,7 +214,9 @@ export function deserializeMap(data: Uint8Array, isWater?: (terrain: number) => 
   offset += map.roadBits.byteLength;
   if (map.featureData) {
     map.featureData.set(data.subarray(offset, offset + map.featureData.byteLength));
+    offset += map.featureData.byteLength;
   }
+  map.riverInBits.set(data.subarray(offset, offset + map.riverInBits.byteLength));
 
   map.computeWaterSurfaces(isWater);
   return map;
@@ -107,6 +232,8 @@ interface MapJSON {
   cells:             string;
   roads:             string;
   features:          string;
+  /** Base64 incoming-river bitmask array (v2+). */
+  riverIn:           string;
   name?:             string;
   seed?:             number;
   generatorId?:      string;
@@ -156,6 +283,7 @@ export function serializeMapJSON(
     cells:    uint8ToBase64(map.uint8),
     roads:    uint8ToBase64(map.roadBits),
     features: map.featureData ? uint8ToBase64(map.featureData) : '',
+    riverIn:  uint8ToBase64(map.riverInBits),
     ...metadata,
     createdAt: metadata.createdAt ?? new Date().toISOString(),
     ...(scatterDescriptors && scatterDescriptors.length > 0 ? { scatterDescriptors } : {}),
@@ -168,18 +296,57 @@ export function serializeMapJSON(
 /**
  * Deserializes a HexMap from a JSON string produced by `serializeMapJSON`.
  * Returns the map and any metadata that was stored with it.
- * Throws if the version is unrecognised.
+ * Accepts versions MIN_VERSION..VERSION, upgrading older files via migrations.
+ * Throws on out-of-range versions or cell data whose size doesn't match the
+ * declared dimensions.
  */
 export function deserializeMapJSON(json: string): DeserializedMap {
-  const p = JSON.parse(json) as MapJSON;
-  if (p.version !== VERSION) {
-    throw new Error(`deserializeMapJSON: unsupported version ${p.version} (expected ${VERSION})`);
+  let raw = JSON.parse(json) as Record<string, unknown>;
+  const rawVersion = raw.version as number;
+  if (typeof rawVersion !== 'number' || rawVersion < MIN_VERSION || rawVersion > VERSION) {
+    throw new Error(
+      `deserializeMapJSON: unsupported version ${rawVersion} (supported: ${MIN_VERSION}–${VERSION}). ` +
+      `Files newer than this library cannot be read — upgrade @loyalj/hex-world.`,
+    );
   }
+  raw = migrateJSON(raw, 'deserializeMapJSON');
+  const p = raw as unknown as MapJSON;
+
   const map = new HexMap({ width: p.width, height: p.height, featureLayerCount: p.featureLayerCount });
-  map.uint8.set(base64ToUint8(p.cells));
-  map.roadBits.set(base64ToUint8(p.roads));
+
+  const cells = base64ToUint8(p.cells);
+  if (cells.byteLength !== map.uint8.byteLength) {
+    throw new Error(
+      `deserializeMapJSON: cell data is ${cells.byteLength} bytes but a ` +
+      `${p.width}×${p.height} map needs ${map.uint8.byteLength}`,
+    );
+  }
+  const roads = base64ToUint8(p.roads);
+  if (roads.byteLength !== map.roadBits.byteLength) {
+    throw new Error(
+      `deserializeMapJSON: road data is ${roads.byteLength} bytes but a ` +
+      `${p.width}×${p.height} map needs ${map.roadBits.byteLength}`,
+    );
+  }
+  const riverIn = base64ToUint8(p.riverIn);
+  if (riverIn.byteLength !== map.riverInBits.byteLength) {
+    throw new Error(
+      `deserializeMapJSON: river data is ${riverIn.byteLength} bytes but a ` +
+      `${p.width}×${p.height} map needs ${map.riverInBits.byteLength}`,
+    );
+  }
+  map.uint8.set(cells);
+  map.roadBits.set(roads);
+  map.riverInBits.set(riverIn);
   if (map.featureData && p.features) {
-    map.featureData.set(base64ToUint8(p.features));
+    const features = base64ToUint8(p.features);
+    if (features.byteLength !== map.featureData.byteLength) {
+      throw new Error(
+        `deserializeMapJSON: feature data is ${features.byteLength} bytes but ` +
+        `${p.featureLayerCount} layer(s) on a ${p.width}×${p.height} map need ${map.featureData.byteLength}`,
+      );
+    }
+    map.featureData.set(features);
   }
 
   // Build isWater predicate from embedded terrain descriptors so custom liquid

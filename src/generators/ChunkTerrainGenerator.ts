@@ -46,9 +46,13 @@ class BucketQueue {
   }
 }
 
-// Module-level instances shared across calls to avoid repeated allocation.
-const frontier   = new BucketQueue();
-const inFrontier = new Set<number>();
+// BFS working state — created per generateChunkTerrain call and reused across
+// its raise/sink passes, so concurrent or interleaved generations can't
+// corrupt each other's frontier.
+interface BfsState {
+  frontier:   BucketQueue;
+  inFrontier: Set<number>;
+}
 
 // ---- Shared BFS setup ----
 
@@ -56,16 +60,17 @@ function initBfs(
   map: HexMap,
   region: MapRegion,
   rand: () => number,
+  bfs: BfsState,
 ): { seedCol: number; seedRow: number; seedHex: ReturnType<typeof offsetToHex> } | null {
   const seedCol = Math.floor(region.colMin + rand() * (region.colMax - region.colMin));
   const seedRow = Math.floor(region.rowMin + rand() * (region.rowMax - region.rowMin));
   if (!map.inBounds(seedCol, seedRow)) return null;
 
-  frontier.clear();
-  inFrontier.clear();
+  bfs.frontier.clear();
+  bfs.inFrontier.clear();
   const key = seedRow * map.width + seedCol;
-  inFrontier.add(key);
-  frontier.enqueue(seedCol, seedRow, 0);
+  bfs.inFrontier.add(key);
+  bfs.frontier.enqueue(seedCol, seedRow, 0);
   return { seedCol, seedRow, seedHex: offsetToHex(seedCol, seedRow) };
 }
 
@@ -75,16 +80,17 @@ function expandNeighbors(
   map: HexMap,
   jitterProb: number,
   rand: () => number,
+  bfs: BfsState,
 ): void {
   for (let d = 0; d < 6; d++) {
     const nb = offsetNeighbor(col, row, d);
     if (!map.inBounds(nb.col, nb.row)) continue;
     const nbKey = nb.row * map.width + nb.col;
-    if (inFrontier.has(nbKey)) continue;
-    inFrontier.add(nbKey);
+    if (bfs.inFrontier.has(nbKey)) continue;
+    bfs.inFrontier.add(nbKey);
     const dist   = hexDistance(offsetToHex(nb.col, nb.row), seedHex);
     const jitter = rand() < jitterProb ? 1 : 0;
-    frontier.enqueue(nb.col, nb.row, dist + jitter);
+    bfs.frontier.enqueue(nb.col, nb.row, dist + jitter);
   }
 }
 
@@ -92,22 +98,22 @@ function expandNeighbors(
 
 function raiseTerrain(
   map: HexMap, region: MapRegion, chunkSize: number, budget: number,
-  elevMax: number, jitterProb: number, rand: () => number,
+  elevMax: number, jitterProb: number, rand: () => number, bfs: BfsState,
 ): number {
-  const seed = initBfs(map, region, rand);
+  const seed = initBfs(map, region, rand, bfs);
   if (!seed) return budget;
   const { seedHex } = seed;
   let size = 0;
 
-  while (size < chunkSize && frontier.count > 0) {
-    const [col, row] = frontier.dequeue()!;
+  while (size < chunkSize && bfs.frontier.count > 0) {
+    const [col, row] = bfs.frontier.dequeue()!;
     const oldElev = map.getElevation(col, row);
 
     if (oldElev < 0) {
       // Water cell: only convert to land if we still have budget
       if (budget <= 0) {
         size++;
-        expandNeighbors(col, row, seedHex, map, jitterProb, rand);
+        expandNeighbors(col, row, seedHex, map, jitterProb, rand, bfs);
         continue;
       }
       if (oldElev + 1 >= 0) budget--;
@@ -115,22 +121,22 @@ function raiseTerrain(
 
     map.setElevation(col, row, Math.min(oldElev + 1, elevMax));
     size++;
-    expandNeighbors(col, row, seedHex, map, jitterProb, rand);
+    expandNeighbors(col, row, seedHex, map, jitterProb, rand, bfs);
   }
   return budget;
 }
 
 function sinkTerrain(
   map: HexMap, region: MapRegion, chunkSize: number, budget: number,
-  elevMin: number, jitterProb: number, rand: () => number,
+  elevMin: number, jitterProb: number, rand: () => number, bfs: BfsState,
 ): number {
-  const seed = initBfs(map, region, rand);
+  const seed = initBfs(map, region, rand, bfs);
   if (!seed) return budget;
   const { seedHex } = seed;
   let size = 0;
 
-  while (size < chunkSize && frontier.count > 0) {
-    const [col, row] = frontier.dequeue()!;
+  while (size < chunkSize && bfs.frontier.count > 0) {
+    const [col, row] = bfs.frontier.dequeue()!;
     const oldElev = map.getElevation(col, row);
     map.setElevation(col, row, Math.max(oldElev - 1, elevMin));
 
@@ -138,7 +144,7 @@ function sinkTerrain(
     if (oldElev >= 0 && oldElev - 1 < 0) budget++;
 
     size++;
-    expandNeighbors(col, row, seedHex, map, jitterProb, rand);
+    expandNeighbors(col, row, seedHex, map, jitterProb, rand, bfs);
   }
   return budget;
 }
@@ -170,17 +176,26 @@ export function generateChunkTerrain(
   if (regions.length === 0) return;
 
   let budget = Math.round(map.width * map.height * landPercentage / 100);
+  const bfs: BfsState = { frontier: new BucketQueue(), inFrontier: new Set<number>() };
 
   for (let guard = 0; guard < 10000; guard++) {
     const sink = rand() < sinkProb;
     for (const region of regions) {
       const chunkSize = chunkSizeMin + Math.floor(rand() * (chunkSizeMax - chunkSizeMin + 1));
       if (sink) {
-        budget = sinkTerrain(map, region, chunkSize, budget, elevMin, jitterProb, rand);
+        budget = sinkTerrain(map, region, chunkSize, budget, elevMin, jitterProb, rand, bfs);
       } else {
-        budget = raiseTerrain(map, region, chunkSize, budget, elevMax, jitterProb, rand);
+        budget = raiseTerrain(map, region, chunkSize, budget, elevMax, jitterProb, rand, bfs);
         if (budget === 0) return;
       }
     }
   }
+
+  // Exited via the iteration cap rather than exhausting the budget — the
+  // requested landPercentage could not be placed (usually too high for the
+  // map/region configuration). Surface it instead of failing silently.
+  console.warn(
+    `generateChunkTerrain: iteration cap reached with ${budget} land-budget cells unplaced — ` +
+    `landPercentage may be too high for this map/region configuration`,
+  );
 }

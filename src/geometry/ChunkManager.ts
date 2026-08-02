@@ -4,7 +4,7 @@ import type { HexLayout } from '../math/HexLayout.js';
 import { worldToHex } from '../math/HexLayout.js';
 import { buildChunkGeometry, type ChunkBounds, type ChunkGeometryOptions, type TerrainColorMode } from './HexChunk.js';
 export type { TerrainColorMode };
-import { buildWaterGeometry, buildRiverGeometry, type WaterGeometryOptions } from './WaterChunk.js';
+import { buildWaterGeometry, buildRiverGeometry, computeRiverOwnership, type WaterGeometryOptions } from './WaterChunk.js';
 import { buildShoreGeometry } from './WaterShoreChunk.js';
 import { buildEstuaryGeometry } from './EstuaryChunk.js';
 import { buildScatterMeshes } from './ScatterBuilder.js';
@@ -81,7 +81,10 @@ export class ChunkManager {
   private readonly liquidTerrainSets:  Map<string, Set<number>>;
   private readonly allWaterTerrains:   Set<number>;
   private readonly liquidPriorityByTerrain: Map<number, number>;
+  private readonly liquidIdByTerrain:       Map<number, string>;
   private readonly defaultRiverLiquidId:    string | null;
+  /** Map-wide river ownership cache — per-liquid sets of owned river cells. Null = stale. */
+  private riverCellsByLiquid: Map<string, Set<number>> | null = null;
   private fogData:                     FogData | null;
   private hideUnexplored            = true;
   private dimExplored               = true;
@@ -132,6 +135,11 @@ export class ChunkManager {
       for (const idx of set) this.liquidPriorityByTerrain.set(idx, p);
     }
 
+    this.liquidIdByTerrain = new Map();
+    for (const [id, set] of this.liquidTerrainSets) {
+      for (const idx of set) this.liquidIdByTerrain.set(idx, id);
+    }
+
     // Unclassified rivers (drainage target unknown) are rendered by exactly one
     // liquid: the highest-priority one that has a river material.
     let defaultRiver: string | null = null;
@@ -166,11 +174,35 @@ export class ChunkManager {
       ...(this.geoOptions.noiseScale          !== undefined ? { terrainNoiseScale:          this.geoOptions.noiseScale }          : {}),
       ...(this.geoOptions.perturbStrength     !== undefined ? { terrainPerturbStrength:     this.geoOptions.perturbStrength }     : {}),
       ...(this.geoOptions.elevPerturbStrength !== undefined ? { terrainElevPerturbStrength: this.geoOptions.elevPerturbStrength } : {}),
+      ...(this.geoOptions.cliffThreshold      !== undefined ? { cliffThreshold:             this.geoOptions.cliffThreshold }      : {}),
       waterTerrains:    this.liquidTerrainSets.get(liquidId) ?? new Set(),
       allLiquidTerrains: this.allWaterTerrains,
       liquidPriorityByTerrain: this.liquidPriorityByTerrain,
       ownsUnclassifiedRivers:  liquidId === this.defaultRiverLiquidId,
+      riverCells: this.riverCellsFor(liquidId),
     };
+  }
+
+  /**
+   * Lazily computes the map-wide river ownership cache: which liquid renders
+   * each river cell's channel. Unclassified chains go to the default liquid.
+   * Invalidated by markDirty; rebuilt once per edit batch instead of re-traced
+   * per chunk × per liquid.
+   */
+  private riverCellsFor(liquidId: string): Set<number> | undefined {
+    if (!this.riverCellsByLiquid) {
+      const ownership = computeRiverOwnership(
+        this.map, this.layout.orientation.edgeDirections, this.liquidIdByTerrain,
+      );
+      const sets = new Map<string, Set<number>>();
+      for (const id of this.liquidMaterials.keys()) sets.set(id, new Set());
+      for (const [cell, owner] of ownership) {
+        if (owner !== null) sets.get(owner)?.add(cell);
+        else if (this.defaultRiverLiquidId) sets.get(this.defaultRiverLiquidId)?.add(cell);
+      }
+      this.riverCellsByLiquid = sets;
+    }
+    return this.riverCellsByLiquid.get(liquidId);
   }
 
   /** Collect all materials currently in use (for fog uniform propagation). */
@@ -375,12 +407,16 @@ export class ChunkManager {
    * Loads chunks within loadRadius, unloads those outside.
    */
   update(camera: THREE.Camera, dt = 0): void {
-    this.elapsedSeconds += dt;
+    // Wrapped so the float32 uTime uniform never loses enough precision to
+    // degrade shader animation in long sessions (one sub-frame pop per ~4.5 h).
+    this.elapsedSeconds = (this.elapsedSeconds + dt) % 16384;
     for (const ms of this.liquidMaterials.values()) {
-      if (ms.surface  instanceof THREE.ShaderMaterial) ms.surface.uniforms.uTime.value  = this.elapsedSeconds;
-      if (ms.shore    instanceof THREE.ShaderMaterial) ms.shore.uniforms.uTime.value    = this.elapsedSeconds;
-      if (ms.estuary  instanceof THREE.ShaderMaterial) ms.estuary.uniforms.uTime.value  = this.elapsedSeconds;
-      if (ms.river    instanceof THREE.ShaderMaterial) ms.river.uniforms.uTime.value    = this.elapsedSeconds;
+      for (const mat of [ms.surface, ms.shore, ms.estuary, ms.river]) {
+        // Guarded so custom ShaderMaterials without a uTime uniform don't throw.
+        if (mat instanceof THREE.ShaderMaterial && mat.uniforms.uTime) {
+          mat.uniforms.uTime.value = this.elapsedSeconds;
+        }
+      }
     }
 
     if (this.fogData) {
@@ -390,7 +426,17 @@ export class ChunkManager {
     }
 
     if (this.dirty.size > 0) {
-      this.map.computeWaterSurfaces(t => this.allWaterTerrains.has(t));
+      // Incremental: only water bodies intersecting the dirty chunks (expanded
+      // by one cell so bodies merely adjacent to an edit re-seed) are re-flooded.
+      const regions = [...this.dirty].map(k => {
+        const [cx, cy] = k.split(',').map(Number);
+        const b = this.bounds(cx, cy);
+        return {
+          colStart: b.colStart - 1, colEnd: b.colEnd + 1,
+          rowStart: b.rowStart - 1, rowEnd: b.rowEnd + 1,
+        };
+      });
+      this.map.computeWaterSurfaces(t => this.allWaterTerrains.has(t), regions);
     }
 
     for (const k of this.dirty) {
@@ -549,6 +595,7 @@ export class ChunkManager {
     const cx = Math.floor(col / this.chunkSize);
     const cy = Math.floor(row / this.chunkSize);
     this.dirty.add(this.key(cx, cy));
+    this.riverCellsByLiquid = null; // river ownership may have changed
   }
 
   /** Force-load all chunks (use for small maps or offline baking). */
@@ -622,11 +669,22 @@ export class ChunkManager {
     }
   }
 
-  /** Dispose all loaded chunks and clear the scene. */
+  /**
+   * Dispose all loaded chunk meshes and their geometries, removing them from
+   * the scene.
+   *
+   * Does NOT dispose resources the caller passed in and still owns: the
+   * terrain material and its texture array, road material, liquid materials,
+   * scatter geometries/materials, and any FogData texture. Dispose those
+   * yourself when tearing down the scene for good.
+   */
   dispose(): void {
     for (const k of [...this.chunks.keys()]) {
       this.unloadChunk(k);
     }
+    // Dispose-and-reload is the documented way to refresh after regenerating
+    // the map in place, so every map-derived cache must reset here too.
+    this.riverCellsByLiquid = null;
   }
 
   /**

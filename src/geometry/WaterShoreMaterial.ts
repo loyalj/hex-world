@@ -1,5 +1,8 @@
 import * as THREE from 'three';
-import { WATER_GLSL, type LiquidColorOptions } from './WaterMaterial.js';
+import {
+  WATER_GLSL, LIQUID_APPEARANCE_GLSL, liquidAppearanceUniforms,
+  type LiquidColorOptions,
+} from './WaterMaterial.js';
 import { FOG_VERT_DECL, FOG_VERT_BODY, FOG_FRAG_DECL, fogUniforms } from './FogGLSL.js';
 
 const vertexShader = /* glsl */`
@@ -24,17 +27,19 @@ const fragmentShader = /* glsl */`
   varying vec2 vWorldXZ;
 
   ${WATER_GLSL}
+  ${LIQUID_APPEARANCE_GLSL}
 
   void main() {
+    float t = uTime * uFlowSpeed;
     float shore = vUv.y;
 
-    float hl = waterNoise(vec3(vWorldXZ * 4.5, uTime * 0.1));
+    float hl = waterNoise(vec3(vWorldXZ * 4.5 * uWaveScale, t * 0.1));
     vec3 waterColor = uColor + hl * 0.2;
 
-    float foam = Foam(shore, vWorldXZ, uTime);
+    float foam = clamp(Foam(shore, vWorldXZ, t) * uFoamIntensity, 0.0, 1.0);
     vec3 color = mix(waterColor, uFoamColor, foam);
 
-    gl_FragColor = vec4(color * vVisibility, 0.82 * vExplored);
+    gl_FragColor = liquidOutput(color, vVisibility, vExplored);
   }
 `;
 
@@ -46,6 +51,7 @@ export function createWaterShoreMaterial(colors?: LiquidColorOptions): THREE.Sha
       uTime:      { value: 0 },
       uColor:     { value: color },
       uFoamColor: { value: foamColor },
+      ...liquidAppearanceUniforms(colors, 0.82),
       ...fogUniforms(),
     },
     vertexShader,
