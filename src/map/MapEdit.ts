@@ -10,12 +10,12 @@ import { CELL_STRIDE } from './HexCell.js';
  * Derived data (water surfaces, shore distances) is intentionally excluded —
  * `ChunkManager.update()` recomputes it for dirty regions.
  */
-interface CellSnapshot {
+export interface CellSnapshot {
   bytes: Uint8Array;
   meta:  Record<string, unknown> | null;
 }
 
-interface CellRecord {
+export interface CellRecord {
   col: number;
   row: number;
   before: CellSnapshot;

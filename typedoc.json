@@ -2,7 +2,7 @@
   "entryPoints": ["src/index.ts"],
   "out": "docs",
   "name": "hex-world",
-  "readme": "QUICKSTART.md",
+  "readme": "guides/QUICKSTART.md",
   "excludePrivate": true,
   "excludeInternal": true,
   "categorizeByGroup": true,

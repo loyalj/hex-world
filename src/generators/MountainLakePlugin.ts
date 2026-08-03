@@ -3,7 +3,7 @@ import type { MapGeneratorPlugin } from './MapGeneratorPlugin.js';
 import { makeRng } from '../math/Random.js';
 import { TerrainType } from '../map/HexCell.js';
 
-interface MountainLakeConfig {
+export interface MountainLakeConfig {
   lakeElevation: number;
 }
 

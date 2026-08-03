@@ -72,7 +72,7 @@ function traceDemoRiver(
   }
 }
 
-interface LiquidShowcaseConfig {
+export interface LiquidShowcaseConfig {
   lavaElevation: number;
   acidElevation: number;
   waterLakeElevation: number;
