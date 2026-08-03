@@ -62,13 +62,26 @@ export function buildShoreGeometry(
 
   const { colStart, colEnd, rowStart, rowEnd } = bounds;
   const hexCount = (colEnd - colStart) * (rowEnd - rowStart);
-  const maxVerts = hexCount * 60;
+  // Indexed: unique vertices ≤ emitted corners, so the old per-hex vertex
+  // budget (60) now bounds the index count; welding only shrinks the attributes.
+  const maxVerts   = hexCount * 60;
+  const maxIndices = hexCount * 60;
 
   const positions   = new Float32Array(maxVerts * 3);
   const uvs         = new Float32Array(maxVerts * 2);
   const cellIndices = new Float32Array(maxVerts);
-  let vi = 0, uvi = 0, cii = 0;
+  const indices     = maxVerts > 65535 ? new Uint32Array(maxIndices) : new Uint16Array(maxIndices);
+  let vi = 0, uvi = 0, cii = 0, ii = 0;
+  let vertCount = 0;
   let curCi = 0;
+
+  // Per-cell vertex weld: identical (position, uv, land) tuples within one cell
+  // collapse to a single indexed vertex (fan centers, shared edge corners, the
+  // strip/corner-triangle seam). Never welded ACROSS cells — cellIndex and the
+  // land-side Y differ there, and merging them would corrupt the per-cell data.
+  const vertIds = new Map<string, number>();
+  const vertKey = (x: number, z: number, y: number, u: number, v: number, land: boolean) =>
+    `${Math.round(x * 1e5)},${Math.round(z * 1e5)},${Math.round(y * 1e5)},${u},${v},${land ? 1 : 0}`;
 
   const perturbXZ = (x: number, z: number): [number, number] => {
     const n = sampleNoise(x * noiseScale, z * noiseScale);
@@ -90,8 +103,15 @@ export function buildShoreGeometry(
     return map.getElevation(col, row) * elevScale + dy;
   };
 
-  /** `land` selects the terrain-matched perturbation for land-side vertices. */
-  const addVert = (x: number, z: number, y: number, u: number, v: number, land = false) => {
+  /**
+   * `land` selects the terrain-matched perturbation for land-side vertices.
+   * Returns the vertex id, reusing an identical vertex emitted earlier in the
+   * same cell.
+   */
+  const addVert = (x: number, z: number, y: number, u: number, v: number, land = false): number => {
+    const key = vertKey(x, z, y, u, v, land);
+    const existing = vertIds.get(key);
+    if (existing !== undefined) return existing;
     const [dx, dz] = land ? perturbXZLand(x, z) : perturbXZ(x, z);
     positions[vi++] = x + dx;
     positions[vi++] = y;
@@ -99,6 +119,8 @@ export function buildShoreGeometry(
     uvs[uvi++] = u;
     uvs[uvi++] = v;
     cellIndices[cii++] = curCi;
+    vertIds.set(key, vertCount);
+    return vertCount++;
   };
 
   const addTri = (
@@ -106,7 +128,11 @@ export function buildShoreGeometry(
     x1: number, z1: number, y1: number, u1: number, v1: number,
     x2: number, z2: number, y2: number, u2: number, v2: number,
     l0 = false, l1 = false, l2 = false,
-  ) => { addVert(x0, z0, y0, u0, v0, l0); addVert(x1, z1, y1, u1, v1, l1); addVert(x2, z2, y2, u2, v2, l2); };
+  ) => {
+    indices[ii++] = addVert(x0, z0, y0, u0, v0, l0);
+    indices[ii++] = addVert(x1, z1, y1, u1, v1, l1);
+    indices[ii++] = addVert(x2, z2, y2, u2, v2, l2);
+  };
 
   const addQuad = (
     x0: number, z0: number, y0: number, u0: number, v0: number,
@@ -137,6 +163,7 @@ export function buildShoreGeometry(
       if (!isWater(map.getTerrain(col, row))) continue;
 
       curCi = row * map.width + col;
+      vertIds.clear(); // weld within this cell only
       const q          = col - (row - (row & 1)) / 2;
       const center     = hexToWorld(layout, { q, r: row });
       const wSurfaceY  = map.getWaterSurface(col, row) * elevScale + surfaceLift;
@@ -240,12 +267,12 @@ export function buildShoreGeometry(
     }
   }
 
-  if (vi === 0) return null;
+  if (vertCount === 0) return null;
 
-  const n   = vi / 3;
   const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position',  new THREE.BufferAttribute(positions.slice(0, n * 3), 3));
-  geo.setAttribute('uv',        new THREE.BufferAttribute(uvs.slice(0, n * 2), 2));
-  geo.setAttribute('cellIndex', new THREE.BufferAttribute(cellIndices.slice(0, n), 1));
+  geo.setAttribute('position',  new THREE.BufferAttribute(positions.slice(0, vertCount * 3), 3));
+  geo.setAttribute('uv',        new THREE.BufferAttribute(uvs.slice(0, vertCount * 2), 2));
+  geo.setAttribute('cellIndex', new THREE.BufferAttribute(cellIndices.slice(0, vertCount), 1));
+  geo.setIndex(new THREE.BufferAttribute(indices.slice(0, ii), 1));
   return geo;
 }

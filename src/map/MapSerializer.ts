@@ -27,7 +27,11 @@ const HEADER_SIZE = 14; // 4 magic + 1 version + 4 width + 4 height + 1 featureL
 //   2 — adds the incoming-river bitmask section (`riverInBits`, one byte per
 //       cell) after features, enabling river confluences. v1 masks are derived
 //       from each cell byte's single incoming direction.
-const VERSION     = 2;
+//   3 — adds the sparse per-cell metadata channel (`HexMap.cellData`). Binary:
+//       a u32-length-prefixed UTF-8 JSON trailer after riverInBits. JSON: an
+//       optional `cellData` object keyed by flat cell index. v2 files upgrade
+//       to an empty store.
+const VERSION     = 3;
 const MIN_VERSION = 1;
 
 /** Derive a v2 incoming-river mask byte from a v1 cell byte (bits 2-0 = incoming+1). */
@@ -55,6 +59,13 @@ const BINARY_MIGRATIONS: Record<number, (data: Uint8Array) => Uint8Array> = {
     }
     return out;
   },
+  // v2 → v3: append an empty cell-metadata trailer (u32 length prefix of 0).
+  2: (data) => {
+    const out = new Uint8Array(data.byteLength + 4);
+    out.set(data);
+    out[4] = 3;
+    return out;
+  },
 };
 
 const JSON_MIGRATIONS: Record<number, (payload: Record<string, unknown>) => Record<string, unknown>> = {
@@ -68,6 +79,8 @@ const JSON_MIGRATIONS: Record<number, (payload: Record<string, unknown>) => Reco
     }
     return { ...payload, version: 2, riverIn: uint8ToBase64(masks) };
   },
+  // v2 → v3: no data change — an absent `cellData` field means an empty store.
+  2: (payload) => ({ ...payload, version: 3 }),
 };
 
 /** Upgrades a parsed payload's version step-by-step until it reaches VERSION. */
@@ -98,6 +111,37 @@ function migrateBinary(data: Uint8Array, label: string): Uint8Array {
     version = data[4];
   }
   return data;
+}
+
+/**
+ * The per-cell metadata channel as a plain sparse object keyed by flat cell
+ * index, or `null` when the store is empty (so both formats can omit it).
+ */
+function cellDataToObject(map: HexMap): Record<string, Record<string, unknown>> | null {
+  if (map.cellData.size === 0) return null;
+  const out: Record<string, Record<string, unknown>> = {};
+  for (const [ci, record] of map.cellData) out[ci] = record;
+  return out;
+}
+
+/** Validates and loads a parsed sparse cell-metadata object into the map. */
+function applyCellDataObject(
+  map: HexMap,
+  obj: Record<string, unknown>,
+  label: string,
+): void {
+  for (const [key, record] of Object.entries(obj)) {
+    const ci = Number(key);
+    if (!Number.isInteger(ci) || ci < 0 || ci >= map.cellCount) {
+      throw new Error(
+        `${label}: cell metadata index ${key} is out of range for a ${map.width}×${map.height} map`,
+      );
+    }
+    if (record === null || typeof record !== 'object' || Array.isArray(record)) {
+      throw new Error(`${label}: cell metadata for index ${key} is not an object`);
+    }
+    map.cellData.set(ci, record as Record<string, unknown>);
+  }
 }
 
 /** Metadata attached to a saved map. All fields are optional; `createdAt` is auto-populated by serializeMapJSON. */
@@ -136,15 +180,19 @@ export interface DeserializedMap {
  * Use for file saves, localStorage, or network transfer.
  * Pair with `deserializeMap`.
  *
- * The binary format stores CELL DATA ONLY — no MapMetadata and no descriptor
- * arrays. Use `serializeMapJSON` when metadata or descriptors must travel with
- * the map (HexPack does this automatically for entries that carry metadata).
+ * The binary format stores per-cell data ONLY — including the `cellData`
+ * metadata channel, but no MapMetadata and no descriptor arrays. Use
+ * `serializeMapJSON` when metadata or descriptors must travel with the map
+ * (HexPack does this automatically for entries that carry metadata).
  */
 export function serializeMap(map: HexMap): Uint8Array {
   const featureBytes = map.featureData ? map.featureData.byteLength : 0;
+  const cellDataObj  = cellDataToObject(map);
+  const metaBytes    = cellDataObj ? new TextEncoder().encode(JSON.stringify(cellDataObj)) : null;
+  const metaLength   = metaBytes ? metaBytes.byteLength : 0;
   const out  = new Uint8Array(
     HEADER_SIZE + map.uint8.byteLength + map.roadBits.byteLength + featureBytes
-    + map.riverInBits.byteLength,
+    + map.riverInBits.byteLength + 4 + metaLength,
   );
   const view = new DataView(out.buffer);
 
@@ -158,7 +206,11 @@ export function serializeMap(map: HexMap): Uint8Array {
   out.set(map.uint8,     offset); offset += map.uint8.byteLength;
   out.set(map.roadBits,  offset); offset += map.roadBits.byteLength;
   if (map.featureData) { out.set(map.featureData, offset); offset += map.featureData.byteLength; }
-  out.set(map.riverInBits, offset);
+  out.set(map.riverInBits, offset); offset += map.riverInBits.byteLength;
+
+  // Cell-metadata trailer: u32 byte length + UTF-8 JSON (length 0 = no data).
+  view.setUint32(offset, metaLength, true); offset += 4;
+  if (metaBytes) out.set(metaBytes, offset);
 
   return out;
 }
@@ -198,8 +250,9 @@ export function deserializeMap(data: Uint8Array, isWater?: (terrain: number) => 
 
   // Validate total length BEFORE copying — Uint8Array.set with a short
   // subarray would otherwise silently produce a partially zero-filled map.
+  // The fixed sections are followed by the 4-byte cell-metadata length prefix.
   const expected = HEADER_SIZE + map.uint8.byteLength + map.roadBits.byteLength
-    + (map.featureData?.byteLength ?? 0) + map.riverInBits.byteLength;
+    + (map.featureData?.byteLength ?? 0) + map.riverInBits.byteLength + 4;
   if (data.byteLength < expected) {
     throw new Error(
       `deserializeMap: truncated data — a ${width}×${height} map with ` +
@@ -217,6 +270,28 @@ export function deserializeMap(data: Uint8Array, isWater?: (terrain: number) => 
     offset += map.featureData.byteLength;
   }
   map.riverInBits.set(data.subarray(offset, offset + map.riverInBits.byteLength));
+  offset += map.riverInBits.byteLength;
+
+  const metaLength = view.getUint32(offset, true);
+  offset += 4;
+  if (metaLength > 0) {
+    if (data.byteLength < offset + metaLength) {
+      throw new Error(
+        `deserializeMap: truncated cell metadata — trailer declares ${metaLength} bytes, ` +
+        `got ${data.byteLength - offset}`,
+      );
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(new TextDecoder().decode(data.subarray(offset, offset + metaLength)));
+    } catch {
+      throw new Error('deserializeMap: corrupt cell metadata trailer — invalid JSON');
+    }
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('deserializeMap: corrupt cell metadata trailer — expected an object');
+    }
+    applyCellDataObject(map, parsed as Record<string, unknown>, 'deserializeMap');
+  }
 
   map.computeWaterSurfaces(isWater);
   return map;
@@ -234,6 +309,8 @@ interface MapJSON {
   features:          string;
   /** Base64 incoming-river bitmask array (v2+). */
   riverIn:           string;
+  /** Sparse per-cell metadata records keyed by flat cell index (v3+, omitted when empty). */
+  cellData?:         Record<string, Record<string, unknown>>;
   name?:             string;
   seed?:             number;
   generatorId?:      string;
@@ -284,6 +361,7 @@ export function serializeMapJSON(
     roads:    uint8ToBase64(map.roadBits),
     features: map.featureData ? uint8ToBase64(map.featureData) : '',
     riverIn:  uint8ToBase64(map.riverInBits),
+    ...(map.cellData.size > 0 ? { cellData: cellDataToObject(map)! } : {}),
     ...metadata,
     createdAt: metadata.createdAt ?? new Date().toISOString(),
     ...(scatterDescriptors && scatterDescriptors.length > 0 ? { scatterDescriptors } : {}),
@@ -347,6 +425,12 @@ export function deserializeMapJSON(json: string): DeserializedMap {
       );
     }
     map.featureData.set(features);
+  }
+  if (p.cellData) {
+    if (typeof p.cellData !== 'object' || Array.isArray(p.cellData)) {
+      throw new Error('deserializeMapJSON: cellData must be an object keyed by cell index');
+    }
+    applyCellDataObject(map, p.cellData, 'deserializeMapJSON');
   }
 
   // Build isWater predicate from embedded terrain descriptors so custom liquid

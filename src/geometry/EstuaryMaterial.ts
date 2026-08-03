@@ -41,17 +41,21 @@ const fragmentShader = /* glsl */`
     float hl = waterNoise(vec3(vWorldXZ * 4.5 * uWaveScale, t * 0.2));
     vec3 waterColor = uColor + hl * 0.2;
 
-    // Shore side: foam at land edge (shore=1), water color at water edge (shore=0).
-    float foam = clamp(Foam(shore, vWorldXZ, t) * uFoamIntensity, 0.0, 1.0);
-    vec3 shoreColor = mix(waterColor, uFoamColor, foam);
-
-    // River center: flowing pattern blended into water color.
+    // Tutorial Part 8 composition: the fan is filled by wave crests rolling
+    // toward the shore, foam takes over at the land edge, and the river's
+    // flow pattern radiates from the mouth (blend=1). Unlike the tutorial our
+    // open water has no Waves term, so the crests are enveloped to fade out
+    // before the fan's open-water edge instead of stopping there abruptly.
+    float foam  = Foam(shore, vWorldXZ, t);
+    // ×6: the tutorial's Waves wavelength suits its ~10-unit hexes; ours are
+    // size 1, so compress the pattern to get visible crests across one fan.
+    float waves = Waves(vWorldXZ * 6.0 * uWaveScale, t)
+                * (1.0 - shore) * smoothstep(0.0, 0.45, shore);
+    float shoreWater = max(foam, waves);
     float river = River(vUv2, t);
-    vec3 riverColor = mix(uColor, uFoamColor, river * 0.6);
+    float water = mix(shoreWater, river, blend);
 
-    // blend=0 at outer edges (shore-like), blend=1 at river center.
-    vec3 color = mix(shoreColor, riverColor, blend);
-
+    vec3 color = mix(waterColor, uFoamColor, clamp(water * uFoamIntensity, 0.0, 1.0));
     gl_FragColor = liquidOutput(color, vVisibility, vExplored);
   }
 `;

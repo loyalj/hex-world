@@ -5,6 +5,8 @@ import { createLayout } from '../src/math/HexLayout.js';
 import { POINTY_TOP } from '../src/math/HexOrientation.js';
 import { resolveLiquidMaterials, DEFAULT_LIQUID_DESCRIPTORS } from '../src/geometry/LiquidTypes.js';
 import { buildWaterGeometry, buildRiverGeometry, computeRiverOwnership } from '../src/geometry/WaterChunk.js';
+import { buildShoreGeometry } from '../src/geometry/WaterShoreChunk.js';
+import { buildEstuaryGeometry } from '../src/geometry/EstuaryChunk.js';
 
 const layout = createLayout(POINTY_TOP, 1);
 const EDGE_DIRS = POINTY_TOP.edgeDirections;
@@ -68,6 +70,83 @@ describe('indexed water surface geometry', () => {
     const geo = buildWaterGeometry(m, layout, { colStart: 0, colEnd: 8, rowStart: 0, rowEnd: 8 })!;
     expect(geo.getAttribute('position').count).toBe(2 * 7);
     expect(geo.getIndex()!.count).toBe(2 * 18);
+  });
+});
+
+describe('indexed shore/estuary/river geometry', () => {
+  it('welds repeated vertices so the index count exceeds the vertex count', () => {
+    // Water cell surrounded by land, fed by a river from the west → all three
+    // builders emit geometry for the same map.
+    const m = new HexMap({ width: 12, height: 12 });
+    m.setTerrain(6, 6, WATER); m.setElevation(6, 6, -1);
+    const eastEdge = EDGE_DIRS.findIndex(d => d === 0);
+    m.setRiverOutgoing(4, 6, eastEdge); m.setRiverIncoming(5, 6, (eastEdge + 3) % 6);
+    m.setRiverOutgoing(5, 6, eastEdge); m.setRiverIncoming(6, 6, (eastEdge + 3) % 6);
+    m.computeWaterSurfaces();
+
+    const bounds = { colStart: 0, colEnd: 12, rowStart: 0, rowEnd: 12 };
+    const geos = {
+      shore:   buildShoreGeometry(m, layout, bounds, {})!,
+      estuary: buildEstuaryGeometry(m, layout, bounds, {})!,
+      river:   buildRiverGeometry(m, layout, bounds, {})!,
+    };
+    for (const [name, geo] of Object.entries(geos)) {
+      const index = geo.getIndex();
+      expect(index, `${name} is indexed`).not.toBeNull();
+      // Real sharing happened: more triangle corners than unique vertices.
+      expect(index!.count, `${name} welds vertices`).toBeGreaterThan(geo.getAttribute('position').count);
+    }
+  });
+
+  it('estuary fan triangles tile without overlapping (no folded quads)', () => {
+    // Regression: the estuary quads were once split on the wrong diagonal,
+    // folding triangles over each other and leaving wedge-shaped holes — the
+    // fan rendered as a crumpled sliver. Verify no point in XZ is covered by
+    // more than one triangle.
+    const m = new HexMap({ width: 12, height: 12 });
+    m.setTerrain(6, 6, WATER); m.setElevation(6, 6, -1);
+    const eastEdge = EDGE_DIRS.findIndex(d => d === 0);
+    m.setRiverOutgoing(5, 6, eastEdge); m.setRiverIncoming(6, 6, (eastEdge + 3) % 6);
+    m.computeWaterSurfaces();
+
+    const geo = buildEstuaryGeometry(m, layout, { colStart: 0, colEnd: 12, rowStart: 0, rowEnd: 12 }, {})!;
+    const pos = geo.getAttribute('position');
+    const idx = geo.getIndex()!;
+
+    let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+    for (let i = 0; i < pos.count; i++) {
+      minX = Math.min(minX, pos.getX(i)); maxX = Math.max(maxX, pos.getX(i));
+      minZ = Math.min(minZ, pos.getZ(i)); maxZ = Math.max(maxZ, pos.getZ(i));
+    }
+    const covering = (wx: number, wz: number): number => {
+      let hits = 0;
+      for (let k = 0; k < idx.count; k += 3) {
+        const ia = idx.getX(k), ib = idx.getX(k + 1), ic = idx.getX(k + 2);
+        const ax = pos.getX(ia), az = pos.getZ(ia);
+        const bx = pos.getX(ib), bz = pos.getZ(ib);
+        const cx = pos.getX(ic), cz = pos.getZ(ic);
+        const d = (bz - cz) * (ax - cx) + (cx - bx) * (az - cz);
+        if (Math.abs(d) < 1e-12) continue;
+        const l0 = ((bz - cz) * (wx - cx) + (cx - bx) * (wz - cz)) / d;
+        const l1 = ((cz - az) * (wx - cx) + (ax - cx) * (wz - cz)) / d;
+        const l2 = 1 - l0 - l1;
+        // Strictly interior so shared edges don't count as overlap.
+        if (l0 > 1e-4 && l1 > 1e-4 && l2 > 1e-4) hits++;
+      }
+      return hits;
+    };
+    let covered = 0;
+    for (let sy = 0; sy < 60; sy++) {
+      for (let sx = 0; sx < 60; sx++) {
+        const wx = minX + ((sx + 0.5) / 60) * (maxX - minX);
+        const wz = minZ + ((sy + 0.5) / 60) * (maxZ - minZ);
+        const hits = covering(wx, wz);
+        expect(hits, `overlap at (${wx.toFixed(3)}, ${wz.toFixed(3)})`).toBeLessThanOrEqual(1);
+        if (hits === 1) covered++;
+      }
+    }
+    // The fan fills a solid share of its bounding box — folded geometry did not.
+    expect(covered).toBeGreaterThan(60 * 60 * 0.3);
   });
 });
 

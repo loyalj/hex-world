@@ -1,4 +1,5 @@
 import type { HexMap } from '../map/HexMap.js';
+import type { GenerationProgress } from './MapGenerator.js';
 
 /**
  * Describes a single editable field in a generator's config.
@@ -47,4 +48,13 @@ export interface MapGeneratorPlugin<TConfig = unknown> {
    * Same seed + same config + same map dimensions must always produce the same result.
    */
   generate(map: HexMap, config: TConfig, seed: number): void;
+  /**
+   * Optional step-generator form of {@link generate} for async drivers:
+   * yields a {@link GenerationProgress} at every safe suspension point and
+   * must produce the exact same map as `generate` for the same inputs.
+   * Plugins that implement it get sliced execution and real progress events
+   * through `generatePluginAsync`; plugins that don't fall back to a single
+   * synchronous `generate` call.
+   */
+  generateSteps?(map: HexMap, config: TConfig, seed: number): Generator<GenerationProgress, void>;
 }

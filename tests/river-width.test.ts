@@ -223,13 +223,14 @@ describe('flow-dependent channel widening', () => {
     const [ldx, ldz] = perturb(bI.x, bI.z);
     const [rdx, rdz] = perturb(bJ.x, bJ.z);
     const pos = water.getAttribute('position');
+    const idx = water.getIndex()!;
     let mouthCovered = false;
-    for (let k = 0; k + 2 < pos.count; k += 3) {
+    for (let k = 0; k + 2 < idx.count; k += 3) {
       const match = (i: number, x: number, z: number) =>
         Math.abs(pos.getX(i) - x) < 1e-4 && Math.abs(pos.getY(i) - ry) < 1e-4 && Math.abs(pos.getZ(i) - z) < 1e-4;
-      if (match(k, center.x + cdx, center.z + cdz)
-        && match(k + 1, bI.x + ldx, bI.z + ldz)
-        && match(k + 2, bJ.x + rdx, bJ.z + rdz)) { mouthCovered = true; break; }
+      if (match(idx.getX(k), center.x + cdx, center.z + cdz)
+        && match(idx.getX(k + 1), bI.x + ldx, bI.z + ldz)
+        && match(idx.getX(k + 2), bJ.x + rdx, bJ.z + rdz)) { mouthCovered = true; break; }
     }
     expect(mouthCovered).toBe(true);
 

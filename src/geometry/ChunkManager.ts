@@ -3,8 +3,9 @@ import type { HexMap } from '../map/HexMap.js';
 import type { HexLayout } from '../math/HexLayout.js';
 import { worldToHex } from '../math/HexLayout.js';
 import { HEX_DIRECTIONS } from '../math/HexCoord.js';
-import { buildChunkGeometry, type ChunkBounds, type ChunkGeometryOptions, type TerrainColorMode } from './HexChunk.js';
+import { buildChunkGeometry, chunkArraysToGeometries, type ChunkBounds, type ChunkGeometryOptions, type TerrainColorMode } from './HexChunk.js';
 export type { TerrainColorMode };
+import { WorkerChunkBuilder, type ChunkWorkerLike } from './WorkerChunkBuilder.js';
 import { buildWaterGeometry, buildRiverGeometry, computeRiverOwnership, computeRiverFlow, type WaterGeometryOptions } from './WaterChunk.js';
 import { buildShoreGeometry } from './WaterShoreChunk.js';
 import { buildEstuaryGeometry } from './EstuaryChunk.js';
@@ -77,6 +78,15 @@ export interface ChunkManagerOptions {
    * Defaults to the built-in six types. Pass a merged or custom array to extend terrain.
    */
   terrainDefinitions?: TerrainDefinition[];
+  /**
+   * Factory for a chunk-build worker. When provided, terrain/road geometry for
+   * newly streamed-in chunks is built off the main thread (liquids, scatter,
+   * and dirty-chunk rebuilds stay synchronous). Pass
+   * `createDefaultChunkWorker` for the library's bundled worker, or your own
+   * factory (e.g. a pre-created worker pool member). The manager owns workers
+   * it creates and terminates them on `dispose()`.
+   */
+  workerFactory?: () => ChunkWorkerLike;
 }
 
 /**
@@ -134,6 +144,16 @@ export class ChunkManager {
   private readonly dirty         = new Set<string>();
   private elapsedSeconds         = 0;
 
+  // --- Async (worker) chunk building ---
+  private readonly workerFactory: (() => ChunkWorkerLike) | null;
+  private worker: WorkerChunkBuilder | null = null;
+  /** Worker snapshot freshness — false forces a re-upload before the next async build. */
+  private workerMapSynced = false;
+  /** Bumped whenever map data or build options change; stale async results are dropped. */
+  private buildGeneration = 0;
+  /** In-flight async builds: chunk key → generation at request time. */
+  private readonly pendingBuilds = new Map<string, number>();
+
   /** Total number of chunks across the map width */
   get chunksX(): number { return Math.ceil(this.map.width / this.chunkSize); }
   /** Total number of chunks across the map height */
@@ -168,6 +188,24 @@ export class ChunkManager {
     this.chunkSize  = opts.chunkSize  ?? 32;
     this.loadRadius = opts.loadRadius ?? 4;
     this.flowWidenedRivers = opts.flowWidenedRivers ?? true;
+    this.workerFactory     = opts.workerFactory ?? null;
+  }
+
+  /** Lazily (re)create the worker builder — dispose() terminates it, the next request revives it. */
+  private ensureWorker(): WorkerChunkBuilder | null {
+    if (!this.workerFactory) return null;
+    if (!this.worker) {
+      this.worker = new WorkerChunkBuilder(this.workerFactory());
+      this.workerMapSynced = false;
+    }
+    return this.worker;
+  }
+
+  /** Invalidate all in-flight and future async builds against the current worker snapshot. */
+  private invalidateAsyncBuilds(): void {
+    this.buildGeneration++;
+    this.workerMapSynced = false;
+    this.pendingBuilds.clear();
   }
 
   /**
@@ -374,6 +412,47 @@ export class ChunkManager {
     const b    = this.bounds(cx, cy);
     this.geoOptions.riverFlow = this.riverFlow();
     const { terrain: geo, roads: roadsGeo } = buildChunkGeometry(this.map, this.layout, b, this.geoOptions);
+    this.attachChunkMeshes(k, b, geo, roadsGeo);
+  }
+
+  /**
+   * Request an off-main-thread build for a chunk that isn't loaded yet. The
+   * worker builds terrain/road arrays from its map snapshot; liquids and
+   * scatter are still built here when the result lands (they're a fraction of
+   * the terrain cost). Stale results — superseded by an edit, an unload, or a
+   * dispose — are dropped; the regular update loop re-requests as needed.
+   */
+  private requestChunkAsync(cx: number, cy: number): void {
+    const k = this.key(cx, cy);
+    if (this.chunks.has(k) || this.pendingBuilds.has(k)) return;
+
+    const worker = this.ensureWorker();
+    if (!worker) { this.loadChunk(cx, cy); return; }
+
+    if (!this.workerMapSynced) {
+      this.geoOptions.riverFlow = this.riverFlow();
+      worker.syncMap(this.map, this.layout, this.geoOptions);
+      this.workerMapSynced = true;
+    }
+
+    const generation = this.buildGeneration;
+    const b = this.bounds(cx, cy);
+    this.pendingBuilds.set(k, generation);
+    void worker.build(b).then(arrays => {
+      if (this.pendingBuilds.get(k) === generation) this.pendingBuilds.delete(k);
+      if (!arrays || this.buildGeneration !== generation || this.chunks.has(k)) return;
+      const { terrain, roads } = chunkArraysToGeometries(arrays);
+      this.attachChunkMeshes(k, b, terrain, roads);
+    });
+  }
+
+  /** Wrap finished terrain/road geometry in meshes and build the chunk's liquids and scatter. */
+  private attachChunkMeshes(
+    k: string,
+    b: ChunkBounds,
+    geo: THREE.BufferGeometry,
+    roadsGeo: THREE.BufferGeometry | null,
+  ): void {
     this.applyFog(this.material);
     const mesh = new THREE.Mesh(geo, this.material);
     mesh.frustumCulled = true;
@@ -671,7 +750,8 @@ export class ChunkManager {
         const cx = camCX + dx;
         const cy = camCY + dy;
         if (cx < 0 || cy < 0 || cx >= this.chunksX || cy >= this.chunksY) continue;
-        this.loadChunk(cx, cy);
+        if (this.workerFactory) this.requestChunkAsync(cx, cy);
+        else this.loadChunk(cx, cy);
       }
     }
 
@@ -700,6 +780,7 @@ export class ChunkManager {
     this.dirty.add(this.key(Math.floor(col / cs), Math.floor(row / cs)));
     this.riverCellsByLiquid = null; // river ownership may have changed
     this.riverFlowCache     = null; // accumulated flow may have changed
+    this.invalidateAsyncBuilds();   // worker snapshot no longer matches the map
 
     // Interior cells can't affect another chunk's geometry.
     const lc = col % cs, lr = row % cs;
@@ -809,6 +890,11 @@ export class ChunkManager {
     this.riverCellsByLiquid = null;
     this.riverFlowCache     = null;
     this.lastRiverFlow      = null;
+    // Terminate the chunk worker; the next async request recreates it from
+    // the factory, so dispose-and-reload keeps working with workers enabled.
+    this.invalidateAsyncBuilds();
+    this.worker?.dispose();
+    this.worker = null;
   }
 
   /**
@@ -870,6 +956,7 @@ export class ChunkManager {
   setColorMode(mode: TerrainColorMode, material: THREE.Material): void {
     this.material = material;
     this.geoOptions.colorMode = mode;
+    this.invalidateAsyncBuilds(); // worker options snapshot is stale
     for (const mesh of this.chunks.values()) {
       mesh.material = material;
     }

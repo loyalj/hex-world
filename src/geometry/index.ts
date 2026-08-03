@@ -4,6 +4,8 @@ export * from './HexPicking.js';
 export * from './HexPicker.js';
 export * from './CellOverlayLayer.js';
 export * from './HexChunk.js';
+export * from './ChunkWorkerProtocol.js';
+export * from './WorkerChunkBuilder.js';
 export * from './ChunkManager.js';
 export * from './FogData.js';
 export * from './WaterMaterial.js';

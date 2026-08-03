@@ -52,6 +52,48 @@ describe('binary serialization', () => {
     new DataView(bin.buffer, bin.byteOffset).setUint32(5, 0x7fffffff, true);
     expect(() => deserializeMap(bin)).toThrow(/implausible/);
   });
+
+  it('round-trips per-cell metadata through the trailer', () => {
+    const m = makeMap();
+    m.setCellData(3, 4, 'owner', 'clan-red');
+    m.setCellData(3, 4, 'yield', { food: 2, ore: 1 });
+    m.setCellData(9, 9, 'grazed', true);
+    const r = deserializeMap(serializeMap(m));
+    expect(r.getCellData(3, 4, 'owner')).toBe('clan-red');
+    expect(r.getCellData(3, 4, 'yield')).toEqual({ food: 2, ore: 1 });
+    expect(r.getCellData(9, 9, 'grazed')).toBe(true);
+    expect(r.cellData.size).toBe(2);
+  });
+
+  it('throws on a truncated cell metadata trailer', () => {
+    const m = makeMap();
+    m.setCellData(3, 4, 'owner', 'clan-red');
+    const bin = serializeMap(m);
+    expect(() => deserializeMap(bin.slice(0, bin.length - 5))).toThrow(/truncated cell metadata/);
+  });
+});
+
+describe('v2 → v3 migration (cell metadata)', () => {
+  it('migrates v2 binary files to an empty metadata store', () => {
+    const m = makeMap();
+    const cur = serializeMap(m);
+    // Reconstruct the v2 layout: strip the metadata trailer, set version 2.
+    const v2 = cur.slice(0, cur.length - 4);
+    v2[4] = 2;
+    const loaded = deserializeMap(v2);
+    expect(loaded.cellData.size).toBe(0);
+    expect(loaded.getTerrain(3, 4)).toBe(5);
+    expect(loaded.getIncomingRiverDir(8, 8)).toBe(1);
+  });
+
+  it('migrates v2 JSON files to an empty metadata store', () => {
+    const p = JSON.parse(serializeMapJSON(makeMap()));
+    delete p.cellData;
+    p.version = 2;
+    const loaded = deserializeMapJSON(JSON.stringify(p)).map;
+    expect(loaded.cellData.size).toBe(0);
+    expect(loaded.getTerrain(3, 4)).toBe(5);
+  });
 });
 
 describe('JSON serialization', () => {
@@ -80,6 +122,29 @@ describe('JSON serialization', () => {
     const p = JSON.parse(json);
     p.version = 0;
     expect(() => deserializeMapJSON(JSON.stringify(p))).toThrow(/unsupported version/);
+  });
+
+  it('round-trips per-cell metadata', () => {
+    const m = makeMap();
+    m.setCellData(3, 4, 'owner', 'clan-red');
+    m.setCellData(3, 4, 'yield', { food: 2, ore: 1 });
+    m.setCellData(9, 9, 'grazed', true);
+    const r = deserializeMapJSON(serializeMapJSON(m)).map;
+    expect(r.getCellData(3, 4, 'owner')).toBe('clan-red');
+    expect(r.getCellData(3, 4, 'yield')).toEqual({ food: 2, ore: 1 });
+    expect(r.getCellData(9, 9, 'grazed')).toBe(true);
+    expect(r.cellData.size).toBe(2);
+  });
+
+  it('omits the cellData field when the store is empty', () => {
+    const p = JSON.parse(serializeMapJSON(makeMap()));
+    expect('cellData' in p).toBe(false);
+  });
+
+  it('throws on out-of-range cell metadata indices', () => {
+    const p = JSON.parse(serializeMapJSON(makeMap()));
+    p.cellData = { '99999': { a: 1 } };
+    expect(() => deserializeMapJSON(JSON.stringify(p))).toThrow(/out of range/);
   });
 
   it('rebuilds the isWater predicate from embedded terrain descriptors', () => {

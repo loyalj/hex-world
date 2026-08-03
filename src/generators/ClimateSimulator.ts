@@ -33,6 +33,22 @@ function viewElevation(elev: number): number {
  * (index = row * map.width + col, values in [0, 1]).
  */
 export function simulateClimate(map: HexMap, opts: ClimateSimulatorOptions = {}): Float32Array {
+  const steps = simulateClimateSteps(map, opts);
+  let r = steps.next();
+  while (!r.done) r = steps.next();
+  return r.value;
+}
+
+/**
+ * Step-generator form of {@link simulateClimate}: yields the completed fraction
+ * (0–1) after every simulation cycle, so async drivers can suspend between
+ * cycles, and returns the moisture array. Deterministic — suspension points do
+ * not change the result.
+ */
+export function* simulateClimateSteps(
+  map: HexMap,
+  opts: ClimateSimulatorOptions = {},
+): Generator<number, Float32Array> {
   const evaporation   = opts.evaporationFactor   ?? 0.5;
   const precipitation = opts.precipitationFactor ?? 0.25;
   const runoff        = opts.runoffFactor        ?? 0.25;
@@ -121,6 +137,8 @@ export function simulateClimate(map: HexMap, opts: ClimateSimulatorOptions = {})
     const tmpM = currentMoisture; currentMoisture = nextMoisture; nextMoisture = tmpM;
     nextClouds.fill(0);
     nextMoisture.fill(0);
+
+    yield (c + 1) / cycles;
   }
 
   return currentMoisture;

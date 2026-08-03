@@ -4,12 +4,16 @@ import type { TerrainType } from './HexCell.js';
 import { CELL_STRIDE } from './HexCell.js';
 
 /**
- * Byte snapshot of one cell across every mutable channel:
- * `[terrain, elevation, flags, riverDir, roadBits, riverInBits, ...featureLevels]`.
+ * Snapshot of one cell across every mutable channel. `bytes` holds
+ * `[terrain, elevation, flags, riverDir, roadBits, riverInBits, ...featureLevels]`;
+ * `meta` is a deep clone of the cell's metadata record (`null` = no metadata).
  * Derived data (water surfaces, shore distances) is intentionally excluded —
  * `ChunkManager.update()` recomputes it for dirty regions.
  */
-type CellSnapshot = Uint8Array;
+interface CellSnapshot {
+  bytes: Uint8Array;
+  meta:  Record<string, unknown> | null;
+}
 
 interface CellRecord {
   col: number;
@@ -21,24 +25,32 @@ interface CellRecord {
 function snapshotCell(map: HexMap, col: number, row: number): CellSnapshot {
   const layers = map.featureLayerCount;
   const ci   = row * map.width + col;
-  const snap = new Uint8Array(CELL_STRIDE + 2 + layers);
-  snap.set(map.uint8.subarray(ci * CELL_STRIDE, (ci + 1) * CELL_STRIDE), 0);
-  snap[CELL_STRIDE]     = map.roadBits[ci];
-  snap[CELL_STRIDE + 1] = map.riverInBits[ci];
+  const bytes = new Uint8Array(CELL_STRIDE + 2 + layers);
+  bytes.set(map.uint8.subarray(ci * CELL_STRIDE, (ci + 1) * CELL_STRIDE), 0);
+  bytes[CELL_STRIDE]     = map.roadBits[ci];
+  bytes[CELL_STRIDE + 1] = map.riverInBits[ci];
   if (map.featureData && layers > 0) {
-    snap.set(map.featureData.subarray(ci * layers, (ci + 1) * layers), CELL_STRIDE + 2);
+    bytes.set(map.featureData.subarray(ci * layers, (ci + 1) * layers), CELL_STRIDE + 2);
   }
-  return snap;
+  const record = map.cellData.get(ci);
+  return { bytes, meta: record ? structuredClone(record) : null };
 }
 
 function restoreCell(map: HexMap, col: number, row: number, snap: CellSnapshot): void {
   const layers = map.featureLayerCount;
   const ci = row * map.width + col;
-  map.uint8.set(snap.subarray(0, CELL_STRIDE), ci * CELL_STRIDE);
-  map.roadBits[ci]    = snap[CELL_STRIDE];
-  map.riverInBits[ci] = snap[CELL_STRIDE + 1];
+  map.uint8.set(snap.bytes.subarray(0, CELL_STRIDE), ci * CELL_STRIDE);
+  map.roadBits[ci]    = snap.bytes[CELL_STRIDE];
+  map.riverInBits[ci] = snap.bytes[CELL_STRIDE + 1];
   if (map.featureData && layers > 0) {
-    map.featureData.set(snap.subarray(CELL_STRIDE + 2, CELL_STRIDE + 2 + layers), ci * layers);
+    map.featureData.set(snap.bytes.subarray(CELL_STRIDE + 2, CELL_STRIDE + 2 + layers), ci * layers);
+  }
+  // Clone on restore too — undo/redo can alternate any number of times, and
+  // the live record must never alias the stored snapshot.
+  if (snap.meta) {
+    map.cellData.set(ci, structuredClone(snap.meta));
+  } else {
+    map.cellData.delete(ci);
   }
 }
 
@@ -133,6 +145,16 @@ export class MapTransaction {
   setFeatureLevel(col: number, row: number, layer: number, value: number): void {
     this.touch(col, row);
     this.map.setFeatureLevel(col, row, layer, value);
+  }
+
+  setCellData(col: number, row: number, key: string, value: unknown): void {
+    this.touch(col, row);
+    this.map.setCellData(col, row, key, value);
+  }
+
+  clearCellData(col: number, row: number): void {
+    this.touch(col, row);
+    this.map.clearCellData(col, row);
   }
 
   setRoad(col: number, row: number, edgeIndex: number, state: boolean): void {

@@ -1,10 +1,11 @@
 import type { HexMap } from '../map/HexMap.js';
 import { makeRng } from '../math/Random.js';
 import type { MapGeneratorPlugin, ConfigFieldDescriptor } from './MapGeneratorPlugin.js';
+import type { GenerationProgress } from './MapGenerator.js';
 import type { FbmTerrainOptions } from './FbmTerrainGenerator.js';
 import type { RiverGeneratorOptions } from './RiverGenerator.js';
 import type { RoadGeneratorOptions } from './RoadGenerator.js';
-import { generateFbmTerrain } from './FbmTerrainGenerator.js';
+import { generateFbmTerrain, generateFbmTerrainSteps } from './FbmTerrainGenerator.js';
 import { generateRivers } from './RiverGenerator.js';
 import { generateRoads } from './RoadGenerator.js';
 
@@ -55,5 +56,37 @@ export const FbmPlugin: MapGeneratorPlugin<FbmGeneratorConfig> = {
     generateRivers(map, config.rivers);
     generateRoads(map, config.roads);
     map.computeWaterSurfaces();
+  },
+
+  *generateSteps(map: HexMap, config: FbmGeneratorConfig, seed: number): Generator<GenerationProgress, void> {
+    // Pass names + overall-progress weights (sum = 1), mirroring generate().
+    const passes = [['terrain', 0.6], ['rivers', 0.15], ['roads', 0.1], ['waterSurfaces', 0.15]] as const;
+    let passIndex = 0, weightDone = 0;
+    const event = (passProgress: number): GenerationProgress => ({
+      pass:       passes[passIndex][0],
+      passIndex,
+      passCount:  passes.length,
+      passProgress,
+      progress:   Math.min(1, weightDone + passes[passIndex][1] * passProgress),
+    });
+    const finishPass = (): void => {
+      weightDone += passes[passIndex][1];
+      passIndex   = Math.min(passIndex + 1, passes.length - 1);
+    };
+
+    const { x, z } = seedToNoiseOffset(seed);
+    for (const p of generateFbmTerrainSteps(map, { ...config.terrain, noiseOffsetX: x, noiseOffsetZ: z })) {
+      yield event(p);
+    }
+    yield event(1); finishPass();
+
+    generateRivers(map, config.rivers);
+    yield event(1); finishPass();
+
+    generateRoads(map, config.roads);
+    yield event(1); finishPass();
+
+    map.computeWaterSurfaces();
+    yield event(1);
   },
 };

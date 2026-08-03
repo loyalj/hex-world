@@ -49,14 +49,27 @@ export function buildEstuaryGeometry(
 
   const { colStart, colEnd, rowStart, rowEnd } = bounds;
   const hexCount = (colEnd - colStart) * (rowEnd - rowStart);
-  const maxVerts = hexCount * 126; // ≤6 estuary edges × 7 tris × 3 verts
+  // Indexed: ≤6 estuary edges × 7 tris × 3 indices per hex. Each edge's 21
+  // corners weld to 9 unique vertices, so the attributes shrink well below this.
+  const maxVerts   = hexCount * 126;
+  const maxIndices = hexCount * 126;
 
   const positions   = new Float32Array(maxVerts * 3);
   const uvs         = new Float32Array(maxVerts * 2);
   const uv2s        = new Float32Array(maxVerts * 2);
   const cellIndices = new Float32Array(maxVerts);
-  let vi = 0, uvi = 0, uv2i = 0, cii = 0;
+  const indices     = maxVerts > 65535 ? new Uint32Array(maxIndices) : new Uint16Array(maxIndices);
+  let vi = 0, uvi = 0, uv2i = 0, cii = 0, ii = 0;
+  let vertCount = 0;
   let curCi = 0;
+
+  // Per-cell vertex weld: identical (position, uv, uv2, land) tuples within one
+  // cell collapse to a single indexed vertex. Never welded across cells —
+  // cellIndex differs there. Cross-edge repeats stay separate naturally: their
+  // uv2 flow coordinates differ, so their keys differ.
+  const vertIds = new Map<string, number>();
+  const vertKey = (x: number, z: number, y: number, u1: number, v1: number, u2: number, v2: number, land: boolean) =>
+    `${Math.round(x * 1e5)},${Math.round(z * 1e5)},${Math.round(y * 1e5)},${u1},${v1},${u2},${v2},${land ? 1 : 0}`;
 
   const perturb = (x: number, z: number): [number, number] => {
     const n = sampleNoise(x * noiseScale, z * noiseScale);
@@ -78,13 +91,20 @@ export function buildEstuaryGeometry(
     return map.getElevation(col, row) * elevScale + dy;
   };
 
-  /** `land` selects the terrain-matched perturbation for land-side (e2) vertices. */
+  /**
+   * `land` selects the terrain-matched perturbation for land-side (e2) vertices.
+   * Returns the vertex id, reusing an identical vertex emitted earlier in the
+   * same cell.
+   */
   const addVert = (
     x: number, z: number, y: number,
     u1: number, v1: number,
     u2: number, v2: number,
     land = false,
-  ) => {
+  ): number => {
+    const key = vertKey(x, z, y, u1, v1, u2, v2, land);
+    const existing = vertIds.get(key);
+    if (existing !== undefined) return existing;
     const [dx, dz] = land ? perturbLand(x, z) : perturb(x, z);
     positions[vi++] = x + dx;
     positions[vi++] = y;
@@ -92,6 +112,8 @@ export function buildEstuaryGeometry(
     uvs[uvi++]   = u1; uvs[uvi++]   = v1;
     uv2s[uv2i++] = u2; uv2s[uv2i++] = v2;
     cellIndices[cii++] = curCi;
+    vertIds.set(key, vertCount);
+    return vertCount++;
   };
 
   const addTri = (
@@ -100,9 +122,9 @@ export function buildEstuaryGeometry(
     x2: number, z2: number, y2: number, u12: number, v12: number, u22: number, v22: number,
     l0 = false, l1 = false, l2 = false,
   ) => {
-    addVert(x0, z0, y0, u10, v10, u20, v20, l0);
-    addVert(x1, z1, y1, u11, v11, u21, v21, l1);
-    addVert(x2, z2, y2, u12, v12, u22, v22, l2);
+    indices[ii++] = addVert(x0, z0, y0, u10, v10, u20, v20, l0);
+    indices[ii++] = addVert(x1, z1, y1, u11, v11, u21, v21, l1);
+    indices[ii++] = addVert(x2, z2, y2, u12, v12, u22, v22, l2);
   };
 
   const cornerAt = (cx: number, cz: number, j: number, factor: number) => {
@@ -127,6 +149,7 @@ export function buildEstuaryGeometry(
       if (!isWater(map.getTerrain(col, row))) continue;
 
       curCi = row * map.width + col;
+      vertIds.clear(); // weld within this cell only
       const q          = col - (row - (row & 1)) / 2;
       const center     = hexToWorld(layout, { q, r: row });
       const wSurfaceY  = map.getWaterSurface(col, row) * elevScale + surfaceLift;
@@ -172,18 +195,20 @@ export function buildEstuaryGeometry(
         const e2Y  = wSurfaceY + (landCellY(nc, nr) - wSurfaceY) * 0.5;
         const wl   = wSurfaceY;
 
-        // Left quad (rotated for symmetry): e2v1, e1v2, e2v2, e1v3
+        // Left quad (e2v1, e1v2, e2v2, e1v3), split tutorial-style:
+        // (v1,v3,v2) + (v2,v3,v4) so the diagonal runs e1v2–e2v2 and the two
+        // triangles tile the strip instead of folding over each other.
         addTri(
           e2v1.x, e2v1.z, e2Y,  0, 1,  fu(1.5),  fv(1.00),
-          e1v2.x, e1v2.z, wl,   0, 0,  fu(0.7),  fv(1.15),
           e2v2.x, e2v2.z, e2Y,  1, 1,  fu(1.0),  fv(0.80),
-          true, false, true,
+          e1v2.x, e1v2.z, wl,   0, 0,  fu(0.7),  fv(1.15),
+          true, true, false,
         );
         addTri(
-          e2v1.x, e2v1.z, e2Y,  0, 1,  fu(1.5),  fv(1.00),
+          e1v2.x, e1v2.z, wl,   0, 0,  fu(0.7),  fv(1.15),
           e2v2.x, e2v2.z, e2Y,  1, 1,  fu(1.0),  fv(0.80),
           e1v3.x, e1v3.z, wl,   0, 0,  fu(0.5),  fv(1.10),
-          true, true, false,
+          false, true, false,
         );
 
         // Middle triangle: e1v3, e2v2, e2v4
@@ -194,15 +219,16 @@ export function buildEstuaryGeometry(
           false, true, true,
         );
 
-        // Right quad: e1v3, e1v4, e2v4, e2v5
+        // Right quad (e1v3, e1v4, e2v4, e2v5), same tutorial split — the
+        // diagonal runs e1v4–e2v4.
         addTri(
           e1v3.x, e1v3.z, wl,   0, 0,  fu(0.5),   fv(1.10),
-          e1v4.x, e1v4.z, wl,   0, 0,  fu(0.3),   fv(1.15),
           e2v4.x, e2v4.z, e2Y,  1, 1,  fu(0.0),   fv(0.80),
-          false, false, true,
+          e1v4.x, e1v4.z, wl,   0, 0,  fu(0.3),   fv(1.15),
+          false, true, false,
         );
         addTri(
-          e1v3.x, e1v3.z, wl,   0, 0,  fu(0.5),   fv(1.10),
+          e1v4.x, e1v4.z, wl,   0, 0,  fu(0.3),   fv(1.15),
           e2v4.x, e2v4.z, e2Y,  1, 1,  fu(0.0),   fv(0.80),
           e2v5.x, e2v5.z, e2Y,  0, 1,  fu(-0.5),  fv(1.00),
           false, true, true,
@@ -227,13 +253,13 @@ export function buildEstuaryGeometry(
     }
   }
 
-  if (vi === 0) return null;
+  if (vertCount === 0) return null;
 
-  const n   = vi / 3;
   const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position',  new THREE.BufferAttribute(positions.slice(0, n * 3), 3));
-  geo.setAttribute('uv',        new THREE.BufferAttribute(uvs.slice(0, n * 2), 2));
-  geo.setAttribute('uv2',       new THREE.BufferAttribute(uv2s.slice(0, n * 2), 2));
-  geo.setAttribute('cellIndex', new THREE.BufferAttribute(cellIndices.slice(0, n), 1));
+  geo.setAttribute('position',  new THREE.BufferAttribute(positions.slice(0, vertCount * 3), 3));
+  geo.setAttribute('uv',        new THREE.BufferAttribute(uvs.slice(0, vertCount * 2), 2));
+  geo.setAttribute('uv2',       new THREE.BufferAttribute(uv2s.slice(0, vertCount * 2), 2));
+  geo.setAttribute('cellIndex', new THREE.BufferAttribute(cellIndices.slice(0, vertCount), 1));
+  geo.setIndex(new THREE.BufferAttribute(indices.slice(0, ii), 1));
   return geo;
 }

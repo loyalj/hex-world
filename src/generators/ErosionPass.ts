@@ -36,6 +36,20 @@ function getErosionTarget(
  * conserving total landmass.
  */
 export function applyErosion(map: HexMap, opts: ErosionOptions, rand: () => number): void {
+  const steps = applyErosionSteps(map, opts, rand);
+  while (!steps.next().done) { /* drain */ }
+}
+
+/**
+ * Step-generator form of {@link applyErosion}: yields the completed fraction
+ * (0–1) every few hundred erosion steps so async drivers can suspend.
+ * Deterministic — the `rand` call order is identical to the synchronous version.
+ */
+export function* applyErosionSteps(
+  map: HexMap,
+  opts: ErosionOptions,
+  rand: () => number,
+): Generator<number, void> {
   const pct = opts.erosionPercentage ?? 50;
 
   // -- O(1) erodible-cell bookkeeping --
@@ -70,8 +84,15 @@ export function applyErosion(map: HexMap, opts: ErosionOptions, rand: () => numb
   map.forEach((col, row) => { if (isErodible(col, row, map)) addErodible(col, row); });
 
   const targetCount = Math.floor(erodible.length * (1 - pct / 100));
+  const totalSteps  = erodible.length - targetCount;
+  let doneSteps = 0;
 
   while (erodible.length > targetCount) {
+    // Yield every 512 steps — cheap enough to keep slices responsive without
+    // paying generator overhead per step.
+    // The erodible set can grow mid-pass, so completed/planned may exceed 1.
+    if (doneSteps > 0 && (doneSteps & 511) === 0) yield Math.min(1, doneSteps / totalSteps);
+    doneSteps++;
     const i = Math.floor(rand() * erodible.length);
     const [col, row] = erodible[i];
     const t = getErosionTarget(col, row, map, rand);

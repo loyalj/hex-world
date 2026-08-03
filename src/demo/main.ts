@@ -7,7 +7,7 @@ import { ChunkManager } from '../geometry/ChunkManager.js';
 import { createRoadMaterial } from '../geometry/RoadMaterial.js';
 import { buildTerrainTextureArray } from '../geometry/TerrainTextures.js';
 import { DEFAULT_TERRAIN_DESCRIPTORS, resolveTerrainDefinitions, buildWaterTerrainSet } from '../geometry/TerrainTypes.js';
-import { createTerrainMaterial } from '../geometry/TerrainMaterial.js';
+import { configureTerrainGrid, createTerrainMaterial } from '../geometry/TerrainMaterial.js';
 import { resolveLiquidMaterials, DEFAULT_LIQUID_DESCRIPTORS } from '../geometry/LiquidTypes.js';
 import type { TerrainColorMode } from '../geometry/ChunkManager.js';
 import { HexHashGrid } from '../geometry/HexHashGrid.js';
@@ -170,6 +170,7 @@ let lastFpsTime = performance.now();
 
 async function start() {
   const waterGeoOptions = {};
+  let gridVisible = false;
 
   let terrainMaterial: THREE.Material;
   if (TERRAIN_COLOR_MODE === 'splat') {
@@ -576,6 +577,11 @@ async function start() {
       saveMap();
     } else if (e.key === 'l' || e.key === 'L') {
       loadMap();
+    } else if (e.key === 'h' || e.key === 'H') {
+      if (terrainMaterial instanceof THREE.ShaderMaterial) {
+        gridVisible = !gridVisible;
+        configureTerrainGrid(terrainMaterial, layout, { enabled: gridVisible });
+      }
     } else if (e.key === '1') {
       minimapDimExplored = !minimapDimExplored;
       updateMinimap();
@@ -693,6 +699,7 @@ async function start() {
       `Total:     ${chunkManager.chunksX * chunkManager.chunksY} chunks in map\n` +
       `Zoom:      ${controls.currentDistance.toFixed(1)}  (min ${controls.minDist} / max ${controls.maxDist})\n` +
       `Tilt:      ${controls.currentPitchDeg.toFixed(1)}°  (min ${controls.minPitchDeg}° / max ${controls.maxPitchDeg}°)\n` +
+      `Hex grid:  ${gridVisible ? 'ON  [H] toggle' : 'OFF  [H] toggle'}\n` +
       `Hide unexplored: ${hideUnexplored ? 'ON  [E] toggle' : 'OFF  [E] toggle'}\n` +
       `Dim explored:    ${dimExplored    ? 'ON  [F] toggle' : 'OFF  [F] toggle'}\n` +
       `Save: [S]  Load: [L]  ${saveStatus}\n` +

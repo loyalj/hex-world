@@ -5,6 +5,7 @@ import { POINTY_TOP } from '../math/HexOrientation.js';
 import type { HexLayout } from '../math/HexLayout.js';
 import { createLayout } from '../math/HexLayout.js';
 import { ChunkManager } from '../geometry/ChunkManager.js';
+import { createDefaultChunkWorker, type ChunkWorkerLike } from '../geometry/WorkerChunkBuilder.js';
 import type { ChunkGeometryOptions } from '../geometry/HexChunk.js';
 import type { WaterGeometryOptions } from '../geometry/WaterChunk.js';
 import { HexPicker } from '../geometry/HexPicker.js';
@@ -18,8 +19,8 @@ import {
   buildTerrainLookup, buildWaterTerrainSet,
 } from '../geometry/TerrainTypes.js';
 import { buildTerrainTextureArray } from '../geometry/TerrainTextures.js';
-import type { TerrainMaterialOptions } from '../geometry/TerrainMaterial.js';
-import { createTerrainMaterial } from '../geometry/TerrainMaterial.js';
+import type { TerrainGridOptions, TerrainMaterialOptions } from '../geometry/TerrainMaterial.js';
+import { configureTerrainGrid, createTerrainMaterial } from '../geometry/TerrainMaterial.js';
 import type { LiquidTypeDescriptor, LiquidMaterialSet } from '../geometry/LiquidTypes.js';
 import { DEFAULT_LIQUID_DESCRIPTORS, resolveLiquidMaterials } from '../geometry/LiquidTypes.js';
 import { createRoadMaterial } from '../geometry/RoadMaterial.js';
@@ -74,6 +75,13 @@ export interface HexWorldOptions {
   loadRadius?: number;
   geometryOptions?: ChunkGeometryOptions;
   waterGeometryOptions?: WaterGeometryOptions;
+  /**
+   * Build streamed-in chunk geometry on a Web Worker instead of the main
+   * thread, eliminating streaming hitches on big maps. `true` uses the
+   * library's bundled worker (`createDefaultChunkWorker`); pass a factory to
+   * supply your own. Default false (synchronous builds).
+   */
+  chunkWorker?: boolean | (() => ChunkWorkerLike);
   camera?: HexWorldCameraOptions;
   /** Scene background color, or null to leave the scene transparent. Default 0x1a1a2e. */
   background?: THREE.ColorRepresentation | null;
@@ -120,6 +128,8 @@ export class HexWorld {
   private _liquidDescriptors: LiquidTypeDescriptor[];
   private liquidMaterials: Map<string, LiquidMaterialSet>;
   private terrainMaterial: THREE.ShaderMaterial;
+  /** Last hex-grid styling from setHexGrid — null until first use. */
+  private gridOptions: TerrainGridOptions | null = null;
   private _terrainDefinitions: TerrainDefinition[];
   private _terrainLookup: Map<number, TerrainDefinition>;
   private waterTerrainSet: Set<number>;
@@ -218,6 +228,8 @@ export class HexWorld {
       loadRadius:           opts.loadRadius ?? 5,
       geometryOptions:      opts.geometryOptions,
       waterGeometryOptions: opts.waterGeometryOptions,
+      workerFactory:        opts.chunkWorker === true ? createDefaultChunkWorker
+                          : opts.chunkWorker || undefined,
       hashGrid:             this.hashGrid,
       scatterDefinitions:   opts.scatterDefinitions,
       fogData:              opts.fogData,
@@ -335,6 +347,7 @@ export class HexWorld {
     this._terrainLookup      = buildTerrainLookup(this._terrainDefinitions);
     this.waterTerrainSet     = buildWaterTerrainSet(this._terrainDefinitions);
     this.chunks.setTerrainDefinitions(this._terrainDefinitions, this.terrainMaterial);
+    this.reapplyHexGrid();
     if (!keepOldMaterial) oldMat.dispose();
   }
 
@@ -350,7 +363,34 @@ export class HexWorld {
     this._terrainLookup      = buildTerrainLookup(definitions);
     this.waterTerrainSet     = buildWaterTerrainSet(definitions);
     this.chunks.setTerrainDefinitions(definitions, material);
+    this.reapplyHexGrid();
     return oldMat;
+  }
+
+  /**
+   * Toggle or restyle the shader hex grid overlay drawn by the terrain
+   * material — crisp anti-aliased cell borders that fade with camera distance.
+   * `true`/`false` toggles with current styling; an options object restyles
+   * (and enables unless `enabled: false`). Survives terrain material swaps.
+   *
+   * @example
+   * world.setHexGrid(true);
+   * world.setHexGrid({ color: 0xffffff, opacity: 0.25, fadeEnd: 120 });
+   * world.setHexGrid(false);
+   */
+  setHexGrid(options: TerrainGridOptions | boolean = true): void {
+    if (typeof options === 'boolean') {
+      this.gridOptions = { ...this.gridOptions, enabled: options };
+    } else {
+      this.gridOptions = { ...this.gridOptions, ...options, enabled: options.enabled ?? true };
+    }
+    this.reapplyHexGrid();
+  }
+
+  /** Grid styling survives terrain material swaps — re-push it onto the current material. */
+  private reapplyHexGrid(): void {
+    if (!this.gridOptions) return;
+    configureTerrainGrid(this.terrainMaterial, this.layout, this.gridOptions);
   }
 
   /**

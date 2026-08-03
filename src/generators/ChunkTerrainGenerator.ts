@@ -162,6 +162,22 @@ export function generateChunkTerrain(
   opts: ChunkTerrainOptions,
   rand: () => number,
 ): void {
+  const steps = generateChunkTerrainSteps(map, regions, opts, rand);
+  while (!steps.next().done) { /* drain */ }
+}
+
+/**
+ * Step-generator form of {@link generateChunkTerrain}: yields the fraction of
+ * the land budget placed so far (0–1) after each raise/sink round, so async
+ * drivers can suspend between rounds. Deterministic — the `rand` call order is
+ * identical to the synchronous version.
+ */
+export function* generateChunkTerrainSteps(
+  map: HexMap,
+  regions: MapRegion[],
+  opts: ChunkTerrainOptions,
+  rand: () => number,
+): Generator<number, void> {
   const landPercentage = opts.landPercentage    ?? 50;
   const chunkSizeMin   = opts.chunkSizeMin      ?? 30;
   const chunkSizeMax   = opts.chunkSizeMax      ?? 100;
@@ -175,7 +191,9 @@ export function generateChunkTerrain(
 
   if (regions.length === 0) return;
 
-  let budget = Math.round(map.width * map.height * landPercentage / 100);
+  const initialBudget = Math.round(map.width * map.height * landPercentage / 100);
+  let budget = initialBudget;
+  let bestFraction = 0; // sink rounds refund budget, so report a running max
   const bfs: BfsState = { frontier: new BucketQueue(), inFrontier: new Set<number>() };
 
   for (let guard = 0; guard < 10000; guard++) {
@@ -189,6 +207,8 @@ export function generateChunkTerrain(
         if (budget === 0) return;
       }
     }
+    bestFraction = Math.max(bestFraction, initialBudget > 0 ? 1 - budget / initialBudget : 1);
+    yield bestFraction;
   }
 
   // Exited via the iteration cap rather than exhausting the budget — the

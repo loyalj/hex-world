@@ -35,6 +35,19 @@ export interface FbmTerrainOptions {
  * if the map has at least one feature layer.
  */
 export function generateFbmTerrain(map: HexMap, opts: FbmTerrainOptions = {}): void {
+  const steps = generateFbmTerrainSteps(map, opts);
+  while (!steps.next().done) { /* drain */ }
+}
+
+/**
+ * Step-generator form of {@link generateFbmTerrain}: yields the completed
+ * fraction (0–1) every 16 rows so async drivers can suspend. The pass is pure
+ * per-cell noise, so suspension points cannot change the result.
+ */
+export function* generateFbmTerrainSteps(
+  map: HexMap,
+  opts: FbmTerrainOptions = {},
+): Generator<number, void> {
   const period         = opts.period         ?? 64;
   const octaves        = opts.octaves        ?? 6;
   const amplitude      = opts.amplitude      ?? 2.2;
@@ -48,28 +61,31 @@ export function generateFbmTerrain(map: HexMap, opts: FbmTerrainOptions = {}): v
   const noiseOffsetX   = opts.noiseOffsetX   ?? 0;
   const noiseOffsetZ   = opts.noiseOffsetZ   ?? 0;
 
-  map.forEach((col, row) => {
-    const n = fbm((col + noiseOffsetX) / period, (row + noiseOffsetZ) / period, octaves) * amplitude;
+  for (let row = 0; row < map.height; row++) {
+    for (let col = 0; col < map.width; col++) {
+      const n = fbm((col + noiseOffsetX) / period, (row + noiseOffsetZ) / period, octaves) * amplitude;
 
-    const isWater = n < waterThreshold;
-    if      (n > snowThreshold)   map.setTerrain(col, row, TerrainType.Snow);
-    else if (n > rockThreshold)   map.setTerrain(col, row, TerrainType.Rock);
-    else if (isWater)             map.setTerrain(col, row, TerrainType.Water);
-    else if (n < desertThreshold) map.setTerrain(col, row, TerrainType.Desert);
-    else if (n < mudThreshold)    map.setTerrain(col, row, TerrainType.Mud);
-    else                          map.setTerrain(col, row, TerrainType.Grassland);
+      const isWater = n < waterThreshold;
+      if      (n > snowThreshold)   map.setTerrain(col, row, TerrainType.Snow);
+      else if (n > rockThreshold)   map.setTerrain(col, row, TerrainType.Rock);
+      else if (isWater)             map.setTerrain(col, row, TerrainType.Water);
+      else if (n < desertThreshold) map.setTerrain(col, row, TerrainType.Desert);
+      else if (n < mudThreshold)    map.setTerrain(col, row, TerrainType.Mud);
+      else                          map.setTerrain(col, row, TerrainType.Grassland);
 
-    const elev = Math.round(n * elevScale) + elevOffset;
-    map.setElevation(col, row, isWater ? Math.min(elev, -1) : Math.max(elev, 0));
+      const elev = Math.round(n * elevScale) + elevOffset;
+      map.setElevation(col, row, isWater ? Math.min(elev, -1) : Math.max(elev, 0));
 
-    if (map.featureLayerCount > 0) {
-      const treeLevel = isWater || n > rockThreshold ? 0 : n >= mudThreshold ? 2 : n >= desertThreshold ? 1 : 0;
-      map.setFeatureLevel(col, row, 0, treeLevel);
+      if (map.featureLayerCount > 0) {
+        const treeLevel = isWater || n > rockThreshold ? 0 : n >= mudThreshold ? 2 : n >= desertThreshold ? 1 : 0;
+        map.setFeatureLevel(col, row, 0, treeLevel);
+      }
+      if (map.featureLayerCount > 1) {
+        const t = map.getTerrain(col, row);
+        const rockLevel = t === TerrainType.Rock ? 1 : 0;
+        map.setFeatureLevel(col, row, 1, rockLevel);
+      }
     }
-    if (map.featureLayerCount > 1) {
-      const t = map.getTerrain(col, row);
-      const rockLevel = t === TerrainType.Rock ? 1 : 0;
-      map.setFeatureLevel(col, row, 1, rockLevel);
-    }
-  });
+    if ((row & 15) === 15) yield (row + 1) / map.height;
+  }
 }

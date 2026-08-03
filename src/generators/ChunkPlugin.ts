@@ -1,7 +1,7 @@
 import type { HexMap } from '../map/HexMap.js';
 import type { MapGeneratorPlugin, ConfigFieldDescriptor } from './MapGeneratorPlugin.js';
-import { generateMap } from './MapGenerator.js';
-import type { MapGeneratorConfig } from './MapGenerator.js';
+import { generateMap, generateMapSteps } from './MapGenerator.js';
+import type { GenerationProgress, MapGeneratorConfig } from './MapGenerator.js';
 
 export type { MapGeneratorConfig as ChunkGeneratorConfig };
 
@@ -46,5 +46,9 @@ export const ChunkPlugin: MapGeneratorPlugin<MapGeneratorConfig> = {
 
   generate(map: HexMap, config: MapGeneratorConfig, seed: number): void {
     generateMap(map, config, seed);
+  },
+
+  generateSteps(map: HexMap, config: MapGeneratorConfig, seed: number): Generator<GenerationProgress, void> {
+    return generateMapSteps(map, config, seed);
   },
 };

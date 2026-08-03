@@ -77,9 +77,12 @@ describe('serialization v2 + v1 migrations', () => {
     const m = new HexMap({ width: 10, height: 10, featureLayerCount: 1 });
     m.setRiverIncoming(5, 5, 4);
     m.setRiverOutgoing(5, 5, 0);
-    const v2 = serializeMap(m);
-    // Reconstruct the v1 layout: strip the trailing riverInBits section, set version 1.
-    const v1 = v2.slice(0, v2.length - m.riverInBits.byteLength);
+    const cur = serializeMap(m);
+    // Reconstruct the v1 layout — header + cells + roads + features only —
+    // by truncating everything later versions appended, then set version 1.
+    const v1Length = 14 + m.uint8.byteLength + m.roadBits.byteLength
+      + (m.featureData?.byteLength ?? 0);
+    const v1 = cur.slice(0, v1Length);
     v1[4] = 1;
 
     const loaded = deserializeMap(v1);

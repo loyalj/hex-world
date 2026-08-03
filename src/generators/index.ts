@@ -3,6 +3,7 @@ export * from './FbmTerrainGenerator.js';
 export * from './FbmPlugin.js';
 export * from './ChunkPlugin.js';
 export * from './MapGenerator.js';
+export * from './AsyncGeneration.js';
 export * from './ChunkTerrainGenerator.js';
 export * from './RegionLayout.js';
 export * from './ErosionPass.js';

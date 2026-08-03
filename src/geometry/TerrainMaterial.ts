@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import type { HexLayout } from '../math/HexLayout.js';
 
 const vertexShader = /* glsl */`
   in vec3 terrainType;
@@ -57,6 +58,19 @@ const fragmentShader = /* glsl */`
   uniform vec3  uLightColor;
   uniform vec3  uAmbient;
 
+  // Hex grid overlay (see configureTerrainGrid). uGridFwd/uGridInv hold the
+  // layout's axial↔world 2×2 matrices flattened row-major (already scaled by
+  // hex size); uGridOrigin is the layout origin.
+  uniform float uGridEnabled;
+  uniform vec4  uGridFwd;
+  uniform vec4  uGridInv;
+  uniform vec2  uGridOrigin;
+  uniform vec3  uGridColor;
+  uniform float uGridOpacity;
+  uniform float uGridLineWidth;
+  uniform float uGridFadeStart;
+  uniform float uGridFadeEnd;
+
   in vec3  vColor;
   in vec3  vWorldPos;
   in vec3  vNormal;
@@ -92,6 +106,46 @@ const fragmentShader = /* glsl */`
     return sampleTriplanar(typeIdx) * vColor[slot];
   }
 
+  vec2 gridAxial(vec2 p) {
+    p -= uGridOrigin;
+    return vec2(dot(uGridInv.xy, p), dot(uGridInv.zw, p));
+  }
+
+  vec2 gridWorld(vec2 qr) {
+    return vec2(dot(uGridFwd.xy, qr), dot(uGridFwd.zw, qr)) + uGridOrigin;
+  }
+
+  // Anti-aliased hex lattice line mask at world-space point p: 1 on a cell
+  // border, 0 elsewhere, with an fwidth-wide transition for crispness at any
+  // zoom. Lines are centered on the border (half the width in each cell), so
+  // adjacent cells compose seamlessly.
+  float hexGridLine(vec2 p) {
+    vec2 axial = gridAxial(p);
+
+    // Cube-round the fractional axial coordinate to the nearest hex center.
+    float x = axial.x, z = axial.y, y = -x - z;
+    float rx = floor(x + 0.5), ry = floor(y + 0.5), rz = floor(z + 0.5);
+    float dx = abs(rx - x), dy = abs(ry - y), dz = abs(rz - z);
+    if (dx > dy && dx > dz) rx = -ry - rz;
+    else if (dz > dy)       rz = -rx - ry;
+
+    vec2 lp = p - gridWorld(vec2(rx, rz));
+
+    // Distance to the nearest edge: the border is the perpendicular bisector
+    // to the six neighbors, so project onto the three neighbor axes and take
+    // the apothem minus the farthest projection.
+    vec2 e0 = vec2(uGridFwd.x, uGridFwd.z); // axial (1, 0) neighbor offset
+    vec2 e1 = vec2(uGridFwd.y, uGridFwd.w); // axial (0, 1)
+    vec2 e2 = e0 - e1;                      // axial (1, -1)
+    float d = max(abs(dot(lp, normalize(e0))),
+              max(abs(dot(lp, normalize(e1))),
+                  abs(dot(lp, normalize(e2)))));
+    float edgeDist = 0.5 * length(e0) - d;
+
+    float aa = fwidth(edgeDist);
+    return 1.0 - smoothstep(0.5 * uGridLineWidth - aa, 0.5 * uGridLineWidth + aa, edgeDist);
+  }
+
   void main() {
     vec4 c = sampleSlot(0, vTerrainType.x)
            + sampleSlot(1, vTerrainType.y)
@@ -107,8 +161,19 @@ const fragmentShader = /* glsl */`
     float cliff = 1.0 - abs(n.y);
     c.rgb *= 1.0 - cliff * 0.125;
 
+    vec3 lit = c.rgb * light;
+
+    if (uGridEnabled > 0.5) {
+      // Fade with camera distance so far terrain stays clean, and on
+      // near-vertical faces where an XZ lattice would smear down cliff walls.
+      float fade  = 1.0 - smoothstep(uGridFadeStart, uGridFadeEnd, distance(vWorldPos, cameraPosition));
+      float slope = smoothstep(0.15, 0.4, abs(n.y));
+      float g = hexGridLine(vWorldPos.xz) * fade * slope * uGridOpacity;
+      lit = mix(lit, uGridColor, g);
+    }
+
     if (vExplored < 0.01) discard;
-    fragColor = vec4(c.rgb * light * vVisibility * vExplored, 1.0);
+    fragColor = vec4(lit * vVisibility * vExplored, 1.0);
   }
 `;
 
@@ -151,7 +216,75 @@ export function createTerrainMaterial(
       uFogEnabled:     { value: 0 },
       uHideUnexplored: { value: 1 },
       uDimExplored:    { value: 1 },
+      // Hex grid overlay — off until configureTerrainGrid supplies the layout.
+      uGridEnabled:   { value: 0 },
+      uGridFwd:       { value: new THREE.Vector4(1, 0, 0, 1) },
+      uGridInv:       { value: new THREE.Vector4(1, 0, 0, 1) },
+      uGridOrigin:    { value: new THREE.Vector2(0, 0) },
+      uGridColor:     { value: new THREE.Color(0x101018) },
+      uGridOpacity:   { value: 0.45 },
+      uGridLineWidth: { value: 0.06 },
+      uGridFadeStart: { value: 25 },
+      uGridFadeEnd:   { value: 70 },
     },
     side: THREE.DoubleSide,
   });
+}
+
+/** Appearance and behavior of the shader hex grid overlay. All fields optional — unset fields keep their current value. */
+export interface TerrainGridOptions {
+  /** Show or hide the grid. Defaults to true when configureTerrainGrid is called. */
+  enabled?:   boolean;
+  /** Line color. Default a near-black blue-grey. */
+  color?:     THREE.ColorRepresentation;
+  /** Line opacity 0–1 at full strength (before distance/slope fading). Default 0.45. */
+  opacity?:   number;
+  /** Line width in world units, centered on the cell border. Default 0.06. */
+  lineWidth?: number;
+  /** Camera distance at which the grid starts fading out. Default 25. */
+  fadeStart?: number;
+  /** Camera distance at which the grid is fully faded. Default 70. */
+  fadeEnd?:   number;
+}
+
+/**
+ * Configure the hex grid overlay baked into the terrain shader: uploads the
+ * layout's axial↔world transform and applies any appearance options, enabling
+ * the grid unless `enabled: false` is passed. Toggling is a uniform flip — no
+ * geometry rebuild. Call again anytime to restyle.
+ *
+ * @example
+ * configureTerrainGrid(world.terrainMaterial, world.layout);            // on
+ * configureTerrainGrid(mat, layout, { color: 0xffffff, opacity: 0.2 }); // restyle
+ * setTerrainGridEnabled(mat, false);                                    // off
+ */
+export function configureTerrainGrid(
+  material: THREE.ShaderMaterial,
+  layout: HexLayout,
+  opts: TerrainGridOptions = {},
+): void {
+  const u = material.uniforms;
+  if (!u || !('uGridEnabled' in u)) return;
+  const o = layout.orientation;
+  u.uGridFwd.value.set(
+    o.f0 * layout.size, o.f1 * layout.size,
+    o.f2 * layout.size, o.f3 * layout.size,
+  );
+  u.uGridInv.value.set(
+    o.b0 / layout.size, o.b1 / layout.size,
+    o.b2 / layout.size, o.b3 / layout.size,
+  );
+  u.uGridOrigin.value.set(layout.originX, layout.originZ);
+  if (opts.color     !== undefined) u.uGridColor.value.set(opts.color);
+  if (opts.opacity   !== undefined) u.uGridOpacity.value   = opts.opacity;
+  if (opts.lineWidth !== undefined) u.uGridLineWidth.value = opts.lineWidth;
+  if (opts.fadeStart !== undefined) u.uGridFadeStart.value = opts.fadeStart;
+  if (opts.fadeEnd   !== undefined) u.uGridFadeEnd.value   = opts.fadeEnd;
+  u.uGridEnabled.value = (opts.enabled ?? true) ? 1 : 0;
+}
+
+/** Show or hide the shader hex grid without touching its styling. */
+export function setTerrainGridEnabled(material: THREE.ShaderMaterial, enabled: boolean): void {
+  const u = material.uniforms;
+  if (u && 'uGridEnabled' in u) u.uGridEnabled.value = enabled ? 1 : 0;
 }

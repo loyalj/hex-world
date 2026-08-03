@@ -55,6 +55,15 @@ export class HexMap {
    * gradient in the water surface geometry. Non-water cells retain 0.
    */
   readonly shoreDistances: Uint8Array;
+  /**
+   * Sparse per-cell metadata channel: arbitrary JSON-serializable game data
+   * (ownership, yields, quest flags, grazing state…) keyed by flat cell index
+   * (`row * width + col`). Rides through save/load and `.hexpack` — values must
+   * survive `JSON.stringify`/`JSON.parse` round-trips (no functions, no class
+   * instances, no cycles). Prefer the `getCellData`/`setCellData` accessors;
+   * the raw map is exposed for serializers and bulk iteration.
+   */
+  readonly cellData: Map<number, Record<string, unknown>>;
 
   constructor(options: HexMapOptions) {
     this.width = options.width;
@@ -70,6 +79,7 @@ export class HexMap {
       : null;
     this.waterSurfaces  = new Int8Array(this.width * this.height);
     this.shoreDistances = new Uint8Array(this.width * this.height);
+    this.cellData       = new Map();
 
     if (options.defaultTerrain !== undefined && options.defaultTerrain !== TerrainType.Grassland) {
       for (let i = 0; i < this.width * this.height; i++) {
@@ -110,6 +120,60 @@ export class HexMap {
   setFeatureLevel(col: number, row: number, layer: number, value: number): void {
     if (!this.featureData || layer >= this.featureLayerCount) return;
     this.featureData[(row * this.width + col) * this.featureLayerCount + layer] = value & 3;
+  }
+
+  // --- Per-cell metadata channel ---
+
+  /**
+   * Returns the metadata value stored under `key` for the cell, or `undefined`
+   * if the cell has no entry for that key. Values are arbitrary
+   * JSON-serializable game data — see {@link cellData}.
+   */
+  getCellData(col: number, row: number, key: string): unknown {
+    return this.cellData.get(row * this.width + col)?.[key];
+  }
+
+  /**
+   * Stores a metadata value under `key` for the cell. Passing `undefined`
+   * deletes the key (and drops the cell's record entirely once its last key is
+   * removed, keeping the store sparse). Values must be JSON-serializable —
+   * they ride through save/load and `.hexpack` via `JSON.stringify`.
+   * No-op for out-of-bounds cells.
+   */
+  setCellData(col: number, row: number, key: string, value: unknown): void {
+    if (!this.inBounds(col, row)) return;
+    const ci = row * this.width + col;
+    const record = this.cellData.get(ci);
+    if (value === undefined) {
+      if (!record) return;
+      delete record[key];
+      if (Object.keys(record).length === 0) this.cellData.delete(ci);
+      return;
+    }
+    if (record) {
+      record[key] = value;
+    } else {
+      this.cellData.set(ci, { [key]: value });
+    }
+  }
+
+  /**
+   * Returns the cell's full metadata record, or `undefined` if the cell has
+   * none. The record is the live object — treat it as read-only and mutate
+   * through {@link setCellData} so sparse-store invariants hold.
+   */
+  getCellDataRecord(col: number, row: number): Readonly<Record<string, unknown>> | undefined {
+    return this.cellData.get(row * this.width + col);
+  }
+
+  /** Returns `true` if the cell has any metadata entries. */
+  hasCellData(col: number, row: number): boolean {
+    return this.cellData.has(row * this.width + col);
+  }
+
+  /** Removes all metadata entries for the cell. */
+  clearCellData(col: number, row: number): void {
+    this.cellData.delete(row * this.width + col);
   }
 
   // --- Terrain ---
@@ -381,6 +445,7 @@ export class HexMap {
     this.featureData?.fill(0);
     this.waterSurfaces.fill(0);
     this.shoreDistances.fill(0);
+    this.cellData.clear();
   }
 
   // --- Water surfaces ---

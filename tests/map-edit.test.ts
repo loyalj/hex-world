@@ -42,6 +42,36 @@ describe('HexMap.edit transactions', () => {
     expect(map.hasRoadThroughEdge(2, 2, 0)).toBe(false);
   });
 
+  it('snapshots and restores per-cell metadata through undo/redo', () => {
+    const map = new HexMap({ width: 8, height: 8 });
+    map.setCellData(2, 2, 'owner', 'clan-red');
+    map.setCellData(2, 2, 'herd', { goats: 12 });
+
+    const edit = map.edit(tx => {
+      tx.setCellData(2, 2, 'owner', 'clan-blue');
+      tx.setCellData(2, 2, 'herd', undefined); // delete a key
+      tx.setCellData(3, 3, 'flag', true);      // create a record
+      tx.clearCellData(4, 4);                  // no-op on empty cell, still touched
+    });
+
+    edit.undo();
+    expect(map.getCellData(2, 2, 'owner')).toBe('clan-red');
+    expect(map.getCellData(2, 2, 'herd')).toEqual({ goats: 12 });
+    expect(map.hasCellData(3, 3)).toBe(false);
+
+    edit.redo();
+    expect(map.getCellData(2, 2, 'owner')).toBe('clan-blue');
+    expect(map.getCellData(2, 2, 'herd')).toBeUndefined();
+    expect(map.getCellData(3, 3, 'flag')).toBe(true);
+
+    // Undo again — snapshots must not alias live records across cycles.
+    edit.undo();
+    expect(map.getCellData(2, 2, 'owner')).toBe('clan-red');
+    map.setCellData(2, 2, 'owner', 'mutated');
+    edit.redo();
+    expect(map.getCellData(2, 2, 'owner')).toBe('clan-blue');
+  });
+
   it('keeps the FIRST before-state when a cell is touched repeatedly', () => {
     const map = new HexMap({ width: 4, height: 4 });
     map.setElevation(1, 1, 5);

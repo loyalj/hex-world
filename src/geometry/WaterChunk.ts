@@ -268,20 +268,38 @@ export function buildRiverGeometry(
 
   const { colStart, colEnd, rowStart, rowEnd } = bounds;
   const hexCount = (colEnd - colStart) * (rowEnd - rowStart);
-  const maxVerts = hexCount * 96; // per-edge segments + waterfall quads + junction cap
+  // Indexed: the old per-hex vertex budget (per-edge segments + waterfall quads
+  // + junction cap) now bounds the index count; welding shrinks the attributes.
+  const maxVerts   = hexCount * 96;
+  const maxIndices = hexCount * 96;
 
   const positions   = new Float32Array(maxVerts * 3);
   const uvs         = new Float32Array(maxVerts * 2);
   const cellIndices = new Float32Array(maxVerts);
-  let vi = 0, uvi = 0, cii = 0;
+  const indices     = maxVerts > 65535 ? new Uint32Array(maxIndices) : new Uint16Array(maxIndices);
+  let vi = 0, uvi = 0, cii = 0, ii = 0;
+  let vertCount = 0;
   let curCi = 0;
+
+  // Per-cell vertex weld: identical (position, uv) tuples within one cell
+  // collapse to a single indexed vertex (channel corners shared between the
+  // mouth triangle and the channel quad, junction-cap seams). Never welded
+  // across cells — cellIndex differs there. Points reused with DIFFERENT uv
+  // (e.g. cR in the junction mouth fan vs bank fan) stay separate vertices.
+  const vertIds = new Map<string, number>();
+  const vertKey = (x: number, y: number, z: number, u: number, v: number) =>
+    `${Math.round(x * 1e5)},${Math.round(y * 1e5)},${Math.round(z * 1e5)},${u},${v}`;
 
   const perturb = (x: number, z: number): [number, number] => {
     const n = sampleNoise(x * noiseScale, z * noiseScale);
     return [(n[0] * 2 - 1) * perturbStr, (n[2] * 2 - 1) * perturbStr];
   };
 
-  const addVert = (x: number, y: number, z: number, u: number, v: number) => {
+  /** Returns the vertex id, reusing an identical vertex emitted earlier in the same cell. */
+  const addVert = (x: number, y: number, z: number, u: number, v: number): number => {
+    const key = vertKey(x, y, z, u, v);
+    const existing = vertIds.get(key);
+    if (existing !== undefined) return existing;
     const [dx, dz] = perturb(x, z);
     positions[vi++] = x + dx;
     positions[vi++] = y;
@@ -289,6 +307,8 @@ export function buildRiverGeometry(
     uvs[uvi++] = u;
     uvs[uvi++] = v;
     cellIndices[cii++] = curCi;
+    vertIds.set(key, vertCount);
+    return vertCount++;
   };
 
   const addTri = (
@@ -296,9 +316,9 @@ export function buildRiverGeometry(
     x1: number, y1: number, z1: number, u1: number, v1: number,
     x2: number, y2: number, z2: number, u2: number, v2: number,
   ) => {
-    addVert(x0, y0, z0, u0, v0);
-    addVert(x1, y1, z1, u1, v1);
-    addVert(x2, y2, z2, u2, v2);
+    indices[ii++] = addVert(x0, y0, z0, u0, v0);
+    indices[ii++] = addVert(x1, y1, z1, u1, v1);
+    indices[ii++] = addVert(x2, y2, z2, u2, v2);
   };
 
   const addQuad = (
@@ -333,6 +353,7 @@ export function buildRiverGeometry(
       }
 
       curCi = cellKey;
+      vertIds.clear(); // weld within this cell only
 
       const q      = col - (row - (row & 1)) / 2;
       const center = hexToWorld(layout, { q, r: row });
@@ -396,13 +417,11 @@ export function buildRiverGeometry(
         if (isBeginEnd) {
           if (isOutgoing) {
             if (nbIsWater && ry > nbWaterSurfaceY) {
-              const [dcx, dcz] = perturb(center.x, center.z);
-              const [dLx, dLz] = perturb(eLx, eLz);
-              const [dRx, dRz] = perturb(eRx, eRz);
-              const pcx = center.x + dcx, pcz = center.z + dcz;
-              positions[vi++] = pcx;       positions[vi++] = ry;           positions[vi++] = pcz;       uvs[uvi++] = 0.5; uvs[uvi++] = 0.0; cellIndices[cii++] = curCi;
-              positions[vi++] = eLx + dLx; positions[vi++] = estuaryEdgeY; positions[vi++] = eLz + dLz; uvs[uvi++] = 0.0; uvs[uvi++] = 1.0; cellIndices[cii++] = curCi;
-              positions[vi++] = eRx + dRx; positions[vi++] = estuaryEdgeY; positions[vi++] = eRz + dRz; uvs[uvi++] = 1.0; uvs[uvi++] = 1.0; cellIndices[cii++] = curCi;
+              addTri(
+                center.x, ry,           center.z, 0.5, 0.0,
+                eLx,      estuaryEdgeY, eLz,      0.0, 1.0,
+                eRx,      estuaryEdgeY, eRz,      1.0, 1.0,
+              );
             } else {
               const mLx = (center.x + eLx) * 0.5, mLz = (center.z + eLz) * 0.5;
               const mRx = (center.x + eRx) * 0.5, mRz = (center.z + eRz) * 0.5;
@@ -501,13 +520,13 @@ export function buildRiverGeometry(
     }
   }
 
-  if (vi === 0) return null;
+  if (vertCount === 0) return null;
 
-  const n   = vi / 3;
   const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position',  new THREE.BufferAttribute(positions.slice(0, n * 3), 3));
-  geo.setAttribute('uv',        new THREE.BufferAttribute(uvs.slice(0, n * 2), 2));
-  geo.setAttribute('cellIndex', new THREE.BufferAttribute(cellIndices.slice(0, n), 1));
+  geo.setAttribute('position',  new THREE.BufferAttribute(positions.slice(0, vertCount * 3), 3));
+  geo.setAttribute('uv',        new THREE.BufferAttribute(uvs.slice(0, vertCount * 2), 2));
+  geo.setAttribute('cellIndex', new THREE.BufferAttribute(cellIndices.slice(0, vertCount), 1));
+  geo.setIndex(new THREE.BufferAttribute(indices.slice(0, ii), 1));
   return geo;
 }
 
