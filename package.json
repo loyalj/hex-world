@@ -1,7 +1,7 @@
 {
   "name": "@loyalj/hex-world",
-  "version": "0.2.0",
-  "description": "Three.js hex grid library for strategy and exploration games — chunk-based rendering, terrain, water, roads, scatter, fog of war, pathfinding, and procedural generation.",
+  "version": "0.3.0",
+  "description": "Three.js hex grid library for strategy and exploration games — chunk-based rendering, terrain, water, roads, scatter, fog of war, pathfinding, procedural generation, sun shadows, day/night cycle, and weather.",
   "author": "Loyal Johnson <loyalj@gmail.com>",
   "license": "ISC",
   "keywords": [

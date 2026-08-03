@@ -6,13 +6,19 @@ A Three.js library for building hex-grid strategy and exploration games. Handles
 
 ## What it does
 
-- **Chunk-based rendering** — large maps streamed in and out as the camera moves, one draw call per chunk
-- **Terrain system** — six built-in types with vertex color blending and texture splatting; fully extensible with custom types, procedural noise, or image textures
-- **Liquid types** — modular system supporting multiple liquid types on one map (water, lava, acid, or custom); each type has its own surface, shore, estuary, and river materials; correct foam boundaries where liquid types meet; rivers classified by which pool they drain into
+- **Chunk-based rendering** — large maps streamed in and out as the camera moves, one draw call per chunk; optional Web Worker geometry building for hitch-free streaming on big maps
+- **HexWorld facade** — batteries-included entry point: renderer, RTS camera, lighting, materials, streaming, picking, and overlays wired in one call, with every piece still reachable for à-la-carte use
+- **Terrain system** — six built-in types with vertex color blending and texture splatting; fully extensible with custom types, procedural noise, or image textures; shader-based hex grid overlay with distance fading
+- **Liquid types** — modular system supporting multiple liquid types on one map (water, lava, acid, or custom); each type has its own surface, shore, estuary, and river materials; correct foam boundaries where liquid types meet; rivers classified by which pool they drain into, widened by accumulated flow, joined at confluences, and carved into flared channels with rendered waterfalls at cliffs
+- **Sun shadows** — a shadow-casting directional sun whose frustum re-fits the camera view every frame (texel-snapped, so panning doesn't shimmer) — built to pair with chunk streaming
+- **Day/night cycle** — animated sun/moon arc with warm dawn/dusk tinting, cool moonlight, sky color tracking, and liquid darkening that leaves emissive lava glowing after dark
+- **Weather** — drifting cloud shadows across terrain *and* water, plus world-anchored rain streaks and snow that fall under the denser clouds and follow the camera without sticking to it
 - **Roads** — geometry strips rendered above terrain
 - **Scatter features** — instanced meshes (trees, rocks, buildings) placed deterministically from per-cell density levels; modular definitions with terrain filters and density tiers
 - **Fog of war** — reference-counted per-cell visibility with smooth reveal animation; integrated with units
-- **Procedural generation** — full climate-driven pipeline (BFS landmass → erosion → moisture simulation → temperature model → biome assignment → rivers → roads), plus a fast FBM alternative; composable raw passes for custom generators
+- **Per-cell metadata** — a sparse, serialized data channel (`getCellData`/`setCellData`) with undo/redo, for territory, resources, or any game-specific state
+- **Procedural generation** — full climate-driven pipeline (BFS landmass → erosion → moisture simulation → temperature model → biome assignment → rivers → roads), plus a fast FBM alternative; composable raw passes for custom generators; async time-sliced variants with progress events and cancellation for loading bars
+- **Minimap rendering** — `renderMapImage` draws any map to an image with elevation shading and fog for minimaps and journey screens
 - **Pathfinding** — A\*, flood-fill movement range, BFS visibility radius, elevation-aware line of sight, Catmull-Rom path smoothing
 - **Units** — position, smooth path-following, facing, fog reveal; wire your own `Object3D` and animation callbacks
 - **RTS camera** — pan, zoom, tilt with smooth damping
@@ -38,6 +44,28 @@ npm install three @types/three
 ---
 
 ## Quick start
+
+The fastest path is the `HexWorld` facade — one call wires the renderer, RTS camera, lights, materials, chunk streaming, and picking:
+
+```ts
+import { HexWorld, HexMap, FbmPlugin } from '@loyalj/hex-world';
+
+const map = new HexMap({ width: 200, height: 100, featureLayerCount: 1 });
+FbmPlugin.generate(map, FbmPlugin.defaultConfig, Date.now());
+
+const world = await HexWorld.create({
+  container: document.body,
+  map,
+  shadows: true,          // camera-fitted sun shadows
+  dayNight: true,         // animated day/night cycle (see also world.setTimeOfDay)
+  chunkWorker: true,      // build streamed chunks off the main thread
+});
+
+world.setWeather('rain'); // drifting cloud shadows + rain under them
+world.onFrame = () => { if (world.hoveredCell) { /* your game logic */ } };
+```
+
+Every piece `HexWorld` wires is also available à la carte if you'd rather own the scene yourself:
 
 ```ts
 import * as THREE from 'three';
