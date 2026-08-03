@@ -39,7 +39,7 @@ const fragmentShader = /* glsl */`
     float foam = clamp(Foam(shore, vWorldXZ, t) * uFoamIntensity, 0.0, 1.0);
     vec3 color = mix(waterColor, uFoamColor, foam);
 
-    gl_FragColor = liquidOutput(color, vVisibility, vExplored);
+    gl_FragColor = liquidOutput(color, vVisibility, vExplored, vWorldXZ);
   }
 `;
 

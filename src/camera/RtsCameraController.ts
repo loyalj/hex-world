@@ -92,6 +92,9 @@ export class RtsCameraController {
   get minPitchDeg(): number      { return this.minPitch / DEG2RAD; }
   get maxPitchDeg(): number      { return this.maxPitch / DEG2RAD; }
 
+  /** The ground point the camera looks at (y = 0). Read-only — do not mutate; use snapTo/panTo. */
+  get targetPosition(): Readonly<THREE.Vector3> { return this.target; }
+
   /**
    * Instantly reposition the camera to look at the given world-space XZ position
    * with no animation. Use at startup or after teleporting so the first frame

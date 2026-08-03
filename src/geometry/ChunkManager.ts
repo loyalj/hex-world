@@ -6,7 +6,7 @@ import { HEX_DIRECTIONS } from '../math/HexCoord.js';
 import { buildChunkGeometry, chunkArraysToGeometries, type ChunkBounds, type ChunkGeometryOptions, type TerrainColorMode } from './HexChunk.js';
 export type { TerrainColorMode };
 import { WorkerChunkBuilder, type ChunkWorkerLike } from './WorkerChunkBuilder.js';
-import { buildWaterGeometry, buildRiverGeometry, computeRiverOwnership, computeRiverFlow, type WaterGeometryOptions } from './WaterChunk.js';
+import { buildWaterGeometry, buildRiverGeometry, computeRiverOwnership, computeRiverFlow, computeRiverElevations, type WaterGeometryOptions } from './WaterChunk.js';
 import { buildShoreGeometry } from './WaterShoreChunk.js';
 import { buildEstuaryGeometry } from './EstuaryChunk.js';
 import { buildScatterMeshes } from './ScatterBuilder.js';
@@ -124,6 +124,12 @@ export class ChunkManager {
    *  cache, which is nulled on markDirty) so a recompute can diff against it
    *  and dirty every cell whose flow changed. */
   private lastRiverFlow: Map<number, number> | null = null;
+  /** Map-wide carved river elevation cache (running min along flow). Null = stale. */
+  private riverElevCache: Map<number, number> | null = null;
+  /** The carved-elevation map behind the currently-rendered geometry (same diffing role as lastRiverFlow). */
+  private lastRiverElev: Map<number, number> | null = null;
+  /** True when the caller pinned geometryOptions.riverbedTerrain explicitly. */
+  private readonly riverbedPinned: boolean;
   private readonly flowWidenedRivers: boolean;
   private fogData:                     FogData | null;
   private hideUnexplored            = true;
@@ -175,6 +181,7 @@ export class ChunkManager {
 
     this.geoOptions      = { ...opts.geometryOptions };
     this.waterGeoOptions = { ...opts.waterGeometryOptions };
+    this.riverbedPinned  = opts.geometryOptions?.riverbedTerrain !== undefined;
 
     // Definite assignment happens in applyTerrainDefinitions; these initializers
     // keep the compiler satisfied without duplicating the derivation.
@@ -222,28 +229,53 @@ export class ChunkManager {
   }
 
   /**
-   * Flow is a MAP-WIDE property: one edit can change the accumulated flow —
-   * and therefore the rendered channel width — of every cell downstream, far
-   * outside the edited chunk. After an edit invalidates the flow cache,
-   * recompute and mark every cell whose flow changed, so downstream chunks
-   * rebuild instead of keeping stale widths (visible as abrupt channel steps
-   * at chunk borders and mismatched confluences).
+   * Lazily computes the map-wide carved river elevations (running minimum
+   * along flow) so uphill river stretches hold a level water surface and
+   * carve a gorge instead of climbing. Invalidated by markDirty.
    */
-  private refreshFlowAndMarkChanged(): void {
-    const next = computeRiverFlow(this.map, this.layout.orientation.edgeDirections);
-    const prev = this.lastRiverFlow;
-    if (prev) {
-      const w = this.map.width;
+  private riverElevations(): Map<number, number> {
+    if (!this.riverElevCache) {
+      this.riverElevCache = computeRiverElevations(this.map, this.layout.orientation.edgeDirections);
+      this.lastRiverElev  = this.riverElevCache;
+    }
+    return this.riverElevCache;
+  }
+
+  /**
+   * Flow and carved elevation are MAP-WIDE properties: one edit can change
+   * the accumulated flow — and therefore the rendered channel width — or the
+   * carried water level of every cell downstream, far outside the edited
+   * chunk. After an edit invalidates the caches, recompute and mark every
+   * cell whose value changed, so downstream chunks rebuild instead of keeping
+   * stale widths/levels (visible as abrupt channel steps at chunk borders and
+   * mismatched confluences).
+   */
+  private refreshRiverCachesAndMarkChanged(): void {
+    const w = this.map.width;
+    const diffAndMark = (next: Map<number, number>, prev: Map<number, number> | null) => {
+      if (!prev) return;
       for (const [k, v] of next) {
         if (prev.get(k) !== v) this.markDirty(k % w, (k / w) | 0);
       }
       for (const k of prev.keys()) {
         if (!next.has(k)) this.markDirty(k % w, (k / w) | 0);
       }
+    };
+
+    const nextFlow = this.flowWidenedRivers
+      ? computeRiverFlow(this.map, this.layout.orientation.edgeDirections)
+      : null;
+    const nextElev = computeRiverElevations(this.map, this.layout.orientation.edgeDirections);
+    if (nextFlow) diffAndMark(nextFlow, this.lastRiverFlow);
+    diffAndMark(nextElev, this.lastRiverElev);
+
+    // After the markDirty calls above (each nulls the cache fields).
+    if (nextFlow) {
+      this.riverFlowCache = nextFlow;
+      this.lastRiverFlow  = nextFlow;
     }
-    // After the markDirty calls above (each nulls the cache field).
-    this.riverFlowCache = next;
-    this.lastRiverFlow  = next;
+    this.riverElevCache = nextElev;
+    this.lastRiverElev  = nextElev;
   }
 
   /** Recompute every terrain-definition-derived lookup. */
@@ -267,6 +299,11 @@ export class ChunkManager {
     this.computeDefaultRiverLiquid();
 
     this.geoOptions.terrainDefinitions = terrainDefs;
+    // Carved stream beds blend toward the pack's 'riverbed' terrain, unless
+    // the caller pinned (or disabled) the target via geometryOptions.
+    if (!this.riverbedPinned) {
+      this.geoOptions.riverbedTerrain = terrainDefs.find(d => d.id === 'riverbed')?.index;
+    }
     this.riverCellsByLiquid = null;
   }
 
@@ -306,6 +343,7 @@ export class ChunkManager {
       ownsUnclassifiedRivers:  liquidId === this.defaultRiverLiquidId,
       riverCells: this.riverCellsFor(liquidId),
       riverFlow:  this.riverFlow(),
+      riverElevations: this.riverElevations(),
     };
   }
 
@@ -410,7 +448,8 @@ export class ChunkManager {
     if (this.chunks.has(k)) return;
 
     const b    = this.bounds(cx, cy);
-    this.geoOptions.riverFlow = this.riverFlow();
+    this.geoOptions.riverFlow       = this.riverFlow();
+    this.geoOptions.riverElevations = this.riverElevations();
     const { terrain: geo, roads: roadsGeo } = buildChunkGeometry(this.map, this.layout, b, this.geoOptions);
     this.attachChunkMeshes(k, b, geo, roadsGeo);
   }
@@ -430,7 +469,8 @@ export class ChunkManager {
     if (!worker) { this.loadChunk(cx, cy); return; }
 
     if (!this.workerMapSynced) {
-      this.geoOptions.riverFlow = this.riverFlow();
+      this.geoOptions.riverFlow       = this.riverFlow();
+      this.geoOptions.riverElevations = this.riverElevations();
       worker.syncMap(this.map, this.layout, this.geoOptions);
       this.workerMapSynced = true;
     }
@@ -456,6 +496,10 @@ export class ChunkManager {
     this.applyFog(this.material);
     const mesh = new THREE.Mesh(geo, this.material);
     mesh.frustumCulled = true;
+    // Free when the renderer has shadows off; lets mountains shadow valleys
+    // (and receive from scatter/units) as soon as a shadow-casting sun exists.
+    mesh.castShadow    = true;
+    mesh.receiveShadow = true;
     this.scene.add(mesh);
     this.chunks.set(k, mesh);
 
@@ -595,10 +639,11 @@ export class ChunkManager {
       if (scatterNeedsRefresh) this.updateScatterFog();
     }
 
-    // Widen/narrow downstream channels whose accumulated flow changed BEFORE
-    // snapshotting dirty regions, so their chunks join this frame's rebuild.
-    if (this.flowWidenedRivers && this.dirty.size > 0 && this.riverFlowCache === null) {
-      this.refreshFlowAndMarkChanged();
+    // Widen/narrow downstream channels whose accumulated flow changed, and
+    // re-level ones whose carved elevation changed, BEFORE snapshotting dirty
+    // regions, so their chunks join this frame's rebuild.
+    if (this.dirty.size > 0 && (this.riverFlowCache === null || this.riverElevCache === null)) {
+      this.refreshRiverCachesAndMarkChanged();
     }
 
     if (this.dirty.size > 0) {
@@ -621,7 +666,8 @@ export class ChunkManager {
       const [cx, cy] = k.split(',').map(Number);
       const b = this.bounds(cx, cy);
       mesh.geometry.dispose();
-      this.geoOptions.riverFlow = this.riverFlow();
+      this.geoOptions.riverFlow       = this.riverFlow();
+      this.geoOptions.riverElevations = this.riverElevations();
       const { terrain: newGeo, roads: newRoadsGeo } = buildChunkGeometry(this.map, this.layout, b, this.geoOptions);
       mesh.geometry = newGeo;
 
@@ -780,6 +826,7 @@ export class ChunkManager {
     this.dirty.add(this.key(Math.floor(col / cs), Math.floor(row / cs)));
     this.riverCellsByLiquid = null; // river ownership may have changed
     this.riverFlowCache     = null; // accumulated flow may have changed
+    this.riverElevCache     = null; // carved river levels may have changed
     this.invalidateAsyncBuilds();   // worker snapshot no longer matches the map
 
     // Interior cells can't affect another chunk's geometry.
@@ -890,6 +937,8 @@ export class ChunkManager {
     this.riverCellsByLiquid = null;
     this.riverFlowCache     = null;
     this.lastRiverFlow      = null;
+    this.riverElevCache     = null;
+    this.lastRiverElev      = null;
     // Terminate the chunk worker; the next async request recreates it from
     // the factory, so dispose-and-reload keeps working with workers enabled.
     this.invalidateAsyncBuilds();

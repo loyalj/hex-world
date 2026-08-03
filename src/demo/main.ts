@@ -30,6 +30,9 @@ import { serializeMapJSON, deserializeMapJSON } from '../map/MapSerializer.js';
 import { renderMapImage, getMapWorldBounds, type MapWorldBounds } from '../map/MapImageRenderer.js';
 import { HexUnit } from '../units/HexUnit.js';
 import { UnitManager } from '../units/UnitManager.js';
+import { SunShadowRig } from '../lighting/SunShadows.js';
+import { DayNightCycle, formatTimeOfDay } from '../lighting/DayNightCycle.js';
+import { WeatherSystem, type WeatherType } from '../weather/WeatherSystem.js';
 
 /** Change this one constant to switch terrain rendering mode. */
 const TERRAIN_COLOR_MODE: TerrainColorMode = 'splat';
@@ -41,21 +44,23 @@ const TERRAIN_NAMES: Record<number, string> = {
   [TerrainType.Mud]:       'Mud',
   [TerrainType.Rock]:      'Rock',
   [TerrainType.Snow]:      'Snow',
-  6: 'Lava',
-  7: 'Acid',
-  8: 'Deep Acid',
+  6: 'Riverbed',
+  7: 'Lava',
+  8: 'Acid',
+  9: 'Deep Acid',
 };
 
-// Extended terrain descriptors — default six plus lava (6) and acid (7, deep 8).
-// Deep Acid shares liquidType 'acid' with Acid: one liquid spanning two terrain
-// indices (no internal foam line; the pool floor dips at the deep cells).
+// Extended terrain descriptors — default seven (incl. riverbed at 6) plus
+// lava (7) and acid (8, deep 9). Deep Acid shares liquidType 'acid' with
+// Acid: one liquid spanning two terrain indices (no internal foam line; the
+// pool floor dips at the deep cells).
 const DEMO_TERRAIN_DESCRIPTORS = [
   ...DEFAULT_TERRAIN_DESCRIPTORS,
-  { index: 6, id: 'lava', name: 'Lava', color: 0xd44010 as number,
+  { index: 7, id: 'lava', name: 'Lava', color: 0xd44010 as number,
     liquidType: 'lava', texture: { type: 'procedural' as const } },
-  { index: 7, id: 'acid', name: 'Acid', color: 0x55cc22 as number,
+  { index: 8, id: 'acid', name: 'Acid', color: 0x55cc22 as number,
     liquidType: 'acid', texture: { type: 'procedural' as const } },
-  { index: 8, id: 'acid-deep', name: 'Deep Acid', color: 0x2f7a12 as number,
+  { index: 9, id: 'acid-deep', name: 'Deep Acid', color: 0x2f7a12 as number,
     liquidType: 'acid', texture: { type: 'procedural' as const } },
 ];
 const DEMO_TERRAIN_DEFINITIONS = resolveTerrainDefinitions(DEMO_TERRAIN_DESCRIPTORS);
@@ -100,6 +105,8 @@ renderer.setPixelRatio(devicePixelRatio);
 renderer.setSize(innerWidth, innerHeight);
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 0.9;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type    = THREE.PCFSoftShadowMap;
 document.body.appendChild(renderer.domElement);
 
 const controls = new RtsCameraController({
@@ -113,11 +120,11 @@ const controls = new RtsCameraController({
   maxDistance: 80,
 });
 
-// Lighting — cool sky ambient + warm directional sun
+// Lighting — cool sky ambient + warm shadow-casting sun whose ortho frustum
+// re-fits the camera view every frame (see SunShadowRig).
 const ambient = new THREE.AmbientLight(0xd0e0ff, 0.5);
-const sun = new THREE.DirectionalLight(0xfff4d0, 1.4);
-sun.position.set(100, 120, 80);
-scene.add(ambient, sun);
+scene.add(ambient);
+const sunRig = new SunShadowRig({ direction: new THREE.Vector3(100, 120, 80) }).addTo(scene);
 
 // --- Hover indicator (flat translucent hex that follows the cursor) ---
 const indicatorGeo = new THREE.BufferGeometry();
@@ -183,6 +190,32 @@ async function start() {
   } else {
     terrainMaterial = new THREE.MeshPhongMaterial({ vertexColors: true, side: THREE.DoubleSide });
   }
+
+  // --- Day/night + weather ---
+  const shaderTerrainMat = terrainMaterial instanceof THREE.ShaderMaterial ? terrainMaterial : undefined;
+
+  // Starts paused at noon (which reproduces the static default lighting);
+  // [N] lets time flow, [,]/[.] scrub in 30-minute steps.
+  const dayNight = new DayNightCycle({ dayLength: 90, paused: true });
+  // liquidMaterials.values() is a one-shot iterator, so build the targets fresh each apply.
+  function applyDayNight(): void {
+    dayNight.applyTo({
+      sunRig,
+      ambientLight: ambient,
+      terrainMaterial: shaderTerrainMat,
+      liquidMaterials: liquidMaterials.values(),
+      scene,
+    });
+  }
+  applyDayNight();
+
+  const weather = new WeatherSystem({
+    scene,
+    terrainMaterial: shaderTerrainMat ?? null,
+    liquidMaterials: () => liquidMaterials.values(),
+  });
+  const WEATHER_TYPES: WeatherType[] = ['clear', 'rain', 'snow'];
+  let weatherIndex = 0;
 
   // --- Scatter ---
   const hashGrid = new HexHashGrid(1234);
@@ -484,6 +517,7 @@ async function start() {
   for (const def of UNIT_DEFS) {
     const mat   = new THREE.MeshLambertMaterial({ color: def.color });
     const mesh  = new THREE.Mesh(new THREE.CapsuleGeometry(0.25, 0.7, 4, 8), mat);
+    mesh.castShadow = true;
     const spawn = findSpawnCell(def.col, def.row);
     const u = new HexUnit({ col: spawn.col, row: spawn.row, travelSpeed: 4, heightOffset: 0.6, fogRevealRange: FOG_REVEAL_RANGE });
 
@@ -582,6 +616,19 @@ async function start() {
         gridVisible = !gridVisible;
         configureTerrainGrid(terrainMaterial, layout, { enabled: gridVisible });
       }
+    } else if (e.key === 'o' || e.key === 'O') {
+      sunRig.setEnabled(!sunRig.enabled);
+    } else if (e.key === 'n' || e.key === 'N') {
+      dayNight.paused = !dayNight.paused;
+    } else if (e.key === ',') {
+      dayNight.setTime(dayNight.time - 1 / 48);
+      applyDayNight();
+    } else if (e.key === '.') {
+      dayNight.setTime(dayNight.time + 1 / 48);
+      applyDayNight();
+    } else if (e.key === 'm' || e.key === 'M') {
+      weatherIndex = (weatherIndex + 1) % WEATHER_TYPES.length;
+      weather.setWeather(WEATHER_TYPES[weatherIndex]);
     } else if (e.key === '1') {
       minimapDimExplored = !minimapDimExplored;
       updateMinimap();
@@ -641,6 +688,12 @@ async function start() {
     lastFrameTime = now;
 
     controls.update();
+    if (!dayNight.paused) {
+      dayNight.advance(dt);
+      applyDayNight();
+    }
+    weather.update(dt, controls.targetPosition);
+    sunRig.update(camera);
     unitManager.update(dt);
     chunkManager.update(camera, dt);
 
@@ -700,6 +753,9 @@ async function start() {
       `Zoom:      ${controls.currentDistance.toFixed(1)}  (min ${controls.minDist} / max ${controls.maxDist})\n` +
       `Tilt:      ${controls.currentPitchDeg.toFixed(1)}°  (min ${controls.minPitchDeg}° / max ${controls.maxPitchDeg}°)\n` +
       `Hex grid:  ${gridVisible ? 'ON  [H] toggle' : 'OFF  [H] toggle'}\n` +
+      `Shadows:   ${sunRig.enabled ? 'ON  [O] toggle' : 'OFF [O] toggle'}\n` +
+      `Time:      ${formatTimeOfDay(dayNight.time)}  ${dayNight.paused ? 'paused' : 'running'}  [N] play/pause  [,][.] scrub\n` +
+      `Weather:   ${weather.type}  [M] cycle\n` +
       `Hide unexplored: ${hideUnexplored ? 'ON  [E] toggle' : 'OFF  [E] toggle'}\n` +
       `Dim explored:    ${dimExplored    ? 'ON  [F] toggle' : 'OFF  [F] toggle'}\n` +
       `Save: [S]  Load: [L]  ${saveStatus}\n` +

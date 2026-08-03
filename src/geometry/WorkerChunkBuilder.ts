@@ -68,7 +68,11 @@ export function serializeChunkGeometryOptions(opts: ChunkGeometryOptions): Chunk
     fallbackColor: resolved.fallbackColor
       ? { r: resolved.fallbackColor.r, g: resolved.fallbackColor.g, b: resolved.fallbackColor.b }
       : undefined,
-    riverFlow: resolved.riverFlow,
+    riverFlow:       resolved.riverFlow,
+    riverElevations: resolved.riverElevations,
+    riverbedTerrain: resolved.riverbedTerrain,
+    riverBankFlare:  resolved.riverBankFlare,
+    riverbedBlend:   resolved.riverbedBlend,
   };
 }
 

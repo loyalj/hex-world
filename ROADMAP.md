@@ -43,22 +43,53 @@ features from actual need.
   line meshes.
 - [ ] **Sky system** — gradient dome or skybox with horizon fog color-matched to
   the biome palette, so map edges dissolve into atmosphere instead of a hard void.
+  Should consume DayNightCycle's sky color (currently a flat background) AND a
+  weather input — during rain/snow the sky stays clear blue today, which reads
+  wrong over an overcast scene; WeatherSystem should contribute a grey/overcast
+  factor.
+- [x] **River channel polish** *(2026-08-03, from visual review)* — waterfall
+  water now actually renders on the cliff face (notched backstop wall +
+  groove-hugging sheet welded to the downstream channel); channel walls flare
+  outward (`riverBankFlare`, default 1.3, hard ceiling ~1.4); carved bed faces
+  blend to a new riverbed terrain (sandy tan + grey gravel, index 6,
+  auto-resolved by descriptor id `riverbed`); rivers routed uphill hold a
+  level surface and carve a gorge (`computeRiverElevations` running-min)
+  instead of climbing as a floating plane.
 - [ ] **Waterfall polish** — the waterfall geometry exists; add spray/mist
   particles and a foam pool at the base to sell it.
 - [ ] **Seasons and snow accumulation** — gradual snowline descent and river
   freeze driven by the temperature model the climate generator already computes,
   blended in the terrain shader. Needs a world-time input and per-cell temperature
   available at render time. *The Long Migration's antagonist mechanic.*
-- [ ] **Day/night cycle** — animated sun direction with warm dawn/dusk tinting and
-  a moonlight mode. Lava's emissive glow really pays off at night. Shares the
-  world-time input with seasons; sky system should react to time of day.
-- [ ] **Weather effects** — rain/snow particle layers and drifting cloud shadows
-  (a scrolling noise texture darkening the terrain shader is cheap and very
-  effective). Cloud-shadow noise can ride the existing terrain shader uniforms.
-- [ ] **Shadow support** — a tuned directional-light shadow setup (cascade or
-  camera-fit ortho frustum) that plays well with chunk streaming; mountains and
-  cliffs currently read flat in some light angles. Must track the day/night sun
-  direction once that lands.
+- [x] **Day/night cycle** *(2026-08-03)* — `DayNightCycle`: a 0–1 world clock
+  mapped to a tilted sun/moon arc (one directional light plays both roles,
+  swapping at the horizon where both intensities are zero), warm dawn/dusk
+  tinting, cool moonlight mode, and a sky color that tracks time of day.
+  Liquids gained a `uLightTint` uniform so water darkens at night while
+  emissive (lava/acid) glow is exempt and carries the scene. Noon reproduces
+  the static default lighting exactly. `HexWorld`: `dayNight` option +
+  `setTimeOfDay`; `world.dayNight` exposes the cycle (the future seasons
+  feature should share this clock). Demo: `[N]` play/pause, `[,]/[.]` scrub.
+- [x] **Weather effects** *(2026-08-03)* — `WeatherSystem` + `PrecipitationLayer`
+  + cloud shadows in the terrain shader. One world-space cloud noise field is
+  shared by the terrain (drifting shadows attenuating the direct sun term) and
+  the precipitation gate, so rain/snow falls under the denser cloud cores and
+  moves with them while lighter clouds are just clouds (`precipCoverage` vs
+  `coverage`). Particles are world-anchored (wrap-around volume follows the
+  camera target, but each drop stays pinned over its hexes) — rain as
+  line-segment streaks along the fall velocity, snow as swaying soft points;
+  intensity ramps via drawRange. A per-cell mask hook (`setMask`) awaits the
+  seasons/temperature layer. `HexWorld.setWeather('rain' | 'snow' | 'clear')`.
+  Demo: `[M]` cycle.
+- [x] **Shadow support** *(2026-08-03)* — `SunShadowRig`: a shadow-casting
+  directional sun whose ortho frustum re-fits the camera's ground footprint
+  every frame (clamped to `maxDistance`, texel-snapped in light space so
+  panning doesn't shimmer), which is what makes it play well with chunk
+  streaming. The terrain shader consumes three's shadow chunks
+  (`lights: true` + `getShadowMask()`) attenuating only the direct sun term;
+  terrain and scatter cast + receive, units cast. `HexWorld` opt-in via
+  `shadows: true | SunShadowOptions`; `setSunDirection` updates rig + terrain
+  light in one call (ready to track day/night). Demo: `[O]`.
 - [ ] **Post-processing integration** — an optional composer wiring in `HexWorld`:
   bloom (lava/emissive liquids), selection outline pass for units, SSAO for cliff
   definition. Keep it opt-in so the à-la-carte path stays composer-free.

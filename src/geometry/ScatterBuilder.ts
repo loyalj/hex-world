@@ -194,6 +194,9 @@ export function buildScatterMeshes(
     const coll = ref.def.tiers[ref.tierIdx][ref.variantIdx];
     const mesh = new THREE.InstancedMesh(coll.geometry, coll.material, matrices.length);
     mesh.frustumCulled = false;
+    // Inert until the renderer enables shadow maps (see SunShadowRig).
+    mesh.castShadow    = true;
+    mesh.receiveShadow = true;
     for (let i = 0; i < matrices.length; i++) {
       mesh.setMatrixAt(i, matrices[i]);
     }

@@ -9,9 +9,11 @@ import { offsetNeighbor } from '../math/HexCoord.js';
 // Cast to TerrainType — these are valid uint8 terrain indices even though they
 // extend beyond the built-in enum values. ACID_DEEP shares liquidType 'acid' with
 // ACID_TERRAIN, exercising the multi-index-per-liquid path.
-const LAVA_TERRAIN      = 6 as TerrainType;
-const ACID_TERRAIN      = 7 as TerrainType;
-const ACID_DEEP_TERRAIN = 8 as TerrainType;
+// 6 is the built-in riverbed terrain (DEFAULT_RIVERBED_TERRAIN_INDEX), so
+// showcase liquids start at 7. Consumers must define matching descriptors.
+const LAVA_TERRAIN      = 7 as TerrainType;
+const ACID_TERRAIN      = 8 as TerrainType;
+const ACID_DEEP_TERRAIN = 9 as TerrainType;
 
 const EDGE_DIRS = POINTY_TOP.edgeDirections;
 

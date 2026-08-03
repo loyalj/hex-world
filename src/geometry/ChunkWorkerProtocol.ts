@@ -32,6 +32,10 @@ export interface ChunkWorkerGeometryOptions {
   terrainDefinitions?:  ChunkTerrainColorSource[];
   fallbackColor?:       PlainColor;
   riverFlow?:           Map<number, number>;
+  riverElevations?:     Map<number, number>;
+  riverbedTerrain?:     number;
+  riverBankFlare?:      number;
+  riverbedBlend?:       number;
 }
 
 /** Uploads (or replaces) the worker's map snapshot, layout, and build options. */

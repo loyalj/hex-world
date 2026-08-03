@@ -8,8 +8,10 @@ import { FOG_VERT_DECL, FOG_VERT_BODY, FOG_FRAG_DECL, fogUniforms } from './FogG
 const vertexShader = /* glsl */`
   ${FOG_VERT_DECL}
   varying vec2 vUv;
+  varying vec2 vWorldXZ;
   void main() {
     vUv = uv;
+    vWorldXZ = (modelMatrix * vec4(position, 1.0)).xz;
     ${FOG_VERT_BODY}
     gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
   }
@@ -21,6 +23,7 @@ const fragmentShader = /* glsl */`
   uniform vec3  uDeep;
   uniform vec3  uShallow;
   varying vec2 vUv;
+  varying vec2 vWorldXZ;
 
   ${WATER_GLSL}
   ${LIQUID_APPEARANCE_GLSL}
@@ -28,7 +31,7 @@ const fragmentShader = /* glsl */`
   void main() {
     float r    = River(vUv, uTime * uFlowSpeed);
     vec3 color = mix(uDeep, uShallow, r);
-    gl_FragColor = liquidOutput(color, vVisibility, vExplored);
+    gl_FragColor = liquidOutput(color, vVisibility, vExplored, vWorldXZ);
   }
 `;
 

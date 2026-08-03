@@ -5,7 +5,8 @@ import { POINTY_TOP } from '../src/math/HexOrientation.js';
 import { offsetNeighbor } from '../src/math/HexCoord.js';
 
 const EDGE_DIRS = POINTY_TOP.edgeDirections;
-const WATER = 5, LAVA = 6, ACID = 7, ACID_DEEP = 8;
+// Showcase liquids start at 7 — index 6 is the built-in riverbed terrain.
+const WATER = 5, LAVA = 7, ACID = 8, ACID_DEEP = 9;
 const isLiquid = (t: number) => t === WATER || t === LAVA || t === ACID || t === ACID_DEEP;
 
 function followRiver(map: HexMap, c: number, r: number): { end: string; terrain?: number } {

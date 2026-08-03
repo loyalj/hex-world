@@ -56,7 +56,7 @@ const fragmentShader = /* glsl */`
     float water = mix(shoreWater, river, blend);
 
     vec3 color = mix(waterColor, uFoamColor, clamp(water * uFoamIntensity, 0.0, 1.0));
-    gl_FragColor = liquidOutput(color, vVisibility, vExplored);
+    gl_FragColor = liquidOutput(color, vVisibility, vExplored, vWorldXZ);
   }
 `;
 

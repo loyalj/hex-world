@@ -11,6 +11,13 @@ export interface TerrainTextureDescriptor {
   assetId?: string;
   /** For 'procedural': noise spatial frequency override. Higher = finer grain. */
   noiseFrequency?: number;
+  /**
+   * For 'procedural': second color mixed in as noise-driven patches (e.g. grey
+   * gravel banks in a sandy riverbed). Omit for the classic single-color look.
+   */
+  secondaryColor?: number;
+  /** For 'procedural': spatial frequency of the secondary-color patch mask. Default 40. */
+  patchFrequency?: number;
 }
 
 /**
@@ -93,10 +100,36 @@ export interface TerrainDefinition {
 // ---------------------------------------------------------------------------
 
 /**
+ * Warn (once per call) about descriptors sharing an index — the later entry
+ * silently wins in every index-keyed lookup and overwrites the earlier one's
+ * texture slice, which corrupts rendering in hard-to-trace ways (e.g. a lava
+ * slice bleeding into riverbed blending). Exported for reuse by
+ * buildTerrainTextureArray, which accepts raw descriptors directly.
+ */
+export function warnOnDuplicateTerrainIndices(
+  descriptors: readonly Pick<TerrainDescriptor, 'index' | 'id'>[],
+  context: string,
+): void {
+  const seen = new Map<number, string>();
+  for (const d of descriptors) {
+    const prev = seen.get(d.index);
+    if (prev !== undefined) {
+      console.warn(
+        `${context}: terrain descriptors "${prev}" and "${d.id}" both use index ${d.index} — ` +
+        `"${d.id}" overwrites "${prev}". Give each descriptor a unique index ` +
+        `(note: ${DEFAULT_RIVERBED_TERRAIN_INDEX} is the built-in riverbed; custom types should start at 7).`,
+      );
+    }
+    seen.set(d.index, d.id);
+  }
+}
+
+/**
  * Resolves serializable TerrainDescriptors into runtime TerrainDefinitions.
  * Does not touch the texture atlas — call buildTerrainTextureArray separately.
  */
 export function resolveTerrainDefinitions(descriptors: TerrainDescriptor[]): TerrainDefinition[] {
+  warnOnDuplicateTerrainIndices(descriptors, 'resolveTerrainDefinitions');
   return descriptors.map(d => {
     const c = new THREE.Color(d.color);
     const roadColor: [number, number, number] = d.roadColor ?? [
@@ -186,6 +219,11 @@ export const DEFAULT_TERRAIN_DESCRIPTORS: TerrainDescriptor[] = [
     liquidType: 'water',
     texture: { type: 'procedural' },
   },
+  {
+    index: 6, id: 'riverbed', name: 'Riverbed', color: 0xbfa77a,
+    roadColor: [0.48, 0.41, 0.30], roadCost: 4,
+    texture: { type: 'procedural', noiseFrequency: 192, secondaryColor: 0x8d8d88, patchFrequency: 40 },
+  },
 ];
 
 export const DEFAULT_TERRAIN_DEFINITIONS: TerrainDefinition[] =
@@ -197,3 +235,11 @@ export const DEFAULT_TERRAIN_LOOKUP: Map<number, TerrainDefinition> =
 
 /** The default water terrain index (TerrainType.Water = 5). */
 export const DEFAULT_WATER_TERRAIN_INDEX: number = 5;
+
+/**
+ * The default riverbed terrain index. Carved stream-bed faces blend toward
+ * this type's color/texture (see ChunkGeometryOptions.riverbedTerrain).
+ * ChunkManager auto-resolves the option from whichever active terrain
+ * definition has id 'riverbed', so custom packs can restyle the bed.
+ */
+export const DEFAULT_RIVERBED_TERRAIN_INDEX: number = 6;

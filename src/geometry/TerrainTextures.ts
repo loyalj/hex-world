@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { sampleNoise } from '../math/Noise.js';
-import type { TerrainDescriptor, TerrainAssetRegistry } from './TerrainTypes.js';
+import { warnOnDuplicateTerrainIndices, type TerrainDescriptor, type TerrainAssetRegistry } from './TerrainTypes.js';
 
 export interface TerrainTextureArrayOptions {
   /** Resolution of each square texture slice in pixels. Default 256. */
@@ -30,6 +30,7 @@ export async function buildTerrainTextureArray(
   const noiseFreq     = opts.noiseFrequency ?? 128;
   const noiseStrength = opts.noiseStrength  ?? 0.13;
 
+  warnOnDuplicateTerrainIndices(descriptors, 'buildTerrainTextureArray');
   const sliceCount = descriptors.reduce((m, d) => Math.max(m, d.index + 1), 1);
   const data = new Uint8Array(size * size * sliceCount * 4);
 
@@ -71,15 +72,21 @@ export async function buildTerrainTextureArray(
       ctx.drawImage(bmp, 0, 0, size, size);
       data.set(ctx.getImageData(0, 0, size, size).data, offset);
     } else {
-      // Procedural: base color + 3-octave noise brightness modulation.
+      // Procedural: base color + 3-octave noise brightness modulation, with an
+      // optional secondary color mixed in as sharpened noise patches (gravel).
       // Spatial offset is seeded from the terrain index so each type looks distinct.
       const base   = new THREE.Color(d.color);
-      const baseR  = Math.round(base.r * 255);
-      const baseG  = Math.round(base.g * 255);
-      const baseB  = Math.round(base.b * 255);
+      const baseR  = base.r * 255;
+      const baseG  = base.g * 255;
+      const baseB  = base.b * 255;
+      const second = d.texture.secondaryColor !== undefined ? new THREE.Color(d.texture.secondaryColor) : null;
+      const secR   = second ? second.r * 255 : 0;
+      const secG   = second ? second.g * 255 : 0;
+      const secB   = second ? second.b * 255 : 0;
       const ox     = d.index * 47.3;
       const oy     = d.index * 31.7;
-      const typeFreq = d.texture.noiseFrequency ?? noiseFreq;
+      const typeFreq  = d.texture.noiseFrequency ?? noiseFreq;
+      const patchFreq = d.texture.patchFrequency ?? 40;
 
       for (let y = 0; y < size; y++) {
         for (let x = 0; x < size; x++) {
@@ -90,10 +97,19 @@ export async function buildTerrainTextureArray(
           const n2 = sampleNoise(nx * 5.1, ny * 5.1);
           const raw = (n0[0] + n1[0] * 0.5 + n2[0] * 0.25) / 1.75;
           const brightness = (raw * 2 - 1) * noiseStrength;
+          let r = baseR, g = baseG, b = baseB;
+          if (second) {
+            // Sharpened mid-frequency mask: distinct patches with soft edges.
+            const p  = sampleNoise(oy + (x / size) * patchFreq, ox + (y / size) * patchFreq);
+            const m  = Math.min(1, Math.max(0, (p[0] - 0.5) * 3 + 0.5));
+            r += (secR - r) * m;
+            g += (secG - g) * m;
+            b += (secB - b) * m;
+          }
           const i = (y * size + x) * 4 + offset;
-          data[i + 0] = Math.min(255, Math.max(0, Math.round(baseR + brightness * 255)));
-          data[i + 1] = Math.min(255, Math.max(0, Math.round(baseG + brightness * 255)));
-          data[i + 2] = Math.min(255, Math.max(0, Math.round(baseB + brightness * 255)));
+          data[i + 0] = Math.min(255, Math.max(0, Math.round(r + brightness * 255)));
+          data[i + 1] = Math.min(255, Math.max(0, Math.round(g + brightness * 255)));
+          data[i + 2] = Math.min(255, Math.max(0, Math.round(b + brightness * 255)));
           data[i + 3] = 255;
         }
       }

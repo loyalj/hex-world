@@ -82,6 +82,15 @@ export interface WaterGeometryOptions {
    * widens in lockstep. ChunkManager injects its cached flow automatically.
    */
   riverFlow?: Map<number, number>;
+  /**
+   * Carved river elevation per cell (cellKey → elevation, from
+   * `computeRiverElevations`): the running minimum along flow. When provided,
+   * the river surface holds the carried level through uphill stretches
+   * (whose terrain carves a gorge) instead of climbing them. Must be the
+   * SAME map passed to `buildChunkGeometry`. ChunkManager injects it
+   * automatically.
+   */
+  riverElevations?: Map<number, number>;
 }
 
 const SOLID_FACTOR   = 0.8;
@@ -208,6 +217,7 @@ export function buildRiverGeometry(
   const surfaceLift    = opts.surfaceLift                ?? 0.02;
   const elevPerturbStr = opts.terrainElevPerturbStrength ?? 0.2;
   const cliffThreshold = opts.cliffThreshold             ?? 2;
+  const riverElevs     = opts.riverElevations;
   const edgeDirs       = layout.orientation.edgeDirections;
   const waterTerrains    = opts.waterTerrains    ?? new Set([DEFAULT_WATER_TERRAIN_INDEX]);
   const allLiquidTerrains = opts.allLiquidTerrains;
@@ -358,7 +368,7 @@ export function buildRiverGeometry(
       const q      = col - (row - (row & 1)) / 2;
       const center = hexToWorld(layout, { q, r: row });
       const crns   = hexCorners(layout, { q, r: row });
-      const ownElev = map.getElevation(col, row);
+      const ownElev = riverElevs?.get(cellKey) ?? map.getElevation(col, row);
       const ry      = (ownElev + RIVER_SURFACE_ELEVATION_OFFSET) * elevScale;
       const isBeginEnd = map.hasRiverBeginOrEnd(col, row);
       const outDir     = map.getOutgoingRiverDir(col, row);
@@ -401,7 +411,7 @@ export function buildRiverGeometry(
         const nb = neighborOffset(col, row, d);
         if (map.inBounds(nb.col, nb.row)) {
           const nbTerrain = map.getTerrain(nb.col, nb.row);
-          const nbElev    = map.getElevation(nb.col, nb.row);
+          const nbElev    = riverElevs?.get(nb.row * map.width + nb.col) ?? map.getElevation(nb.col, nb.row);
           nbIsWater = isWaterTerrain(nbTerrain);
           if (nbIsWater) {
             nbWaterSurfaceY = map.getWaterSurface(nb.col, nb.row) * elevScale + surfaceLift;
@@ -413,6 +423,21 @@ export function buildRiverGeometry(
         const estuaryEdgeY = nbIsWater
           ? nbWaterSurfaceY + (landCellY(col, row) - nbWaterSurfaceY) * 0.5
           : nbRy;
+
+        // Cliff-lip points radially aligned with eL/eR on the solid-hex
+        // boundary, plus the bridge-strip translation to the neighbor's solid
+        // boundary — together the span a waterfall sheet covers. Must stay in
+        // sync with the wall notch in HexChunkCore (SOLID_FACTOR, blend vector).
+        const wLx = center.x + (eLx - center.x) * SOLID_FACTOR, wLz = center.z + (eLz - center.z) * SOLID_FACTOR;
+        const wRx = center.x + (eRx - center.x) * SOLID_FACTOR, wRz = center.z + (eRz - center.z) * SOLID_FACTOR;
+        const bwx = (ox[i] + ox[i1]) * (1 - SOLID_FACTOR);
+        const bwz = (oz[i] + oz[i1]) * (1 - SOLID_FACTOR);
+        // Upstream neighbor a cliff above: its waterfall sheet covers the
+        // bridge strip down to OUR solid boundary, so the incoming channel
+        // starts there — the shared edge lies buried inside the cliff face.
+        const fromCliff = !nbIsWater && !isOutgoing && nbRy - ry >= cliffThreshold * elevScale * 0.999;
+        const sLx = fromCliff ? wLx : eLx, sLz = fromCliff ? wLz : eLz;
+        const sRx = fromCliff ? wRx : eRx, sRz = fromCliff ? wRz : eRz;
 
         if (isBeginEnd) {
           if (isOutgoing) {
@@ -426,12 +451,19 @@ export function buildRiverGeometry(
               const mLx = (center.x + eLx) * 0.5, mLz = (center.z + eLz) * 0.5;
               const mRx = (center.x + eRx) * 0.5, mRz = (center.z + eRz) * 0.5;
               addTri(center.x, ry, center.z, 0.5, 0.0,  mLx, ry, mLz, 0.0, 0.4,  mRx, ry, mRz, 1.0, 0.4);
-              addQuad(mLx, ry, mLz, 0.0, 0.4,  mRx, ry, mRz, 1.0, 0.4,  eLx, estuaryEdgeY, eLz, 0.0, 0.8,  eRx, estuaryEdgeY, eRz, 1.0, 0.8);
+              if (!nbIsWater && ry - nbRy >= cliffThreshold * elevScale * 0.999) {
+                // Spring right at a cliff lip — same sheet as the main
+                // waterfall branch below.
+                addQuad(mLx, ry, mLz, 0.0, 0.4,  mRx, ry, mRz, 1.0, 0.4,  wLx, ry, wLz, 0.0, 0.8,  wRx, ry, wRz, 1.0, 0.8);
+                addQuad(wLx, ry, wLz, 0.0, 0.8,  wRx, ry, wRz, 1.0, 0.8,  wLx + bwx, nbRy, wLz + bwz, 0.0, 1.0,  wRx + bwx, nbRy, wRz + bwz, 1.0, 1.0);
+              } else {
+                addQuad(mLx, ry, mLz, 0.0, 0.4,  mRx, ry, mRz, 1.0, 0.4,  eLx, estuaryEdgeY, eLz, 0.0, 0.8,  eRx, estuaryEdgeY, eRz, 1.0, 0.8);
+              }
             }
           } else {
             const mLx = (center.x + eLx) * 0.5, mLz = (center.z + eLz) * 0.5;
             const mRx = (center.x + eRx) * 0.5, mRz = (center.z + eRz) * 0.5;
-            addQuad(eLx, ry, eLz, 1.0, 0.0,  eRx, ry, eRz, 0.0, 0.0,  mLx, ry, mLz, 1.0, 0.4,  mRx, ry, mRz, 0.0, 0.4);
+            addQuad(sLx, ry, sLz, 1.0, 0.0,  sRx, ry, sRz, 0.0, 0.0,  mLx, ry, mLz, 1.0, 0.4,  mRx, ry, mRz, 0.0, 0.4);
             addTri(center.x, ry, center.z, 0.5, 0.8,  mLx, ry, mLz, 1.0, 0.4,  mRx, ry, mRz, 0.0, 0.4);
           }
         } else {
@@ -477,19 +509,19 @@ export function buildRiverGeometry(
             if (nbIsWater) {
               addQuad(cLx, ry, cLz, 0.0, 0.8,  cRx, ry, cRz, 1.0, 0.8,  eLx, estuaryEdgeY, eLz, 0.0, 1.0,  eRx, estuaryEdgeY, eRz, 1.0, 1.0);
             } else if (ry - nbRy >= cliffThreshold * elevScale * 0.999) {
-              // Waterfall: hold the channel level to the cliff lip, then drop
-              // steeply to the neighbor's level. The compressed V range on the
-              // drop quad makes the flow pattern read faster over the fall.
-              const lipLx = cLx + (eLx - cLx) * 0.6, lipLz = cLz + (eLz - cLz) * 0.6;
-              const lipRx = cRx + (eRx - cRx) * 0.6, lipRz = cRz + (eRz - cRz) * 0.6;
-              addQuad(cLx, ry, cLz, 0.0, 0.8,  cRx, ry, cRz, 1.0, 0.8,  lipLx, ry, lipLz, 0.0, 0.86,  lipRx, ry, lipRz, 1.0, 0.86);
-              addQuad(lipLx, ry, lipLz, 0.0, 0.86,  lipRx, ry, lipRz, 1.0, 0.86,  eLx, nbRy, eLz, 0.0, 1.0,  eRx, nbRy, eRz, 1.0, 1.0);
+              // Waterfall: hold the channel level out to the cliff lip at the
+              // solid-hex boundary, then slide the sheet down the bridge
+              // strip's carved groove (the visible cliff face) to the
+              // neighbor's solid boundary, where its channel takes over. The
+              // compressed V range makes the flow read faster over the fall.
+              addQuad(cLx, ry, cLz, 0.0, 0.8,  cRx, ry, cRz, 1.0, 0.8,  wLx, ry, wLz, 0.0, 0.86,  wRx, ry, wRz, 1.0, 0.86);
+              addQuad(wLx, ry, wLz, 0.0, 0.86,  wRx, ry, wRz, 1.0, 0.86,  wLx + bwx, nbRy, wLz + bwz, 0.0, 1.0,  wRx + bwx, nbRy, wRz + bwz, 1.0, 1.0);
             } else {
               addQuad(cLx, ry, cLz, 0.0, 0.8,  cRx, ry, cRz, 1.0, 0.8,  eLx, nbRy, eLz, 0.0, 1.0,  eRx, nbRy, eRz, 1.0, 1.0);
             }
           } else {
             addTri(cLx, ry, cLz, 1.0, 0.8,  ccx, ry, ccz, 0.5, 0.8,  cRx, ry, cRz, 0.0, 0.8);
-            addQuad(eLx, ry, eLz, 1.0, 0.0,  eRx, ry, eRz, 0.0, 0.0,  cLx, ry, cLz, 1.0, 0.8,  cRx, ry, cRz, 0.0, 0.8);
+            addQuad(sLx, ry, sLz, 1.0, 0.0,  sRx, ry, sRz, 0.0, 0.0,  cLx, ry, cLz, 1.0, 0.8,  cRx, ry, cRz, 0.0, 0.8);
           }
         }
       }
@@ -658,4 +690,77 @@ export function computeRiverFlow(
   });
 
   return flow;
+}
+
+/**
+ * Carved river elevation per cell: the running minimum of cell elevations
+ * along the flow direction. Equals the cell's own elevation everywhere a
+ * river descends normally; where map data routes a river uphill, the carried
+ * upstream minimum wins — the water surface holds level and the terrain
+ * builder carves a gorge through the rising cells instead of the water
+ * climbing them (which rendered as a floating slide). Confluences take the
+ * minimum across all inflows, so a tributary arriving higher gets a genuine
+ * fall into the junction.
+ *
+ * Purely a derived render-time quantity — map data is untouched. ChunkManager
+ * caches this map-wide and passes it to both the terrain and river builders
+ * via `riverElevations`.
+ */
+export function computeRiverElevations(
+  map: HexMap,
+  edgeDirs: readonly number[],
+): Map<number, number> {
+  const eff = new Map<number, number>();
+  const w = map.width;
+
+  /** Upstream cellKeys: incoming edges whose neighbor's outgoing points back at us. */
+  const upstreamOf = (col: number, row: number): number[] => {
+    const ups: number[] = [];
+    const mask = map.getIncomingRiverMask(col, row);
+    if (mask === 0) return ups;
+    for (let e = 0; e < 6; e++) {
+      if (!(mask & (1 << e))) continue;
+      const nb = neighborOffset(col, row, edgeDirs[e]);
+      if (!map.inBounds(nb.col, nb.row)) continue;
+      if (map.getOutgoingRiverDir(nb.col, nb.row) === (e + 3) % 6) {
+        ups.push(nb.row * w + nb.col);
+      }
+    }
+    return ups;
+  };
+
+  const onStack = new Set<number>();
+  const compute = (startKey: number): void => {
+    const stack = [startKey];
+    onStack.add(startKey);
+    while (stack.length > 0) {
+      const key = stack[stack.length - 1];
+      if (eff.has(key)) { stack.pop(); onStack.delete(key); continue; }
+      const col = key % w;
+      const row = (key / w) | 0;
+      let level = map.getElevation(col, row);
+      let pending = false;
+      for (const u of upstreamOf(col, row)) {
+        const e = eff.get(u);
+        if (e !== undefined) { level = Math.min(level, e); continue; }
+        if (onStack.has(u)) continue; // defensive: data cycle — ignore that branch
+        stack.push(u);
+        onStack.add(u);
+        pending = true;
+      }
+      if (!pending) {
+        eff.set(key, level);
+        stack.pop();
+        onStack.delete(key);
+      }
+    }
+  };
+
+  map.forEach((col, row) => {
+    if (!map.hasRiver(col, row)) return;
+    const key = row * w + col;
+    if (!eff.has(key)) compute(key);
+  });
+
+  return eff;
 }

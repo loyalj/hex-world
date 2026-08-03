@@ -1,5 +1,8 @@
 import * as THREE from 'three';
 import { FOG_VERT_DECL, FOG_VERT_BODY, FOG_FRAG_DECL, fogUniforms } from './FogGLSL.js';
+import { CLOUD_GLSL, cloudShadowUniforms } from '../weather/CloudShadows.js';
+// Type-only (erased at compile) — no runtime cycle with LiquidTypes.
+import type { LiquidMaterialSet } from './LiquidTypes.js';
 
 /**
  * Shared GLSL functions used by open water, shore, and estuary shaders.
@@ -122,12 +125,35 @@ export const LIQUID_APPEARANCE_GLSL = /* glsl */`
   uniform float uFoamIntensity;
   uniform vec3  uEmissive;
   uniform float uEmissiveStrength;
+  uniform vec3  uLightTint;
+
+  // Drifting cloud shadows — the SAME field the terrain shader samples (a
+  // WeatherSystem keeps offset/coverage in sync), so clouds darken lakes and
+  // rivers in step with the ground under them.
+  uniform float uCloudsEnabled;
+  uniform vec2  uCloudOffset;
+  uniform float uCloudScale;
+  uniform float uCloudCoverage;
+  uniform float uCloudOpacity;
+
+  ${CLOUD_GLSL}
 
   // Emissive is nearly exempt from fog dimming — a glowing surface should
   // punch through explored-but-unseen darkness at close to full strength
   // (hidden unexplored cells still vanish via the explored alpha term).
-  vec4 liquidOutput(vec3 color, float visibility, float explored) {
-    vec3 lit = color * visibility + uEmissive * uEmissiveStrength * mix(0.75, 1.0, visibility);
+  // uLightTint is the scene-light tint (white by default; a day/night cycle
+  // darkens it at night) — deliberately NOT applied to emissive, so lava and
+  // acid keep glowing in the dark. Cloud shadows follow the same rule.
+  vec4 liquidOutput(vec3 color, float visibility, float explored, vec2 worldXZ) {
+    vec3 tint = uLightTint;
+    if (uCloudsEnabled > 0.5) {
+      float cloud = cloudMask(cloudField(worldXZ, uCloudOffset, uCloudScale), uCloudCoverage);
+      // Liquids are unlit, so scale the darkening by the ~55% of their light
+      // budget that reads as direct sun — matching how the terrain keeps its
+      // ambient share under full cloud.
+      tint *= 1.0 - cloud * uCloudOpacity * 0.55;
+    }
+    vec3 lit = color * tint * visibility + uEmissive * uEmissiveStrength * mix(0.75, 1.0, visibility);
     return vec4(lit, uOpacity * explored);
   }
 `;
@@ -161,7 +187,7 @@ const fragmentShader = /* glsl */`
     vec3 color = mix(uShallow, uDeep, vDepth);
     float hl = waterNoise(vec3(vWorldXZ * 4.5 * uWaveScale, uTime * uFlowSpeed * 0.2));
     color += hl * 0.2;
-    gl_FragColor = liquidOutput(color, vVisibility, vExplored);
+    gl_FragColor = liquidOutput(color, vVisibility, vExplored, vWorldXZ);
   }
 `;
 
@@ -199,7 +225,28 @@ export function liquidAppearanceUniforms(
     uFoamIntensity:    { value: colors?.foamIntensity    ?? 1 },
     uEmissive:         { value: colors?.emissive         ?? new THREE.Color(0, 0, 0) },
     uEmissiveStrength: { value: colors?.emissiveStrength ?? 0 },
+    uLightTint:        { value: new THREE.Color(1, 1, 1) },
+    ...cloudShadowUniforms(),
   };
+}
+
+/**
+ * Push a scene-light tint onto every material in the given liquid material
+ * sets (white = fully lit, dark blue = night). Emissive contributions are
+ * unaffected — this is the day/night hook that lets lava glow after dark.
+ * Custom materials without a uLightTint uniform are skipped.
+ */
+export function setLiquidLightTint(
+  sets: Iterable<LiquidMaterialSet>,
+  tint: THREE.Color,
+): void {
+  for (const set of sets) {
+    for (const mat of [set.surface, set.shore, set.estuary, set.river]) {
+      if (mat instanceof THREE.ShaderMaterial && mat.uniforms.uLightTint) {
+        mat.uniforms.uLightTint.value.copy(tint);
+      }
+    }
+  }
 }
 
 export function createWaterMaterial(colors?: LiquidColorOptions): THREE.ShaderMaterial {

@@ -144,9 +144,10 @@ describe('flow-dependent channel widening', () => {
         break;
       }
     }
+    const FLARE   = 1.3;
     const flow    = computeRiverFlow(map, EDGE_DIRS);
     const water   = buildRiverGeometry(map, layout, bounds, { riverFlow: flow })!;
-    const terrain = buildChunkGeometry(map, layout, bounds, { riverFlow: flow }).terrain;
+    const terrain = buildChunkGeometry(map, layout, bounds, { riverFlow: flow, riverBankFlare: FLARE }).terrain;
 
     const failures: string[] = [];
     map.forEach((col, row) => {
@@ -163,21 +164,24 @@ describe('flow-dependent channel widening', () => {
         const e1  = (e + 1) % 6;
         const hw  = RIVER_BASE_HALF_WIDTH * riverWidthScale(riverEdgeFlow(map, flow, col, row, e, EDGE_DIRS));
 
-        for (const t of [0.5 - hw, 0.5 + hw]) {
-          // Water channel edge vertex on the full hex edge.
+        for (const side of [-1, 1]) {
+          // Water channel edge vertex on the full hex edge at t = 0.5 ± hw.
+          const t  = 0.5 + side * hw;
           const wx = crns[e].x + (crns[e1].x - crns[e].x) * t;
           const wz = crns[e].z + (crns[e1].z - crns[e].z) * t;
           const [wdx, wdz] = perturb(wx, wz);
           if (!hasVertex(water, wx + wdx, ry, wz + wdz)) {
             failures.push(`water (${col},${row}) edge ${e} t=${t.toFixed(3)}`);
           }
-          // Terrain groove shoulder on the SOLID_FACTOR ring.
+          // Terrain groove shoulder on the SOLID_FACTOR ring at the
+          // bank-flared t = 0.5 ± hw·flare (walls slope; flow still lockstep).
+          const tt = 0.5 + side * hw * FLARE;
           const a  = { x: center.x + (crns[e].x  - center.x) * 0.8, z: center.z + (crns[e].z  - center.z) * 0.8 };
           const b  = { x: center.x + (crns[e1].x - center.x) * 0.8, z: center.z + (crns[e1].z - center.z) * 0.8 };
-          const tx = a.x + (b.x - a.x) * t, tz = a.z + (b.z - a.z) * t;
+          const tx = a.x + (b.x - a.x) * tt, tz = a.z + (b.z - a.z) * tt;
           const [tdx, tdz] = perturb(tx, tz);
           if (!hasVertex(terrain, tx + tdx, ownY, tz + tdz)) {
-            failures.push(`terrain (${col},${row}) edge ${e} t=${t.toFixed(3)}`);
+            failures.push(`terrain (${col},${row}) edge ${e} t=${tt.toFixed(3)}`);
           }
         }
       }
@@ -270,18 +274,20 @@ describe('flow-dependent channel widening', () => {
     const water = buildRiverGeometry(map, layout, bounds, { riverFlow: flow })!;
     expect(hasVertex(water, eLx + wdx, ry, eLz + wdz)).toBe(true);
 
-    // TERRAIN: groove shoulder e2 at the same t on the SOLID_FACTOR inner
-    // ring, at the cell's (noise-perturbed) surface height.
+    // TERRAIN: groove shoulder e2 on the SOLID_FACTOR inner ring at
+    // t = 0.5 − hw·flare — the carve TOP is bank-flared wider than the water
+    // channel so the walls slope, while the flow scaling stays in lockstep.
+    const FLARE = 1.3;
     const e1x = center.x + (crns[i].x  - center.x) * 0.8;
     const e1z = center.z + (crns[i].z  - center.z) * 0.8;
     const e5x = center.x + (crns[i1].x - center.x) * 0.8;
     const e5z = center.z + (crns[i1].z - center.z) * 0.8;
-    const e2x = e1x + (e5x - e1x) * (0.5 - hw);
-    const e2z = e1z + (e5z - e1z) * (0.5 - hw);
+    const e2x = e1x + (e5x - e1x) * (0.5 - hw * FLARE);
+    const e2z = e1z + (e5z - e1z) * (0.5 - hw * FLARE);
     const cn  = sampleNoise(center.x * 0.35, center.z * 0.35);
     const ownY = (cn[1] * 2 - 1) * 0.2; // elevation 0 + elevPerturb
     const [tdx, tdz] = perturb(e2x, e2z);
-    const terrain = buildChunkGeometry(map, layout, bounds, { riverFlow: flow }).terrain;
+    const terrain = buildChunkGeometry(map, layout, bounds, { riverFlow: flow, riverBankFlare: FLARE }).terrain;
     expect(hasVertex(terrain, e2x + tdx, ownY, e2z + tdz)).toBe(true);
 
     // And neither vertex exists in the fixed-width build (they sit at t=0.25 there).

@@ -1,7 +1,13 @@
 import * as THREE from 'three';
 import type { HexLayout } from '../math/HexLayout.js';
+import { CLOUD_GLSL, cloudShadowUniforms } from '../weather/CloudShadows.js';
 
 const vertexShader = /* glsl */`
+  #include <common>
+  #include <shadowmap_pars_vertex>
+
+  uniform vec3 uLightDir;
+
   in vec3 terrainType;
   in vec3 cellIndex;
 
@@ -32,6 +38,18 @@ const vertexShader = /* glsl */`
     vWorldPos     = worldPos.xyz;
     vNormal       = normalize(normal);
 
+    // Names the three.js shadow chunk expects (normal-biased shadow lookup).
+    // Chunk winding is mixed (DoubleSide + gl_FrontFacing flip at shade time),
+    // so raw vertex normals can point INTO the ground; the chunk's normal bias
+    // along such a normal buries the lookup below the surface and reads the
+    // whole map as shadowed. Flip toward the sun so the bias always lifts the
+    // sample to the lit side.
+    vec3 shadowBiasNormal = normal;
+    if (dot(mat3(modelMatrix) * shadowBiasNormal, uLightDir) < 0.0) shadowBiasNormal = -shadowBiasNormal;
+    vec4 worldPosition      = worldPos;
+    vec3 transformedNormal  = normalMatrix * shadowBiasNormal;
+    #include <shadowmap_vertex>
+
     if (uFogEnabled > 0.5) {
       vec4 fd0 = texture(uFogData, fogCellUV(cellIndex.x));
       vec4 fd1 = texture(uFogData, fogCellUV(cellIndex.y));
@@ -52,6 +70,17 @@ const vertexShader = /* glsl */`
 const fragmentShader = /* glsl */`
   precision highp sampler2DArray;
 
+  // Shadow-map sampling from the host three.js version. getShadowMask() is 1.0
+  // whenever shadows are off (renderer.shadowMap disabled or no casting light),
+  // so the shader is shadow-ready at zero cost until a SunShadowRig enables it.
+  // receiveShadow is normally declared by lights_pars_begin, which the
+  // hand-rolled lighting here doesn't include; the renderer sets it per object.
+  #include <common>
+  #include <packing>
+  uniform bool receiveShadow;
+  #include <shadowmap_pars_fragment>
+  #include <shadowmask_pars_fragment>
+
   uniform sampler2DArray uTerrainTex;
   uniform float uTexScale;
   uniform vec3  uLightDir;
@@ -71,6 +100,14 @@ const fragmentShader = /* glsl */`
   uniform float uGridFadeStart;
   uniform float uGridFadeEnd;
 
+  // Drifting cloud shadows (see configureTerrainClouds). The field is shared
+  // with PrecipitationLayer so rain falls under the clouds shading the ground.
+  uniform float uCloudsEnabled;
+  uniform vec2  uCloudOffset;
+  uniform float uCloudScale;
+  uniform float uCloudCoverage;
+  uniform float uCloudOpacity;
+
   in vec3  vColor;
   in vec3  vWorldPos;
   in vec3  vNormal;
@@ -79,6 +116,8 @@ const fragmentShader = /* glsl */`
   in float vExplored;
 
   out vec4 fragColor;
+
+  ${CLOUD_GLSL}
 
   float tHash(vec2 p) {
     return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
@@ -150,10 +189,21 @@ const fragmentShader = /* glsl */`
     vec4 c = sampleSlot(0, vTerrainType.x)
            + sampleSlot(1, vTerrainType.y)
            + sampleSlot(2, vTerrainType.z);
+    // Splat weights normally sum to 1; riverbed vertices carry a boosted
+    // weight (ChunkGeometryOptions.riverbedBlend) so the bed material climbs
+    // higher up the channel walls — normalize so brightness stays constant.
+    c /= max(vColor.x + vColor.y + vColor.z, 1e-4);
 
     vec3  n     = gl_FrontFacing ? vNormal : -vNormal;
     float diff  = max(dot(n, normalize(uLightDir)), 0.0);
-    vec3  light = uAmbient + uLightColor * diff;
+    // Shadows and cloud cover only attenuate the direct sun term — ambient
+    // keeps shadowed terrain readable instead of going black.
+    float sunVis = getShadowMask();
+    if (uCloudsEnabled > 0.5) {
+      float cloud = cloudMask(cloudField(vWorldPos.xz, uCloudOffset, uCloudScale), uCloudCoverage);
+      sunVis *= 1.0 - cloud * uCloudOpacity;
+    }
+    vec3  light = uAmbient + uLightColor * diff * sunVis;
 
     float mv = tNoise(vWorldPos.xz * 0.28) * 0.7 + tNoise(vWorldPos.xz * 0.07) * 0.3;
     c.rgb *= 0.93 + mv * 0.14;
@@ -205,7 +255,12 @@ export function createTerrainMaterial(
     vertexShader,
     fragmentShader,
     vertexColors: true,
+    // Receive the renderer's light state (shadow maps + matrices) into the
+    // uniforms cloned from UniformsLib.lights below. The lighting itself stays
+    // hand-rolled (uLightDir/uLightColor/uAmbient); only shadows are consumed.
+    lights: true,
     uniforms: {
+      ...THREE.UniformsUtils.clone(THREE.UniformsLib.lights),
       uTerrainTex:  { value: terrainTex },
       uTexScale:    { value: opts.texScale    ?? 0.2 },
       uLightDir:    { value: lightDir },
@@ -226,6 +281,8 @@ export function createTerrainMaterial(
       uGridLineWidth: { value: 0.06 },
       uGridFadeStart: { value: 25 },
       uGridFadeEnd:   { value: 70 },
+      // Cloud shadows — off until configureTerrainClouds enables them.
+      ...cloudShadowUniforms(),
     },
     side: THREE.DoubleSide,
   });

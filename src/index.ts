@@ -8,4 +8,7 @@ export * from './camera/index.js';
 export * from './generators/index.js';
 export * from './pathfinding/index.js';
 export * from './units/index.js';
+export * from './lighting/SunShadows.js';
+export * from './lighting/DayNightCycle.js';
+export * from './weather/index.js';
 export * from './world/HexWorld.js';

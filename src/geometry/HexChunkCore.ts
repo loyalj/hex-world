@@ -62,6 +62,41 @@ export interface ChunkGeometryOptions {
    * widens in lockstep. ChunkManager injects its cached flow automatically.
    */
   riverFlow?: Map<number, number>;
+  /**
+   * Carved river elevation per cell (cellKey → elevation, from
+   * `computeRiverElevations`): the running minimum of cell elevations along
+   * the flow direction. When provided, stream beds carve to this level
+   * instead of the cell's own elevation, so rivers routed uphill cut a level
+   * gorge through rising terrain rather than the water climbing it. The SAME
+   * map must be passed to `buildRiverGeometry` so the water surface tracks
+   * the carve. ChunkManager injects its cached copy automatically.
+   */
+  riverElevations?: Map<number, number>;
+  /**
+   * Terrain index whose color/texture the carved stream-bed line blends
+   * toward, fading up the channel walls into each bank's own terrain (same
+   * splat blending as any terrain border). Undefined disables bed blending.
+   * ChunkManager auto-resolves this to the active terrain definition with
+   * id 'riverbed' unless set explicitly.
+   */
+  riverbedTerrain?: number;
+  /**
+   * Widens the TOP of carved river channels (the bank shoulders) relative to
+   * the water width, sloping the channel walls outward instead of leaving
+   * them near-vertical. 1 = the legacy slot-canyon look. Values above ~1.4
+   * would surface the water sheet's lateral edges outside the banks, so the
+   * value is clamped to [1, 1.4]. Default 1.3.
+   */
+  riverBankFlare?: number;
+  /**
+   * Splat-weight boost on riverbed vertices. Channel walls are fully
+   * riverbed (the bank shoulders carry full bed weight); the bed→bank fade
+   * happens on the flat land between the shoulder and the next vertex ring
+   * outward, crossing over at boost/(1+boost) of that span (1 = midway,
+   * 2 = two-thirds out). Splat color mode only — plain vertex colors always
+   * fade linearly. Default 1.
+   */
+  riverbedBlend?: number;
 }
 
 /** Raw terrain attribute arrays for one chunk — `position`/`color`/`cellIndex` are vec3-per-vertex. */
@@ -147,6 +182,7 @@ export function buildChunkArrays(
   const cliffThreshold      = opts.cliffThreshold       ?? 2;
   const colorMode           = opts.colorMode            ?? 'splat';
   const isSplat             = colorMode === 'splat';
+  const bankFlare           = Math.min(1.4, Math.max(1, opts.riverBankFlare ?? 1.3));
 
   // Build per-type color/road-color lookups from terrain definitions.
   const terrainLookup = new Map((opts.terrainDefinitions ?? []).map(d => [d.index, d]));
@@ -155,6 +191,23 @@ export function buildChunkArrays(
     terrainLookup.get(t)?.color ?? fallback;
   const roadColor = (t: number): RGB =>
     terrainLookup.get(t)?.roadColor ?? _fallbackRoad;
+
+  // Riverbed blending: carved bed-line vertices take the riverbed terrain's
+  // color (plain mode) or route their splat weight to a dedicated slot of the
+  // triangle's type triple, fading up the channel walls via interpolation.
+  // Debug mode keeps its diagnostic colors.
+  const bedTypeIdx = opts.riverbedTerrain ?? -1;
+  const bedColor   = bedTypeIdx >= 0 ? terrainColor(bedTypeIdx) : null;
+  const bedActive  = bedColor !== null && colorMode !== 'debug';
+  // Splat bed weight above 1 pushes the flat-land bed→bank crossover further
+  // from the shoulder; the fragment shader normalizes by the weight sum so
+  // brightness is unchanged.
+  const bedBoost   = Math.max(0.01, opts.riverbedBlend ?? 1);
+  // Bed vertex [r, g, b, typeIndex] for edge strips and wall notches, where
+  // the bed occupies slot 2 of the type triple (slots 0/1 hold the two banks).
+  const stripBed: readonly [number, number, number, number] | null = bedActive
+    ? (isSplat ? [0, 0, bedBoost, bedTypeIdx] : [bedColor!.r, bedColor!.g, bedColor!.b, bedTypeIdx])
+    : null;
   const edgeDirs  = layout.orientation.edgeDirections;
   const { colStart, colEnd, rowStart, rowEnd } = bounds;
   const hexCount  = (colEnd - colStart) * (rowEnd - rowStart);
@@ -203,8 +256,11 @@ export function buildChunkArrays(
     return map.getElevation(c, r) * elevScale + (n[1] * 2 - 1) * elevPerturbStrength;
   };
 
+  // Carved bed level: running-min river elevation when provided (uphill
+  // stretches carve a level gorge), the cell's own elevation otherwise.
+  const riverElev = opts.riverElevations;
   const streamBedY = (c: number, r: number): number =>
-    (map.getElevation(c, r) + STREAM_BED_ELEVATION_OFFSET) * elevScale;
+    ((riverElev?.get(r * map.width + c) ?? map.getElevation(c, r)) + STREAM_BED_ELEVATION_OFFSET) * elevScale;
 
   // ---- vertex emitters (cellIndex written from curCx/curCy/curCz closure) ----
 
@@ -517,8 +573,15 @@ export function buildChunkArrays(
     hasRoad = false,
     ownCi = 0, nbCi = 0,
     halfW = RIVER_BASE_HALF_WIDTH,
+    bed: readonly [number, number, number, number] | null = null,
   ) => {
     const tx = type1, ty = type2, tz = type1;
+    // With bed set, the whole groove span (shoulders ie2/ie4 through the
+    // groove line ie3) is riverbed — slot 2 of the type triple — and the
+    // bed→bank fade happens in the outer quads toward the corners.
+    const bt  = bed ? bed[3] : tz;
+    const i3r = bed ? bed[0] : or,  i3g = bed ? bed[1] : og,  i3b = bed ? bed[2] : ob;
+    const o3r = bed ? bed[0] : nr,  o3g = bed ? bed[1] : ng,  o3b = bed ? bed[2] : nb2;
     setCi(ownCi, nbCi, ownCi);
     const ie2x = ie1x + (ie5x - ie1x) * (0.5 - halfW), ie2z = ie1z + (ie5z - ie1z) * (0.5 - halfW);
     const ie3x = ie1x + (ie5x - ie1x) * 0.50,          ie3z = ie1z + (ie5z - ie1z) * 0.50;
@@ -528,14 +591,14 @@ export function buildChunkArrays(
     const oe3x = ie3x + bx, oe3z = ie3z + bz;
     const oe4x = ie4x + bx, oe4z = ie4z + bz;
     const oe5x = ie5x + bx, oe5z = ie5z + bz;
-    addQuad(ie1x, ownY,    ie1z, or,og,ob,  ie2x, ownY,    ie2z, or,og,ob,
-            oe1x, nbY,     oe1z, nr,ng,nb2, oe2x, nbY,     oe2z, nr,ng,nb2, tx,ty,tz);
-    addQuad(ie2x, ownY,    ie2z, or,og,ob,  ie3x, ownBedY, ie3z, or,og,ob,
-            oe2x, nbY,     oe2z, nr,ng,nb2, oe3x, nbBedY,  oe3z, nr,ng,nb2, tx,ty,tz);
-    addQuad(ie3x, ownBedY, ie3z, or,og,ob,  ie4x, ownY,    ie4z, or,og,ob,
-            oe3x, nbBedY,  oe3z, nr,ng,nb2, oe4x, nbY,     oe4z, nr,ng,nb2, tx,ty,tz);
-    addQuad(ie4x, ownY,    ie4z, or,og,ob,  ie5x, ownY,    ie5z, or,og,ob,
-            oe4x, nbY,     oe4z, nr,ng,nb2, oe5x, nbY,     oe5z, nr,ng,nb2, tx,ty,tz);
+    addQuad(ie1x, ownY,    ie1z, or,og,ob,  ie2x, ownY,    ie2z, i3r,i3g,i3b,
+            oe1x, nbY,     oe1z, nr,ng,nb2, oe2x, nbY,     oe2z, o3r,o3g,o3b, tx,ty,bt);
+    addQuad(ie2x, ownY,    ie2z, i3r,i3g,i3b,  ie3x, ownBedY, ie3z, i3r,i3g,i3b,
+            oe2x, nbY,     oe2z, o3r,o3g,o3b,  oe3x, nbBedY,  oe3z, o3r,o3g,o3b, tx,ty,bt);
+    addQuad(ie3x, ownBedY, ie3z, i3r,i3g,i3b,  ie4x, ownY,    ie4z, i3r,i3g,i3b,
+            oe3x, nbBedY,  oe3z, o3r,o3g,o3b,  oe4x, nbY,     oe4z, o3r,o3g,o3b, tx,ty,bt);
+    addQuad(ie4x, ownY,    ie4z, i3r,i3g,i3b,  ie5x, ownY,    ie5z, or,og,ob,
+            oe4x, nbY,     oe4z, o3r,o3g,o3b,  oe5x, nbY,     oe5z, nr,ng,nb2, tx,ty,bt);
     if (hasRoad) {
       triangulateRoadSegment(
         ie2x, ownY,    ie2z,  ie3x, ownBedY, ie3z,  ie4x, ownY,    ie4z,
@@ -559,8 +622,12 @@ export function buildChunkArrays(
     hasRoad = false,
     ownCi = 0, nbCi = 0,
     halfW = RIVER_BASE_HALF_WIDTH,
+    bed: readonly [number, number, number, number] | null = null,
   ) => {
     const tx = type1, ty = type2, tz = type1;
+    // Groove-line vertices keep a constant riverbed color/type through the
+    // terrace steps while the banks lerp between the two cells' colors.
+    const bt = bed ? bed[3] : tz;
     setCi(ownCi, nbCi, ownCi);
     const ie2x = ie1x + (ie5x - ie1x) * (0.5 - halfW), ie2z = ie1z + (ie5z - ie1z) * (0.5 - halfW);
     const ie3x = ie1x + (ie5x - ie1x) * 0.50,          ie3z = ie1z + (ie5z - ie1z) * 0.50;
@@ -587,14 +654,16 @@ export function buildChunkArrays(
       const n3x = ie3x + bx * h, n3z = ie3z + bz * h;
       const n4x = ie4x + bx * h, n4z = ie4z + bz * h;
       const n5x = ie5x + bx * h, n5z = ie5z + bz * h;
-      addQuad(p1x, py,  p1z, pr,pg,pb,  p2x, py,  p2z, pr,pg,pb,
-              n1x, ny,  n1z, ncr,ncg,ncb, n2x, ny,  n2z, ncr,ncg,ncb, tx,ty,tz);
-      addQuad(p2x, py,  p2z, pr,pg,pb,  p3x, p3y, p3z, pr,pg,pb,
-              n2x, ny,  n2z, ncr,ncg,ncb, n3x, n3y, n3z, ncr,ncg,ncb, tx,ty,tz);
-      addQuad(p3x, p3y, p3z, pr,pg,pb,  p4x, py,  p4z, pr,pg,pb,
-              n3x, n3y, n3z, ncr,ncg,ncb, n4x, ny,  n4z, ncr,ncg,ncb, tx,ty,tz);
-      addQuad(p4x, py,  p4z, pr,pg,pb,  p5x, py,  p5z, pr,pg,pb,
-              n4x, ny,  n4z, ncr,ncg,ncb, n5x, ny,  n5z, ncr,ncg,ncb, tx,ty,tz);
+      const b3r = bed ? bed[0] : pr,  b3g = bed ? bed[1] : pg,  b3b = bed ? bed[2] : pb;
+      const c3r = bed ? bed[0] : ncr, c3g = bed ? bed[1] : ncg, c3b = bed ? bed[2] : ncb;
+      addQuad(p1x, py,  p1z, pr,pg,pb,  p2x, py,  p2z, b3r,b3g,b3b,
+              n1x, ny,  n1z, ncr,ncg,ncb, n2x, ny,  n2z, c3r,c3g,c3b, tx,ty,bt);
+      addQuad(p2x, py,  p2z, b3r,b3g,b3b,  p3x, p3y, p3z, b3r,b3g,b3b,
+              n2x, ny,  n2z, c3r,c3g,c3b,  n3x, n3y, n3z, c3r,c3g,c3b, tx,ty,bt);
+      addQuad(p3x, p3y, p3z, b3r,b3g,b3b,  p4x, py,  p4z, b3r,b3g,b3b,
+              n3x, n3y, n3z, c3r,c3g,c3b,  n4x, ny,  n4z, c3r,c3g,c3b, tx,ty,bt);
+      addQuad(p4x, py,  p4z, b3r,b3g,b3b,  p5x, py,  p5z, pr,pg,pb,
+              n4x, ny,  n4z, c3r,c3g,c3b,  n5x, ny,  n5z, ncr,ncg,ncb, tx,ty,bt);
       if (hasRoad) {
         const hPrev = (step - 1) * H_STEP;
         const stepOwnColor: RGB = [rc1[0] + (rc2[0]-rc1[0])*hPrev, rc1[1] + (rc2[1]-rc1[1])*hPrev, rc1[2] + (rc2[2]-rc1[2])*hPrev];
@@ -643,6 +712,16 @@ export function buildChunkArrays(
       const ownBedY      = streamBedY(col, row);
       const hasRiverCell = map.hasRiver(col, row);
 
+      // Bed-line vertex color for this cell's channel fans: splat weight goes
+      // to slot 1 of bed-touching triangles' type triples (slot 0 = the cell
+      // terrain). Falls back to the plain cell values when bed blending is
+      // off, so call sites stay unconditional.
+      const useBed = bedActive && hasRiverCell;
+      const bvR  = useBed ? (isSplat ? 0        : bedColor!.r) : sr;
+      const bvG  = useBed ? (isSplat ? bedBoost : bedColor!.g) : sg;
+      const bvB  = useBed ? (isSplat ? 0        : bedColor!.b) : sb;
+      const bedT = useBed ? bedTypeIdx : ownType;
+
       // Flow-dependent channel widening: cellW scales the channel's interior
       // flank points (one value per cell so shared interior points agree);
       // edgeHalfW gives the groove half-width at each edge from the flow
@@ -653,9 +732,24 @@ export function buildChunkArrays(
       const cellW = riverFlow && hasRiverCell
         ? riverWidthScale(riverFlow.get(ownCi) ?? 1)
         : 1;
-      const edgeHalfW = (face: number): number => riverFlow
+      // bankFlare widens only the carved groove's TOP (bank shoulders); the
+      // water builder keeps the unflared width, so the surface sits inside
+      // sloped banks instead of meeting a vertical wall at its edge.
+      const edgeHalfW = (face: number): number => (riverFlow
         ? RIVER_BASE_HALF_WIDTH * riverWidthScale(riverEdgeFlow(map, riverFlow, col, row, face, edgeDirs))
-        : RIVER_BASE_HALF_WIDTH;
+        : RIVER_BASE_HALF_WIDTH) * bankFlare;
+
+      // Pair-aware river test for SUBDIVISION FRACTIONS only (carving still
+      // keys off each cell's own bits): a dangling half-edge — river bit on
+      // one side only — must subdivide the shared edge line at the same
+      // (flared) fractions from both cells, or the pieces tear along it. On a
+      // flat non-river fan the subdivision point is position-only, so this
+      // changes nothing visually for well-paired data.
+      const edgeRiverThru = (face: number): boolean => {
+        if (map.hasRiverThroughEdge(col, row, face)) return true;
+        const nbf = nbOffset(col, row, edgeDirs[face]);
+        return map.inBounds(nbf.col, nbf.row) && map.hasRiverThroughEdge(nbf.col, nbf.row, (face + 3) % 6);
+      };
 
       // 3+ channels meeting in one cell (confluence): the pairwise channel
       // cases below can't tile the center — junction cells use symmetric
@@ -686,7 +780,7 @@ export function buildChunkArrays(
         const e5x = center.x + ox[i1] * SOLID_FACTOR, e5z = center.z + oz[i1] * SOLID_FACTOR;
         // River faces use the flow-widened groove half-width for the e2/e4
         // notch points; everything else keeps the fixed 0.25/0.75 subdivision.
-        const eHw = hasRiverCell && map.hasRiverThroughEdge(col, row, i) ? edgeHalfW(i) : RIVER_BASE_HALF_WIDTH;
+        const eHw = edgeRiverThru(i) ? edgeHalfW(i) : RIVER_BASE_HALF_WIDTH;
         const e2x = e1x + (e5x - e1x) * (0.5 - eHw), e2z = e1z + (e5z - e1z) * (0.5 - eHw);
         const e3x = (e1x + e5x) * 0.5,               e3z = (e1z + e5z) * 0.5;
         const e4x = e1x + (e5x - e1x) * (0.5 + eHw), e4z = e1z + (e5z - e1z) * (0.5 + eHw);
@@ -732,11 +826,13 @@ export function buildChunkArrays(
           // seam of the junction shares endpoints and is colinear (no slivers).
           const bIx = center.x + ox[i]  * SOLID_FACTOR * 0.4 * cellW, bIz = center.z + oz[i]  * SOLID_FACTOR * 0.4 * cellW;
           const bJx = center.x + ox[i1] * SOLID_FACTOR * 0.4 * cellW, bJz = center.z + oz[i1] * SOLID_FACTOR * 0.4 * cellW;
-          addTri(bIx,ownY,bIz,sr,sg,sb, e1x,ownY,e1z,sr,sg,sb, e2x,ownY,e2z,sr,sg,sb, tt,ot,ot);
-          addTri(bIx,ownY,bIz,sr,sg,sb, e2x,ownY,e2z,sr,sg,sb, e3x,ownY,e3z,sr,sg,sb, tt,ot,ot);
-          addTri(bIx,ownY,bIz,sr,sg,sb, e3x,ownY,e3z,sr,sg,sb, bJx,ownY,bJz,sr,sg,sb, tt,ot,ot);
-          addTri(bJx,ownY,bJz,sr,sg,sb, e3x,ownY,e3z,sr,sg,sb, e4x,ownY,e4z,sr,sg,sb, tt,ot,ot);
-          addTri(bJx,ownY,bJz,sr,sg,sb, e4x,ownY,e4z,sr,sg,sb, e5x,ownY,e5z,sr,sg,sb, tt,ot,ot);
+          // Junction ring points are basin shoulders — full bed weight, fading
+          // to the cell terrain across the flat wedge toward the edge ring.
+          addTri(bIx,ownY,bIz,bvR,bvG,bvB, e1x,ownY,e1z,sr,sg,sb, e2x,ownY,e2z,sr,sg,sb, tt,bedT,ot);
+          addTri(bIx,ownY,bIz,bvR,bvG,bvB, e2x,ownY,e2z,sr,sg,sb, e3x,ownY,e3z,sr,sg,sb, tt,bedT,ot);
+          addTri(bIx,ownY,bIz,bvR,bvG,bvB, e3x,ownY,e3z,sr,sg,sb, bJx,ownY,bJz,bvR,bvG,bvB, tt,bedT,ot);
+          addTri(bJx,ownY,bJz,bvR,bvG,bvB, e3x,ownY,e3z,sr,sg,sb, e4x,ownY,e4z,sr,sg,sb, tt,bedT,ot);
+          addTri(bJx,ownY,bJz,bvR,bvG,bvB, e4x,ownY,e4z,sr,sg,sb, e5x,ownY,e5z,sr,sg,sb, tt,bedT,ot);
           junctionRing.push({ x: bIx, y: ownY, z: bIz }, { x: bJx, y: ownY, z: bJz });
 
         } else if (!map.hasRiverThroughEdge(col, row, i)) {
@@ -750,12 +846,13 @@ export function buildChunkArrays(
               adjCx += (ox[i] + ox[i1]) * SOLID_FACTOR * 0.25 * INNER_TO_OUTER * cellW;
               adjCz += (oz[i] + oz[i1]) * SOLID_FACTOR * 0.25 * INNER_TO_OUTER * cellW;
             } else if (map.hasRiverThroughEdge(col, row, ip2)) {
-              adjCx += ox[i]  * SOLID_FACTOR * 0.25 * cellW;
-              adjCz += oz[i]  * SOLID_FACTOR * 0.25 * cellW;
+              // Mirrors the adjacent straight-through channel's flared flank.
+              adjCx += ox[i]  * SOLID_FACTOR * 0.25 * cellW * bankFlare;
+              adjCz += oz[i]  * SOLID_FACTOR * 0.25 * cellW * bankFlare;
             }
           } else if (map.hasRiverThroughEdge(col, row, ip) && map.hasRiverThroughEdge(col, row, in2)) {
-            adjCx += ox[i1] * SOLID_FACTOR * 0.25 * cellW;
-            adjCz += oz[i1] * SOLID_FACTOR * 0.25 * cellW;
+            adjCx += ox[i1] * SOLID_FACTOR * 0.25 * cellW * bankFlare;
+            adjCz += oz[i1] * SOLID_FACTOR * 0.25 * cellW * bankFlare;
           }
           const m1x = (adjCx + e1x) * 0.5, m1z = (adjCz + e1z) * 0.5;
           const m5x = (adjCx + e5x) * 0.5, m5z = (adjCz + e5z) * 0.5;
@@ -766,10 +863,14 @@ export function buildChunkArrays(
           addQuad(m2x,ownY,m2z,sr,sg,sb, m3x,ownY,m3z,sr,sg,sb, e2x,ownY,e2z,sr,sg,sb, e3x,ownY,e3z,sr,sg,sb, tt,ot,ot);
           addQuad(m3x,ownY,m3z,sr,sg,sb, m4x,ownY,m4z,sr,sg,sb, e3x,ownY,e3z,sr,sg,sb, e4x,ownY,e4z,sr,sg,sb, tt,ot,ot);
           addQuad(m4x,ownY,m4z,sr,sg,sb, m5x,ownY,m5z,sr,sg,sb, e4x,ownY,e4z,sr,sg,sb, e5x,ownY,e5z,sr,sg,sb, tt,ot,ot);
-          addTri(adjCx,ownY,adjCz,sr,sg,sb, m1x,ownY,m1z,sr,sg,sb, m2x,ownY,m2z,sr,sg,sb, tt,ot,ot);
-          addTri(adjCx,ownY,adjCz,sr,sg,sb, m2x,ownY,m2z,sr,sg,sb, m3x,ownY,m3z,sr,sg,sb, tt,ot,ot);
-          addTri(adjCx,ownY,adjCz,sr,sg,sb, m3x,ownY,m3z,sr,sg,sb, m4x,ownY,m4z,sr,sg,sb, tt,ot,ot);
-          addTri(adjCx,ownY,adjCz,sr,sg,sb, m4x,ownY,m4z,sr,sg,sb, m5x,ownY,m5z,sr,sg,sb, tt,ot,ot);
+          // adjC mirrors a channel flank (bed-weighted shoulder) unless it is
+          // the cell center — fade continues across the wedge fan.
+          const adjBed = adjCx !== center.x || adjCz !== center.z;
+          const ajR = adjBed ? bvR : sr, ajG = adjBed ? bvG : sg, ajB = adjBed ? bvB : sb;
+          addTri(adjCx,ownY,adjCz,ajR,ajG,ajB, m1x,ownY,m1z,sr,sg,sb, m2x,ownY,m2z,sr,sg,sb, tt,bedT,ot);
+          addTri(adjCx,ownY,adjCz,ajR,ajG,ajB, m2x,ownY,m2z,sr,sg,sb, m3x,ownY,m3z,sr,sg,sb, tt,bedT,ot);
+          addTri(adjCx,ownY,adjCz,ajR,ajG,ajB, m3x,ownY,m3z,sr,sg,sb, m4x,ownY,m4z,sr,sg,sb, tt,bedT,ot);
+          addTri(adjCx,ownY,adjCz,ajR,ajG,ajB, m4x,ownY,m4z,sr,sg,sb, m5x,ownY,m5z,sr,sg,sb, tt,bedT,ot);
 
           if (map.hasRoads(col, row)) (() => {
             const prevFace = (i + 5) % 6, nextFace = i1;
@@ -850,13 +951,13 @@ export function buildChunkArrays(
           const bJx = center.x + ox[i1] * SOLID_FACTOR * 0.4 * cellW, bJz = center.z + oz[i1] * SOLID_FACTOR * 0.4 * cellW;
           const cL2x = bIx + (bJx - bIx) * 0.15, cL2z = bIz + (bJz - bIz) * 0.15;
           const cR2x = bIx + (bJx - bIx) * 0.85, cR2z = bIz + (bJz - bIz) * 0.85;
-          addTri(bIx,ownY,bIz,sr,sg,sb,      e1x,ownY,e1z,sr,sg,sb,      e2x,ownY,e2z,sr,sg,sb, tt,ot,ot);
-          addTri(bIx,ownY,bIz,sr,sg,sb,      e2x,ownY,e2z,sr,sg,sb,      cL2x,ownBedY,cL2z,sr,sg,sb, tt,ot,ot);
-          addTri(cL2x,ownBedY,cL2z,sr,sg,sb, e2x,ownY,e2z,sr,sg,sb,      e3x,ownBedY,e3z,sr,sg,sb, tt,ot,ot);
-          addTri(cL2x,ownBedY,cL2z,sr,sg,sb, e3x,ownBedY,e3z,sr,sg,sb,   cR2x,ownBedY,cR2z,sr,sg,sb, tt,ot,ot);
-          addTri(cR2x,ownBedY,cR2z,sr,sg,sb, e3x,ownBedY,e3z,sr,sg,sb,   e4x,ownY,e4z,sr,sg,sb, tt,ot,ot);
-          addTri(cR2x,ownBedY,cR2z,sr,sg,sb, e4x,ownY,e4z,sr,sg,sb,      bJx,ownY,bJz,sr,sg,sb, tt,ot,ot);
-          addTri(bJx,ownY,bJz,sr,sg,sb,      e4x,ownY,e4z,sr,sg,sb,      e5x,ownY,e5z,sr,sg,sb, tt,ot,ot);
+          addTri(bIx,ownY,bIz,bvR,bvG,bvB,      e1x,ownY,e1z,sr,sg,sb,      e2x,ownY,e2z,bvR,bvG,bvB, tt,bedT,ot);
+          addTri(bIx,ownY,bIz,bvR,bvG,bvB,      e2x,ownY,e2z,bvR,bvG,bvB,      cL2x,ownBedY,cL2z,bvR,bvG,bvB, tt,bedT,ot);
+          addTri(cL2x,ownBedY,cL2z,bvR,bvG,bvB, e2x,ownY,e2z,bvR,bvG,bvB,      e3x,ownBedY,e3z,bvR,bvG,bvB, tt,bedT,ot);
+          addTri(cL2x,ownBedY,cL2z,bvR,bvG,bvB, e3x,ownBedY,e3z,bvR,bvG,bvB,   cR2x,ownBedY,cR2z,bvR,bvG,bvB, tt,bedT,ot);
+          addTri(cR2x,ownBedY,cR2z,bvR,bvG,bvB, e3x,ownBedY,e3z,bvR,bvG,bvB,   e4x,ownY,e4z,bvR,bvG,bvB, tt,bedT,ot);
+          addTri(cR2x,ownBedY,cR2z,bvR,bvG,bvB, e4x,ownY,e4z,bvR,bvG,bvB,      bJx,ownY,bJz,bvR,bvG,bvB, tt,bedT,ot);
+          addTri(bJx,ownY,bJz,bvR,bvG,bvB,      e4x,ownY,e4z,bvR,bvG,bvB,      e5x,ownY,e5z,sr,sg,sb, tt,bedT,ot);
           junctionRing.push(
             { x: bIx,  y: ownY,    z: bIz },
             { x: cL2x, y: ownBedY, z: cL2z },
@@ -866,20 +967,20 @@ export function buildChunkArrays(
 
         } else if (map.hasRiverBeginOrEnd(col, row)) {
           const e3y = ownBedY;
-          const bHalf = Math.min(0.48, 0.25 * cellW);
+          const bHalf = Math.min(0.48, 0.25 * cellW * bankFlare);
           const m1x = (center.x + e1x) * 0.5, m1z = (center.z + e1z) * 0.5;
           const m5x = (center.x + e5x) * 0.5, m5z = (center.z + e5z) * 0.5;
           const m2x = m1x + (m5x - m1x) * (0.5 - bHalf), m2z = m1z + (m5z - m1z) * (0.5 - bHalf);
           const m3x = (m1x + m5x) * 0.5, m3y = e3y, m3z = (m1z + m5z) * 0.5;
           const m4x = m1x + (m5x - m1x) * (0.5 + bHalf), m4z = m1z + (m5z - m1z) * (0.5 + bHalf);
-          addQuad(m1x,ownY,m1z,sr,sg,sb, m2x,ownY,m2z,sr,sg,sb, e1x,ownY,e1z,sr,sg,sb, e2x,ownY,e2z,sr,sg,sb, tt,ot,ot);
-          addQuad(m2x,ownY,m2z,sr,sg,sb, m3x,m3y,m3z,sr,sg,sb, e2x,ownY,e2z,sr,sg,sb, e3x,e3y,e3z,sr,sg,sb, tt,ot,ot);
-          addQuad(m3x,m3y,m3z,sr,sg,sb, m4x,ownY,m4z,sr,sg,sb, e3x,e3y,e3z,sr,sg,sb, e4x,ownY,e4z,sr,sg,sb, tt,ot,ot);
-          addQuad(m4x,ownY,m4z,sr,sg,sb, m5x,ownY,m5z,sr,sg,sb, e4x,ownY,e4z,sr,sg,sb, e5x,ownY,e5z,sr,sg,sb, tt,ot,ot);
-          addTri(center.x,ownY,center.z,sr,sg,sb, m1x,ownY,m1z,sr,sg,sb, m2x,ownY,m2z,sr,sg,sb, tt,ot,ot);
-          addTri(center.x,ownY,center.z,sr,sg,sb, m2x,ownY,m2z,sr,sg,sb, m3x,m3y,m3z,sr,sg,sb, tt,ot,ot);
-          addTri(center.x,ownY,center.z,sr,sg,sb, m3x,m3y,m3z,sr,sg,sb, m4x,ownY,m4z,sr,sg,sb, tt,ot,ot);
-          addTri(center.x,ownY,center.z,sr,sg,sb, m4x,ownY,m4z,sr,sg,sb, m5x,ownY,m5z,sr,sg,sb, tt,ot,ot);
+          addQuad(m1x,ownY,m1z,sr,sg,sb, m2x,ownY,m2z,bvR,bvG,bvB, e1x,ownY,e1z,sr,sg,sb, e2x,ownY,e2z,bvR,bvG,bvB, tt,bedT,ot);
+          addQuad(m2x,ownY,m2z,bvR,bvG,bvB, m3x,m3y,m3z,bvR,bvG,bvB, e2x,ownY,e2z,bvR,bvG,bvB, e3x,e3y,e3z,bvR,bvG,bvB, tt,bedT,ot);
+          addQuad(m3x,m3y,m3z,bvR,bvG,bvB, m4x,ownY,m4z,bvR,bvG,bvB, e3x,e3y,e3z,bvR,bvG,bvB, e4x,ownY,e4z,bvR,bvG,bvB, tt,bedT,ot);
+          addQuad(m4x,ownY,m4z,bvR,bvG,bvB, m5x,ownY,m5z,sr,sg,sb, e4x,ownY,e4z,bvR,bvG,bvB, e5x,ownY,e5z,sr,sg,sb, tt,bedT,ot);
+          addTri(center.x,ownY,center.z,sr,sg,sb, m1x,ownY,m1z,sr,sg,sb, m2x,ownY,m2z,bvR,bvG,bvB, tt,bedT,ot);
+          addTri(center.x,ownY,center.z,sr,sg,sb, m2x,ownY,m2z,bvR,bvG,bvB, m3x,m3y,m3z,bvR,bvG,bvB, tt,bedT,ot);
+          addTri(center.x,ownY,center.z,sr,sg,sb, m3x,m3y,m3z,bvR,bvG,bvB, m4x,ownY,m4z,bvR,bvG,bvB, tt,bedT,ot);
+          addTri(center.x,ownY,center.z,sr,sg,sb, m4x,ownY,m4z,bvR,bvG,bvB, m5x,ownY,m5z,sr,sg,sb, tt,bedT,ot);
 
         } else {
           const ip = (i + 5) % 6, in1 = i1, in2 = (i + 2) % 6;
@@ -888,11 +989,14 @@ export function buildChunkArrays(
           // Flank factors scale with cellW; the same scaled formulas appear in
           // buildRiverGeometry so the water channel tiles the widened bed.
           if (map.hasRiverThroughEdge(col, row, (i + 3) % 6)) {
-            cLx = center.x + ox[ip]  * SOLID_FACTOR * 0.25 * cellW;
-            cLz = center.z + oz[ip]  * SOLID_FACTOR * 0.25 * cellW;
-            cRx = center.x + ox[in2] * SOLID_FACTOR * 0.25 * cellW;
-            cRz = center.z + oz[in2] * SOLID_FACTOR * 0.25 * cellW;
+            cLx = center.x + ox[ip]  * SOLID_FACTOR * 0.25 * cellW * bankFlare;
+            cLz = center.z + oz[ip]  * SOLID_FACTOR * 0.25 * cellW * bankFlare;
+            cRx = center.x + ox[in2] * SOLID_FACTOR * 0.25 * cellW * bankFlare;
+            cRz = center.z + oz[in2] * SOLID_FACTOR * 0.25 * cellW * bankFlare;
           } else if (map.hasRiverThroughEdge(col, row, in1)) {
+            // Turn flanks anchored at the cell center stay UNflared: their V
+            // is asymmetric about the bed line, so radial widening would move
+            // the bed sideways and surface the water's lateral edge.
             const f = Math.min(0.85, (2 / 3) * cellW);
             cLx = center.x; cLz = center.z;
             cRx = center.x + ox[i1] * SOLID_FACTOR * f;
@@ -914,21 +1018,29 @@ export function buildChunkArrays(
 
           const ccx = (cLx + cRx) * 0.5, ccy = ownBedY, ccz = (cLz + cRz) * 0.5;
           const e3y = ownBedY;
-          const mHalf = Math.min(0.48, (1 / 3) * cellW);
+          const mHalf = Math.min(0.48, (1 / 3) * cellW * bankFlare);
           const m1x = (cLx + e1x) * 0.5, m1z = (cLz + e1z) * 0.5;
           const m5x = (cRx + e5x) * 0.5, m5z = (cRz + e5z) * 0.5;
           const m2x = m1x + (m5x - m1x) * (0.5 - mHalf), m2z = m1z + (m5z - m1z) * (0.5 - mHalf);
           const m3x = (m1x + m5x) * 0.5, m3y = ownBedY, m3z = (m1z + m5z) * 0.5;
           const m4x = m1x + (m5x - m1x) * (0.5 + mHalf), m4z = m1z + (m5z - m1z) * (0.5 + mHalf);
 
-          addQuad(m1x,ownY,m1z,sr,sg,sb, m2x,ownY,m2z,sr,sg,sb, e1x,ownY,e1z,sr,sg,sb, e2x,ownY,e2z,sr,sg,sb, tt,ot,ot);
-          addQuad(m2x,ownY,m2z,sr,sg,sb, m3x,m3y,m3z,sr,sg,sb, e2x,ownY,e2z,sr,sg,sb, e3x,e3y,e3z,sr,sg,sb, tt,ot,ot);
-          addQuad(m3x,m3y,m3z,sr,sg,sb, m4x,ownY,m4z,sr,sg,sb, e3x,e3y,e3z,sr,sg,sb, e4x,ownY,e4z,sr,sg,sb, tt,ot,ot);
-          addQuad(m4x,ownY,m4z,sr,sg,sb, m5x,ownY,m5z,sr,sg,sb, e4x,ownY,e4z,sr,sg,sb, e5x,ownY,e5z,sr,sg,sb, tt,ot,ot);
-          addTri (cLx,ownY,cLz,sr,sg,sb, m1x,ownY,m1z,sr,sg,sb, m2x,ownY,m2z,sr,sg,sb, tt,ot,ot);
-          addQuad(cLx,ownY,cLz,sr,sg,sb, ccx,ccy,ccz,sr,sg,sb, m2x,ownY,m2z,sr,sg,sb, m3x,m3y,m3z,sr,sg,sb, tt,ot,ot);
-          addQuad(ccx,ccy,ccz,sr,sg,sb, cRx,ownY,cRz,sr,sg,sb, m3x,m3y,m3z,sr,sg,sb, m4x,ownY,m4z,sr,sg,sb, tt,ot,ot);
-          addTri (cRx,ownY,cRz,sr,sg,sb, m4x,ownY,m4z,sr,sg,sb, m5x,ownY,m5z,sr,sg,sb, tt,ot,ot);
+          // Shoulders (m2/m4, e2/e4, non-center flanks) carry full bed weight
+          // so the walls read as uniform riverbed; the bed→bank fade happens
+          // on the flat land beyond them. Center-anchored turn flanks stay
+          // bank — the cell-center vertex is shared with bank wedges.
+          const cLBed = cLx !== center.x || cLz !== center.z;
+          const cRBed = cRx !== center.x || cRz !== center.z;
+          const clR = cLBed ? bvR : sr, clG = cLBed ? bvG : sg, clB = cLBed ? bvB : sb;
+          const crR = cRBed ? bvR : sr, crG = cRBed ? bvG : sg, crB = cRBed ? bvB : sb;
+          addQuad(m1x,ownY,m1z,sr,sg,sb, m2x,ownY,m2z,bvR,bvG,bvB, e1x,ownY,e1z,sr,sg,sb, e2x,ownY,e2z,bvR,bvG,bvB, tt,bedT,ot);
+          addQuad(m2x,ownY,m2z,bvR,bvG,bvB, m3x,m3y,m3z,bvR,bvG,bvB, e2x,ownY,e2z,bvR,bvG,bvB, e3x,e3y,e3z,bvR,bvG,bvB, tt,bedT,ot);
+          addQuad(m3x,m3y,m3z,bvR,bvG,bvB, m4x,ownY,m4z,bvR,bvG,bvB, e3x,e3y,e3z,bvR,bvG,bvB, e4x,ownY,e4z,bvR,bvG,bvB, tt,bedT,ot);
+          addQuad(m4x,ownY,m4z,bvR,bvG,bvB, m5x,ownY,m5z,sr,sg,sb, e4x,ownY,e4z,bvR,bvG,bvB, e5x,ownY,e5z,sr,sg,sb, tt,bedT,ot);
+          addTri (cLx,ownY,cLz,clR,clG,clB, m1x,ownY,m1z,sr,sg,sb, m2x,ownY,m2z,bvR,bvG,bvB, tt,bedT,ot);
+          addQuad(cLx,ownY,cLz,clR,clG,clB, ccx,ccy,ccz,bvR,bvG,bvB, m2x,ownY,m2z,bvR,bvG,bvB, m3x,m3y,m3z,bvR,bvG,bvB, tt,bedT,ot);
+          addQuad(ccx,ccy,ccz,bvR,bvG,bvB, cRx,ownY,cRz,crR,crG,crB, m3x,m3y,m3z,bvR,bvG,bvB, m4x,ownY,m4z,bvR,bvG,bvB, tt,bedT,ot);
+          addTri (cRx,ownY,cRz,crR,crG,crB, m4x,ownY,m4z,bvR,bvG,bvB, m5x,ownY,m5z,sr,sg,sb, tt,bedT,ot);
         }
       }
 
@@ -950,17 +1062,19 @@ export function buildChunkArrays(
           const a  = junctionRing[k],  b  = junctionRing[k1];
           const ai = inner[k],         bi = inner[k1];
           addTri(
-            center.x, ownBedY, center.z, sr, sg, sb,
-            ai.x, ownBedY, ai.z, sr, sg, sb,
-            bi.x, ownBedY, bi.z, sr, sg, sb,
-            ownType, ownType, ownType,
+            center.x, ownBedY, center.z, bvR, bvG, bvB,
+            ai.x, ownBedY, ai.z, bvR, bvG, bvB,
+            bi.x, ownBedY, bi.z, bvR, bvG, bvB,
+            ownType, bedT, ownType,
           );
+          // Ring points are basin shoulders — full bed weight like the walls;
+          // the fade to cell terrain happens in the wedge/mouth fans outside.
           addQuad(
-            ai.x, ownBedY, ai.z, sr, sg, sb,
-            bi.x, ownBedY, bi.z, sr, sg, sb,
-            a.x,  a.y,     a.z,  sr, sg, sb,
-            b.x,  b.y,     b.z,  sr, sg, sb,
-            ownType, ownType, ownType,
+            ai.x, ownBedY, ai.z, bvR, bvG, bvB,
+            bi.x, ownBedY, bi.z, bvR, bvG, bvB,
+            a.x,  a.y,     a.z,  bvR, bvG, bvB,
+            b.x,  b.y,     b.z,  bvR, bvG, bvB,
+            ownType, bedT, ownType,
           );
         }
       }
@@ -1008,50 +1122,95 @@ export function buildChunkArrays(
         const edgeBedOwn = riverEdge ? streamBedY(col, row)       : ownY;
         const edgeBedNb  = riverEdge ? streamBedY(nb.col, nb.row) : nbY;
         const hasRoad    = !riverEdge && map.hasRoadThroughEdge(col, row, i);
-        const stripHalfW = riverEdge ? edgeHalfW(i) : RIVER_BASE_HALF_WIDTH;
+        const stripHalfW = edgeRiverThru(i) ? edgeHalfW(i) : RIVER_BASE_HALF_WIDTH;
 
+        const stripBedArg = riverEdge ? stripBed : null;
         if (et === 1) {
           if (ownElev < nbElev) {
             addTerraceEdgeStrip(v1x,v1z, v2x,v2z,  bx,  bz, ownY,nbY, er,eg,eb, er2,eg2,eb2,
-              ownType, nbType, edgeBedOwn, edgeBedNb, hasRoad, ownCi, nbCi, stripHalfW);
+              ownType, nbType, edgeBedOwn, edgeBedNb, hasRoad, ownCi, nbCi, stripHalfW, stripBedArg);
           } else {
             const [loR,loG,loB, hiR,hiG,hiB] = colorMode === 'splat'
               ? [er, eg, eb, er2, eg2, eb2]
               : [er2, eg2, eb2, er, eg, eb];
             addTerraceEdgeStrip(v3x,v3z, v4x,v4z, -bx,-bz, nbY,ownY, loR,loG,loB, hiR,hiG,hiB,
-              nbType, ownType, edgeBedNb, edgeBedOwn, hasRoad, nbCi, ownCi, stripHalfW);
+              nbType, ownType, edgeBedNb, edgeBedOwn, hasRoad, nbCi, ownCi, stripHalfW, stripBedArg);
           }
         } else {
           addBridgeEdgeStrip(v1x,v1z, v2x,v2z, bx,bz, ownY,nbY, er,eg,eb, er2,eg2,eb2,
-            ownType, nbType, edgeBedOwn, edgeBedNb, hasRoad, ownCi, nbCi, stripHalfW);
+            ownType, nbType, edgeBedOwn, edgeBedNb, hasRoad, ownCi, nbCi, stripHalfW, stripBedArg);
 
           if (et === 2) {
             const WALL_DARK = 0.3;
             const diff = ownElev - nbElev;
+            // On river edges the wall's top edge follows the strip's carved
+            // channel profile (level → bed dip → level) instead of running
+            // straight across — a full-height wall would seal the channel
+            // mouth and hide the waterfall sheet behind a rock face.
+            const addWall = (
+              w1x: number, w1z: number, w5x: number, w5z: number,
+              topY: number, botY: number, bedY: number,
+              tr: number, tg: number, tb: number,
+              wallType: number,
+            ) => {
+              const botR = colorMode === 'splat' ? tr : tr * WALL_DARK;
+              const botG = colorMode === 'splat' ? tg : tg * WALL_DARK;
+              const botB = colorMode === 'splat' ? tb : tb * WALL_DARK;
+              if (!riverEdge) {
+                addQuad(
+                  w1x, topY, w1z, tr,   tg,   tb,
+                  w5x, topY, w5z, tr,   tg,   tb,
+                  w1x, botY, w1z, botR, botG, botB,
+                  w5x, botY, w5z, botR, botG, botB,
+                  wallType, wallType, wallType,
+                );
+                return;
+              }
+              const w2x = w1x + (w5x - w1x) * (0.5 - stripHalfW), w2z = w1z + (w5z - w1z) * (0.5 - stripHalfW);
+              const w3x = (w1x + w5x) * 0.5,                      w3z = (w1z + w5z) * 0.5;
+              const w4x = w1x + (w5x - w1x) * (0.5 + stripHalfW), w4z = w1z + (w5z - w1z) * (0.5 + stripHalfW);
+              const f = Math.min(1, (topY - bedY) / Math.max(1e-6, topY - botY));
+              // The dip vertex sits on the carved groove line — riverbed
+              // colored like the strip's bed verts (slot 2 of the triple).
+              const dipT = stripBed ? stripBed[3] : wallType;
+              const dipR = stripBed ? stripBed[0] : tr + (botR - tr) * f;
+              const dipG = stripBed ? stripBed[1] : tg + (botG - tg) * f;
+              const dipB = stripBed ? stripBed[2] : tb + (botB - tb) * f;
+              addQuad(
+                w1x, topY, w1z, tr,   tg,   tb,
+                w2x, topY, w2z, dipR, dipG, dipB,
+                w1x, botY, w1z, botR, botG, botB,
+                w2x, botY, w2z, botR, botG, botB,
+                wallType, wallType, dipT,
+              );
+              addQuad(
+                w2x, topY, w2z, dipR, dipG, dipB,
+                w3x, bedY, w3z, dipR, dipG, dipB,
+                w2x, botY, w2z, botR, botG, botB,
+                w3x, botY, w3z, botR, botG, botB,
+                wallType, wallType, dipT,
+              );
+              addQuad(
+                w3x, bedY, w3z, dipR, dipG, dipB,
+                w4x, topY, w4z, dipR, dipG, dipB,
+                w3x, botY, w3z, botR, botG, botB,
+                w4x, botY, w4z, botR, botG, botB,
+                wallType, wallType, dipT,
+              );
+              addQuad(
+                w4x, topY, w4z, dipR, dipG, dipB,
+                w5x, topY, w5z, tr,   tg,   tb,
+                w4x, botY, w4z, botR, botG, botB,
+                w5x, botY, w5z, botR, botG, botB,
+                wallType, wallType, dipT,
+              );
+            };
             if (diff >= cliffThreshold) {
-              const botR = colorMode === 'splat' ? er : er * WALL_DARK;
-              const botG = colorMode === 'splat' ? eg : eg * WALL_DARK;
-              const botB = colorMode === 'splat' ? eb : eb * WALL_DARK;
               setCi(ownCi, ownCi, ownCi);
-              addQuad(
-                v1x, ownY, v1z, er,   eg,   eb,
-                v2x, ownY, v2z, er,   eg,   eb,
-                v1x, nbY,  v1z, botR, botG, botB,
-                v2x, nbY,  v2z, botR, botG, botB,
-                ownType, ownType, ownType,
-              );
+              addWall(v1x, v1z, v2x, v2z, ownY, nbY, edgeBedOwn, er, eg, eb, ownType);
             } else if (-diff >= cliffThreshold) {
-              const botR = colorMode === 'splat' ? er2 : er2 * WALL_DARK;
-              const botG = colorMode === 'splat' ? eg2 : eg2 * WALL_DARK;
-              const botB = colorMode === 'splat' ? eb2 : eb2 * WALL_DARK;
               setCi(nbCi, nbCi, nbCi);
-              addQuad(
-                v3x, nbY,  v3z, er2,  eg2,  eb2,
-                v4x, nbY,  v4z, er2,  eg2,  eb2,
-                v3x, ownY, v3z, botR, botG, botB,
-                v4x, ownY, v4z, botR, botG, botB,
-                nbType, nbType, nbType,
-              );
+              addWall(v3x, v3z, v4x, v4z, nbY, ownY, edgeBedNb, er2, eg2, eb2, nbType);
             }
           }
         }

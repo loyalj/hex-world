@@ -43,7 +43,19 @@
       "Bash(python -)",
       "Bash(cd d:/Coding/hex-world-editor && sed -n '18,60p' src/style.css && grep -n \"\\\\.hidden\" src/style.css | head -3)",
       "Bash(npx vite *)",
-      "Bash(cd d:/Coding/hex-world-editor && grep -n \"paths\\\\|@loyalj\" tsconfig.json; ls -la node_modules/@loyalj/ 2>/dev/null; grep -m1 setHexGrid node_modules/@loyalj/hex-world/dist/types/world/HexWorld.d.ts 2>/dev/null || echo \"not in installed types\")"
+      "Bash(cd d:/Coding/hex-world-editor && grep -n \"paths\\\\|@loyalj\" tsconfig.json; ls -la node_modules/@loyalj/ 2>/dev/null; grep -m1 setHexGrid node_modules/@loyalj/hex-world/dist/types/world/HexWorld.d.ts 2>/dev/null || echo \"not in installed types\")",
+      "Bash(grep -E \"^\\\\+.*\\(export \\(class|function|interface|const\\)|/\\\\*\\\\*\\)\")",
+      "PowerShell(npx tsc --noEmit)",
+      "PowerShell(npx vitest run 2>$null)",
+      "PowerShell(npx tsx --version 2>$null)",
+      "PowerShell(if \\(-not $?\\) { \"no tsx\" })",
+      "PowerShell(npx tsx waterfall-check.tmp.ts)",
+      "PowerShell(Remove-Item waterfall-check.tmp.ts -Confirm:$false)",
+      "PowerShell(npx vitest run tests/chunk-geometry.test.ts 2>$null)",
+      "PowerShell(npx tsx junction-check.tmp.ts)",
+      "PowerShell(npx tsx junction-hole.tmp.ts)",
+      "PowerShell(npx vitest run tests/river-width.test.ts 2>$null)",
+      "PowerShell(npx vitest run tests/river-carve.test.ts 2>$null)"
     ],
     "additionalDirectories": [
       "C:\\Users\\loyal\\.claude\\projects\\d--Coding-hex-world\\ef551f1b-c5cb-4cf2-8696-3be1d9fe7853\\tool-results",
