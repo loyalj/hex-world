@@ -241,7 +241,10 @@ export function setLiquidLightTint(
   tint: THREE.Color,
 ): void {
   for (const set of sets) {
-    for (const mat of [set.surface, set.shore, set.estuary, set.river]) {
+    // Inlined rather than using liquidMaterialList — importing it here would
+    // make LiquidTypes a runtime dependency of this module, and it already
+    // depends on us.
+    for (const mat of [set.surface, set.shore, set.estuary, set.river, set.waterfallFoam, set.waterfallSpray]) {
       if (mat instanceof THREE.ShaderMaterial && mat.uniforms.uLightTint) {
         mat.uniforms.uLightTint.value.copy(tint);
       }

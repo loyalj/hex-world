@@ -3,6 +3,7 @@ import { createWaterMaterial } from './WaterMaterial.js';
 import { createWaterShoreMaterial } from './WaterShoreMaterial.js';
 import { createEstuaryMaterial } from './EstuaryMaterial.js';
 import { createRiverMaterial } from './RiverMaterial.js';
+import { createWaterfallFoamMaterial, createWaterfallSprayMaterial } from './WaterfallMaterial.js';
 
 // ---------------------------------------------------------------------------
 // Serializable descriptor (JSON-safe — goes in map save files)
@@ -53,6 +54,42 @@ export interface LiquidTypeDescriptor {
   waveScale?: number;
   /** Shore/estuary foam intensity multiplier. 0 disables foam. Default 1. */
   foamIntensity?: number;
+
+  // --- Waterfalls -----------------------------------------------------------
+  // A liquid's falls inherit its foam color, flow speed, wave scale, foam
+  // intensity, and emissive glow, so a new liquid looks right before touching
+  // any of these. Reach for them when the inherited look is wrong for the
+  // substance: thick liquids want a low, heavy, sparse spray; volatile ones
+  // want a fine cloud carrying much further downstream.
+
+  /**
+   * Spray density multiplier. 0 emits no mist particles (the plunge pool still
+   * renders — silence that with `foamIntensity: 0`). Default 1.
+   */
+  sprayIntensity?: number;
+  /**
+   * Hex color of the mist. Defaults to `foamColor` — override where the vapor
+   * a liquid throws isn't the color of its foam (lava's ash, acid's fumes).
+   */
+  sprayColor?: number;
+  /**
+   * How high the plume is thrown, world units — the liquid's "energy" knob.
+   * The arc's fall is derived from it, so the shape holds at any value.
+   * Default 0.75; a viscous liquid barely clears its pool at ~0.3.
+   */
+  sprayRise?: number;
+  /** How far downstream mist carries over its life, world units. Default 0.55. */
+  sprayDrift?: number;
+  /**
+   * Particle size in pixels at 110 world units of depth. Default 7. Bigger
+   * reads as slow smoke or steam, smaller as fine water mist.
+   */
+  spraySize?: number;
+  /**
+   * Plunge-pool footprint multiplier, relative to the width of the falling
+   * sheet. Default 1; below that the churn stays tight under the fall.
+   */
+  poolScale?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -72,6 +109,10 @@ export interface LiquidMaterialSet {
   estuary?: THREE.Material;
   /** River channel mesh material. */
   river?: THREE.Material;
+  /** Plunge-pool foam at the foot of each waterfall. Omit to skip the layer. */
+  waterfallFoam?: THREE.Material;
+  /** Waterfall spray particles (a `THREE.Points` material). Omit to skip the layer. */
+  waterfallSpray?: THREE.Material;
 }
 
 // ---------------------------------------------------------------------------
@@ -88,14 +129,23 @@ export const DEFAULT_LIQUID_DESCRIPTORS: LiquidTypeDescriptor[] = [
     shallowColor: 0x527fb3, deepColor: 0x1e477a, foamColor: 0xeaf3ff },
   // Lava inverts the usual depth reading: deepColor is HOTTER, not darker, so
   // the pool center looks molten while the edges read as cooling crust.
+  // A lava fall throws ash, not froth: sparse, heavy, barely clearing the pool,
+  // in big slow puffs. The liquid's emissive still lights them from within, so
+  // they read as glowing embers rather than grey smoke.
   { id: 'lava',  name: 'Lava',
     shallowColor: 0xd45a10, deepColor: 0xffb832, foamColor: 0xf2b24c,
     opacity: 1.0, flowSpeed: 0.25, waveScale: 0.5,
-    emissiveColor: 0xff5a00, emissiveStrength: 0.6 },
+    emissiveColor: 0xff5a00, emissiveStrength: 0.6,
+    sprayIntensity: 0.55, sprayColor: 0x4a3b33, sprayRise: 0.3,
+    sprayDrift: 0.3, spraySize: 12, poolScale: 0.75 },
+  // Acid is thin and volatile — a fine, pale fume cloud carried well past the
+  // fall, over a pool that spreads wider than water's.
   { id: 'acid',  name: 'Acid',
     shallowColor: 0x4db318, deepColor: 0x266608, foamColor: 0xb3f266,
     opacity: 0.9, flowSpeed: 0.6,
-    emissiveColor: 0x66ff33, emissiveStrength: 0.15 },
+    emissiveColor: 0x66ff33, emissiveStrength: 0.15,
+    sprayIntensity: 1.2, sprayColor: 0xd8ffa8, sprayRise: 0.9,
+    sprayDrift: 0.8, spraySize: 6, poolScale: 1.15 },
 ];
 
 // ---------------------------------------------------------------------------
@@ -125,5 +175,24 @@ export function resolveLiquidMaterials(descriptor: LiquidTypeDescriptor): Liquid
     shore:   createWaterShoreMaterial(appearance),
     estuary: createEstuaryMaterial(appearance),
     river:   createRiverMaterial(appearance),
+    waterfallFoam:  createWaterfallFoamMaterial(appearance),
+    waterfallSpray: createWaterfallSprayMaterial({
+      ...appearance,
+      // Spray falls back to the liquid's foam color when it has no color of
+      // its own — the common case, and what makes water look right untuned.
+      foam:    descriptor.sprayColor != null ? new THREE.Color(descriptor.sprayColor) : appearance.foam,
+      rise:    descriptor.sprayRise,
+      drift:   descriptor.sprayDrift,
+      size:    descriptor.spraySize,
+    }),
   };
+}
+
+/**
+ * Every material in a set, in render order — the canonical iteration order for
+ * per-frame uniform pushes (time, light tint, cloud shadows) and disposal.
+ * Sets built by hand may leave layers out, so entries can be undefined.
+ */
+export function liquidMaterialList(set: LiquidMaterialSet): (THREE.Material | undefined)[] {
+  return [set.surface, set.shore, set.estuary, set.river, set.waterfallFoam, set.waterfallSpray];
 }

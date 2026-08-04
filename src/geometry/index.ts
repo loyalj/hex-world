@@ -1,5 +1,8 @@
 export * from './HexGeometry.js';
 export type { WaterGeometryOptions } from './WaterChunk.js';
+export { createRiverCellFilter } from './WaterChunk.js';
+export * from './Waterfalls.js';
+export * from './WaterfallMaterial.js';
 export * from './HexPicking.js';
 export * from './HexPicker.js';
 export * from './CellOverlayLayer.js';

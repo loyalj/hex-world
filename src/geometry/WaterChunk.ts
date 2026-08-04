@@ -199,35 +199,37 @@ export function buildWaterGeometry(
 }
 
 // ---------------------------------------------------------------------------
-// River water
+// River channel ownership
 // ---------------------------------------------------------------------------
-export function buildRiverGeometry(
+
+/**
+ * Builds the predicate deciding whether a given cell's river channel is drawn
+ * by THIS liquid: it must carry a river, must not itself be a liquid cell, and
+ * its chain must drain into this liquid (unclassified chains go to whichever
+ * liquid owns them — see `ownsUnclassifiedRivers`).
+ *
+ * `buildRiverGeometry` and `findWaterfalls` share it so a waterfall's spray and
+ * plunge pool are emitted by exactly the liquid that renders the channel
+ * feeding it — never twice, never by the wrong liquid.
+ *
+ * When `opts.riverCells` is supplied (ChunkManager's map-wide ownership cache)
+ * this is a set lookup; otherwise it falls back to tracing the outgoing chain,
+ * memoised across the whole call so a shared downstream reach is walked once.
+ */
+export function createRiverCellFilter(
   map: HexMap,
   layout: HexLayout,
-  bounds: ChunkBounds,
   opts: WaterGeometryOptions = {},
-): THREE.BufferGeometry | null {
-  // River channels overlay land terrain, so ALL their perturbation must match the
-  // terrain mesh (which uses ChunkGeometryOptions), not the liquid's surface noise —
-  // otherwise a per-liquid noiseScale override would wiggle the channel out of the
-  // stream bed carved by HexChunk.
-  const noiseScale     = opts.terrainNoiseScale          ?? 0.35;
-  const perturbStr     = opts.terrainPerturbStrength     ?? 0.8;
-  const elevScale      = opts.elevationScale             ?? ELEVATION_SCALE;
-  const surfaceLift    = opts.surfaceLift                ?? 0.02;
-  const elevPerturbStr = opts.terrainElevPerturbStrength ?? 0.2;
-  const cliffThreshold = opts.cliffThreshold             ?? 2;
-  const riverElevs     = opts.riverElevations;
-  const edgeDirs       = layout.orientation.edgeDirections;
-  const waterTerrains    = opts.waterTerrains    ?? new Set([DEFAULT_WATER_TERRAIN_INDEX]);
+): (col: number, row: number) => boolean {
+  const edgeDirs          = layout.orientation.edgeDirections;
+  const waterTerrains     = opts.waterTerrains ?? new Set([DEFAULT_WATER_TERRAIN_INDEX]);
   const allLiquidTerrains = opts.allLiquidTerrains;
-  const isWaterTerrain   = (t: number) => waterTerrains.has(t);
 
   // Follow outgoing river chain to determine which liquid type it drains into.
   // edgeDirs maps edge index (0-5) → HEX_DIRECTIONS index for the neighbor across that edge.
   // Returns true if it drains into THIS liquid type (waterTerrains),
   // false if it drains into a different liquid type, null if undetermined (render for all).
-  // Per-chunk cache so cells that share a downstream chain reuse the first result.
+  // Cached so cells that share a downstream chain reuse the first result.
   // Also prevents inconsistency when two separate traces happen to join the same channel.
   const ownershipCache = new Map<number, boolean | null>();
 
@@ -268,6 +270,49 @@ export function buildRiverGeometry(
     }
     return resolve(null); // unclassified — rendered only by the owning default liquid
   };
+
+  return (col: number, row: number): boolean => {
+    const terrain      = map.getTerrain(col, row);
+    const cellIsLiquid = allLiquidTerrains ? allLiquidTerrains.has(terrain) : waterTerrains.has(terrain);
+    if (cellIsLiquid || !map.hasRiver(col, row)) return false;
+
+    if (opts.riverCells) {
+      // Fast path: membership in the pre-computed map-wide ownership set.
+      return opts.riverCells.has(row * map.width + col);
+    }
+    const drains = drainsIntoThisLiquid(col, row);
+    if (drains === false) return false; // belongs to a different liquid type
+    // Unclassified rivers are owned by exactly one liquid (see
+    // ownsUnclassifiedRivers) so they aren't drawn once per liquid type.
+    if (drains === null && allLiquidTerrains && !opts.ownsUnclassifiedRivers) return false;
+    return true;
+  };
+}
+
+// ---------------------------------------------------------------------------
+// River water
+// ---------------------------------------------------------------------------
+export function buildRiverGeometry(
+  map: HexMap,
+  layout: HexLayout,
+  bounds: ChunkBounds,
+  opts: WaterGeometryOptions = {},
+): THREE.BufferGeometry | null {
+  // River channels overlay land terrain, so ALL their perturbation must match the
+  // terrain mesh (which uses ChunkGeometryOptions), not the liquid's surface noise —
+  // otherwise a per-liquid noiseScale override would wiggle the channel out of the
+  // stream bed carved by HexChunk.
+  const noiseScale     = opts.terrainNoiseScale          ?? 0.35;
+  const perturbStr     = opts.terrainPerturbStrength     ?? 0.8;
+  const elevScale      = opts.elevationScale             ?? ELEVATION_SCALE;
+  const surfaceLift    = opts.surfaceLift                ?? 0.02;
+  const elevPerturbStr = opts.terrainElevPerturbStrength ?? 0.2;
+  const cliffThreshold = opts.cliffThreshold             ?? 2;
+  const riverElevs     = opts.riverElevations;
+  const edgeDirs       = layout.orientation.edgeDirections;
+  const waterTerrains  = opts.waterTerrains ?? new Set([DEFAULT_WATER_TERRAIN_INDEX]);
+  const isWaterTerrain = (t: number) => waterTerrains.has(t);
+  const rendersChannel = createRiverCellFilter(map, layout, opts);
 
   const landCellY = (c: number, r: number): number => {
     const qq = c - (r - (r & 1)) / 2;
@@ -344,24 +389,9 @@ export function buildRiverGeometry(
   for (let row = rowStart; row < rowEnd; row++) {
     for (let col = colStart; col < colEnd; col++) {
       if (!map.inBounds(col, row)) continue;
-
-      const terrain     = map.getTerrain(col, row);
-      const cellIsLiquid = allLiquidTerrains ? allLiquidTerrains.has(terrain) : isWaterTerrain(terrain);
-      const hasRiver    = map.hasRiver(col, row);
-      if (!hasRiver || cellIsLiquid) continue;
+      if (!rendersChannel(col, row)) continue;
 
       const cellKey = row * map.width + col;
-      if (opts.riverCells) {
-        // Fast path: membership in the pre-computed map-wide ownership set.
-        if (!opts.riverCells.has(cellKey)) continue;
-      } else {
-        const drains = drainsIntoThisLiquid(col, row);
-        if (drains === false) continue; // belongs to a different liquid type
-        // Unclassified rivers are owned by exactly one liquid (see
-        // ownsUnclassifiedRivers) so they aren't drawn once per liquid type.
-        if (drains === null && allLiquidTerrains && !opts.ownsUnclassifiedRivers) continue;
-      }
-
       curCi = cellKey;
       vertIds.clear(); // weld within this cell only
 

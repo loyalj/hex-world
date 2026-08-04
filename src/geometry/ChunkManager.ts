@@ -9,6 +9,7 @@ import { WorkerChunkBuilder, type ChunkWorkerLike } from './WorkerChunkBuilder.j
 import { buildWaterGeometry, buildRiverGeometry, computeRiverOwnership, computeRiverFlow, computeRiverElevations, type WaterGeometryOptions } from './WaterChunk.js';
 import { buildShoreGeometry } from './WaterShoreChunk.js';
 import { buildEstuaryGeometry } from './EstuaryChunk.js';
+import { findWaterfalls, buildWaterfallFoamGeometry, buildWaterfallSprayGeometry } from './Waterfalls.js';
 import { buildScatterMeshes } from './ScatterBuilder.js';
 import type { HexHashGrid } from './HexHashGrid.js';
 import type { ScatterDefinition } from './ScatterTypes.js';
@@ -16,7 +17,7 @@ import type { FogData } from './FogData.js';
 import type { TerrainDefinition } from './TerrainTypes.js';
 import { DEFAULT_TERRAIN_DEFINITIONS, buildWaterTerrainSet, buildLiquidTerrainSets } from './TerrainTypes.js';
 import type { LiquidTypeDescriptor, LiquidMaterialSet } from './LiquidTypes.js';
-import { DEFAULT_LIQUID_DESCRIPTORS } from './LiquidTypes.js';
+import { DEFAULT_LIQUID_DESCRIPTORS, liquidMaterialList } from './LiquidTypes.js';
 
 /**
  * Explicit renderOrder for the transparent mesh layers, bottom → top.
@@ -32,6 +33,13 @@ export const RENDER_ORDER_SHORE   = 1;
 export const RENDER_ORDER_ESTUARY = 2;
 export const RENDER_ORDER_RIVER   = 3;
 export const RENDER_ORDER_ROADS   = 4;
+/** Plunge-pool foam — above every liquid layer it churns on top of. */
+export const RENDER_ORDER_WATERFALL_FOAM = 5;
+/**
+ * Waterfall spray — mist in the air, so it composites over the ground overlays
+ * too, but stays under precipitation (10), which is nearer the camera still.
+ */
+export const RENDER_ORDER_WATERFALL_SPRAY = 9;
 
 export interface ChunkManagerOptions {
   map: HexMap;
@@ -96,7 +104,7 @@ export interface ChunkManagerOptions {
  * `loadRadius` of the camera each frame and unloads those that have moved out of
  * range. Each chunk is a single merged `BufferGeometry` draw call for terrain,
  * with optional separate meshes per liquid type for surface, shore, estuary, rivers,
- * plus roads and scatter features.
+ * and waterfall spray/foam, plus roads and scatter features.
  *
  * Call `markDirty(col, row)` after modifying map data to trigger a geometry rebuild
  * for the affected chunk on the next `update()`.
@@ -145,6 +153,8 @@ export class ChunkManager {
   private readonly liquidShoreChunks   = new Map<string, THREE.Mesh>();
   private readonly liquidEstuaryChunks = new Map<string, THREE.Mesh>();
   private readonly liquidRiverChunks   = new Map<string, THREE.Mesh>();
+  private readonly liquidFoamChunks    = new Map<string, THREE.Mesh>();
+  private readonly liquidSprayChunks   = new Map<string, THREE.Points>();
   private readonly roadChunks    = new Map<string, THREE.Mesh>();
   private readonly scatterChunks = new Map<string, THREE.InstancedMesh[]>();
   private readonly dirty         = new Set<string>();
@@ -374,10 +384,7 @@ export class ChunkManager {
     const mats: THREE.Material[] = [this.material];
     if (this.roadMaterial) mats.push(this.roadMaterial);
     for (const ms of this.liquidMaterials.values()) {
-      if (ms.surface) mats.push(ms.surface);
-      if (ms.shore)   mats.push(ms.shore);
-      if (ms.estuary) mats.push(ms.estuary);
-      if (ms.river)   mats.push(ms.river);
+      for (const m of liquidMaterialList(ms)) if (m) mats.push(m);
     }
     return mats;
   }
@@ -553,6 +560,8 @@ export class ChunkManager {
           this.liquidRiverChunks.set(lk, m);
         }
       }
+
+      this.rebuildWaterfalls(liquidId, mats, lk, b, opts);
     }
 
     if (this.roadMaterial && roadsGeo) {
@@ -570,6 +579,69 @@ export class ChunkManager {
         for (const m of scMeshes) this.scene.add(m);
         this.scatterChunks.set(k, scMeshes);
         if (this.fogData) this.applyFogToScatterMeshes(scMeshes);
+      }
+    }
+  }
+
+  /**
+   * (Re)build one chunk's waterfall layers for one liquid: the mist particles
+   * thrown up where each fall lands, and the churning plunge pool under it.
+   *
+   * Both come from the same site list as the channel geometry (identical
+   * ownership filter, flow widths, and carved elevations), so they track the
+   * water exactly and vanish with it. Cliff-edge rivers are rare, so a chunk
+   * without one allocates nothing and the layers are rebuilt whole rather than
+   * patched in place.
+   */
+  private rebuildWaterfalls(
+    liquidId: string,
+    mats: LiquidMaterialSet,
+    lk: string,
+    b: ChunkBounds,
+    opts: WaterGeometryOptions,
+  ): void {
+    const oldFoam = this.liquidFoamChunks.get(lk);
+    if (oldFoam) {
+      this.scene.remove(oldFoam);
+      oldFoam.geometry.dispose();
+      this.liquidFoamChunks.delete(lk);
+    }
+    const oldSpray = this.liquidSprayChunks.get(lk);
+    if (oldSpray) {
+      this.scene.remove(oldSpray);
+      oldSpray.geometry.dispose();
+      this.liquidSprayChunks.delete(lk);
+    }
+
+    if (!mats.waterfallFoam && !mats.waterfallSpray) return;
+    const sites = findWaterfalls(this.map, this.layout, b, opts);
+    if (sites.length === 0) return;
+
+    // Density and footprint are geometry, not shading, so they come from the
+    // descriptor here rather than from the material set.
+    const desc = this.liquidDescriptors.get(liquidId);
+
+    if (mats.waterfallFoam) {
+      const geo = buildWaterfallFoamGeometry(sites, { scale: desc?.poolScale });
+      if (geo) {
+        this.applyFog(mats.waterfallFoam);
+        const m = new THREE.Mesh(geo, mats.waterfallFoam);
+        m.frustumCulled = true;
+        m.renderOrder = RENDER_ORDER_WATERFALL_FOAM;
+        this.scene.add(m);
+        this.liquidFoamChunks.set(lk, m);
+      }
+    }
+
+    if (mats.waterfallSpray) {
+      const geo = buildWaterfallSprayGeometry(sites, { intensity: desc?.sprayIntensity });
+      if (geo) {
+        this.applyFog(mats.waterfallSpray);
+        const pts = new THREE.Points(geo, mats.waterfallSpray);
+        pts.frustumCulled = true;
+        pts.renderOrder = RENDER_ORDER_WATERFALL_SPRAY;
+        this.scene.add(pts);
+        this.liquidSprayChunks.set(lk, pts);
       }
     }
   }
@@ -595,6 +667,12 @@ export class ChunkManager {
 
       const rm = this.liquidRiverChunks.get(lk);
       if (rm) { this.scene.remove(rm); rm.geometry.dispose(); this.liquidRiverChunks.delete(lk); }
+
+      const fm = this.liquidFoamChunks.get(lk);
+      if (fm) { this.scene.remove(fm); fm.geometry.dispose(); this.liquidFoamChunks.delete(lk); }
+
+      const pm = this.liquidSprayChunks.get(lk);
+      if (pm) { this.scene.remove(pm); pm.geometry.dispose(); this.liquidSprayChunks.delete(lk); }
     }
 
     const rdMesh = this.roadChunks.get(k);
@@ -625,7 +703,7 @@ export class ChunkManager {
     // degrade shader animation in long sessions (one sub-frame pop per ~4.5 h).
     this.elapsedSeconds = (this.elapsedSeconds + dt) % 16384;
     for (const ms of this.liquidMaterials.values()) {
-      for (const mat of [ms.surface, ms.shore, ms.estuary, ms.river]) {
+      for (const mat of liquidMaterialList(ms)) {
         // Guarded so custom ShaderMaterials without a uTime uniform don't throw.
         if (mat instanceof THREE.ShaderMaterial && mat.uniforms.uTime) {
           mat.uniforms.uTime.value = this.elapsedSeconds;
@@ -745,6 +823,8 @@ export class ChunkManager {
             this.liquidRiverChunks.set(lk, m);
           }
         }
+
+        this.rebuildWaterfalls(liquidId, mats, lk, b, opts);
       }
 
       const rdMesh = this.roadChunks.get(k);
@@ -1022,6 +1102,16 @@ export class ChunkManager {
   /** Number of shore foam meshes currently in the scene (all liquid types combined). */
   get loadedShoreChunkCount(): number {
     return this.liquidShoreChunks.size;
+  }
+
+  /** Number of waterfall plunge-pool meshes currently in the scene (all liquid types combined). */
+  get loadedWaterfallFoamChunkCount(): number {
+    return this.liquidFoamChunks.size;
+  }
+
+  /** Number of waterfall spray particle systems currently in the scene (all liquid types combined). */
+  get loadedWaterfallSprayChunkCount(): number {
+    return this.liquidSprayChunks.size;
   }
 
   get loadedChunkCount(): number {

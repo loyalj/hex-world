@@ -55,8 +55,20 @@ features from actual need.
   auto-resolved by descriptor id `riverbed`); rivers routed uphill hold a
   level surface and carve a gorge (`computeRiverElevations` running-min)
   instead of climbing as a floating plane.
-- [ ] **Waterfall polish** — the waterfall geometry exists; add spray/mist
-  particles and a foam pool at the base to sell it.
+- [x] **Waterfall polish** *(2026-08-03)* — every cliff-edge river now carries a
+  GPU-animated spray cloud (`buildWaterfallSprayGeometry` +
+  `createWaterfallSprayMaterial`: a plume arcing off the impact point plus a
+  thinner veil drifting down the sheet) and a churning plunge pool welded to the
+  receiving channel — all motion in the vertex shader, one uniform write per
+  frame regardless of how many falls are on screen. `findWaterfalls` derives
+  both from the same ownership filter, flow widths, and carved elevations as
+  `buildRiverGeometry`, so they land exactly where the sheet does and stream in
+  and out with their chunk. Falls inherit the liquid's foam color, flow speed,
+  and emissive by default, then tune through the descriptor: `sprayIntensity`,
+  `sprayColor`, `sprayRise` (energy — the arc's fall is derived from it, so the
+  shape holds at any value), `sprayDrift`, `spraySize`, `poolScale`. The
+  built-in lava throws sparse, heavy, ember-lit ash; acid a fine fume cloud
+  carried well downstream.
 - [ ] **Seasons and snow accumulation** — gradual snowline descent and river
   freeze driven by the temperature model the climate generator already computes,
   blended in the terrain shader. Needs a world-time input and per-cell temperature

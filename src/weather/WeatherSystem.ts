@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { configureTerrainClouds, setTerrainCloudsEnabled, type CloudShadowOptions } from './CloudShadows.js';
 import { PrecipitationLayer, type PrecipitationOptions } from './Precipitation.js';
-import type { LiquidMaterialSet } from '../geometry/LiquidTypes.js';
+import { liquidMaterialList, type LiquidMaterialSet } from '../geometry/LiquidTypes.js';
 
 export type WeatherType = 'clear' | 'rain' | 'snow';
 
@@ -84,7 +84,7 @@ export class WeatherSystem {
     if (this.terrainMaterial) yield this.terrainMaterial;
     if (!this.liquidMaterials) return;
     for (const set of this.liquidMaterials()) {
-      for (const mat of [set.surface, set.shore, set.estuary, set.river]) {
+      for (const mat of liquidMaterialList(set)) {
         if (mat instanceof THREE.ShaderMaterial) yield mat;
       }
     }

@@ -22,7 +22,7 @@ import { buildTerrainTextureArray } from '../geometry/TerrainTextures.js';
 import type { TerrainGridOptions, TerrainMaterialOptions } from '../geometry/TerrainMaterial.js';
 import { configureTerrainGrid, createTerrainMaterial } from '../geometry/TerrainMaterial.js';
 import type { LiquidTypeDescriptor, LiquidMaterialSet } from '../geometry/LiquidTypes.js';
-import { DEFAULT_LIQUID_DESCRIPTORS, resolveLiquidMaterials } from '../geometry/LiquidTypes.js';
+import { DEFAULT_LIQUID_DESCRIPTORS, resolveLiquidMaterials, liquidMaterialList } from '../geometry/LiquidTypes.js';
 import { createRoadMaterial } from '../geometry/RoadMaterial.js';
 import { RtsCameraController } from '../camera/RtsCameraController.js';
 import { SunShadowRig, type SunShadowOptions } from '../lighting/SunShadows.js';
@@ -532,7 +532,7 @@ export class HexWorld {
     const reused  = new Set([...newMats.values()]);
     for (const set of this.liquidMaterials.values()) {
       if (reused.has(set)) continue;
-      for (const m of [set.surface, set.shore, set.estuary, set.river]) m?.dispose();
+      for (const m of liquidMaterialList(set)) m?.dispose();
     }
     this._liquidDescriptors = descriptors;
     this.liquidMaterials    = newMats;
@@ -555,7 +555,7 @@ export class HexWorld {
     this.sunShadows?.dispose();
     this.terrainMaterial.dispose();
     for (const set of this.liquidMaterials.values()) {
-      for (const m of [set.surface, set.shore, set.estuary, set.river]) m?.dispose();
+      for (const m of liquidMaterialList(set)) m?.dispose();
     }
     this.renderer.dispose();
     this.renderer.domElement.remove();
