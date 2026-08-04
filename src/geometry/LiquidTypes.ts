@@ -73,15 +73,31 @@ export interface LiquidTypeDescriptor {
    */
   sprayColor?: number;
   /**
-   * How high the plume is thrown, world units — the liquid's "energy" knob.
-   * The arc's fall is derived from it, so the shape holds at any value.
-   * Default 0.75; a viscous liquid barely clears its pool at ~0.3.
+   * How far a puff climbs over its life, world units — the liquid's "energy"
+   * knob. Mist rises monotonically (no ballistic arc), so this is the height
+   * the cloud reaches. Default 0.75; a viscous liquid barely clears its pool
+   * at ~0.3.
    */
   sprayRise?: number;
-  /** How far downstream mist carries over its life, world units. Default 0.55. */
+  /**
+   * Whether the spray rises or is thrown, 0–1 — the axis that separates the
+   * two things "spray" can mean.
+   *
+   * At 0 it is mist: it climbs steadily, wanders on turbulence, swells and
+   * thins as it goes, and never falls back. At 1 it is spatter: a real
+   * ballistic arc that peaks and lands, flying outward from the impact,
+   * holding its size and opacity until it dies, and largely ignoring air
+   * currents. Per-particle alpha is allowed higher as this rises, since
+   * thrown droplets separate instead of stacking up.
+   *
+   * Default 0. Water and acid are mist; the built-in lava is 1.
+   */
+  sprayArc?: number;
+  /** How far downstream spray carries over its life, world units. Default 0.55. */
   sprayDrift?: number;
   /**
-   * Particle size in pixels at 110 world units of depth. Default 7. Bigger
+   * Particle size in pixels at 110 world units of depth (attenuation is
+   * clamped, so this is not the on-screen size up close). Default 3.5. Bigger
    * reads as slow smoke or steam, smaller as fine water mist.
    */
   spraySize?: number;
@@ -129,15 +145,16 @@ export const DEFAULT_LIQUID_DESCRIPTORS: LiquidTypeDescriptor[] = [
     shallowColor: 0x527fb3, deepColor: 0x1e477a, foamColor: 0xeaf3ff },
   // Lava inverts the usual depth reading: deepColor is HOTTER, not darker, so
   // the pool center looks molten while the edges read as cooling crust.
-  // A lava fall throws ash, not froth: sparse, heavy, barely clearing the pool,
-  // in big slow puffs. The liquid's emissive still lights them from within, so
-  // they read as glowing embers rather than grey smoke.
+  // A lava fall doesn't mist — molten rock is THROWN. `sprayArc: 1` swaps the
+  // rising cloud for ballistic spatter that arcs out of the impact and lands,
+  // sparse and heavy, holding its size. Dark ash color, but the liquid's own
+  // emissive lights each droplet from within, so they read as glowing embers.
   { id: 'lava',  name: 'Lava',
     shallowColor: 0xd45a10, deepColor: 0xffb832, foamColor: 0xf2b24c,
     opacity: 1.0, flowSpeed: 0.25, waveScale: 0.5,
     emissiveColor: 0xff5a00, emissiveStrength: 0.6,
-    sprayIntensity: 0.55, sprayColor: 0x4a3b33, sprayRise: 0.3,
-    sprayDrift: 0.3, spraySize: 12, poolScale: 0.75 },
+    sprayIntensity: 0.55, sprayColor: 0x4a3b33, sprayArc: 1, sprayRise: 0.45,
+    sprayDrift: 0.3, spraySize: 6, poolScale: 0.75 },
   // Acid is thin and volatile — a fine, pale fume cloud carried well past the
   // fall, over a pool that spreads wider than water's.
   { id: 'acid',  name: 'Acid',
@@ -145,7 +162,7 @@ export const DEFAULT_LIQUID_DESCRIPTORS: LiquidTypeDescriptor[] = [
     opacity: 0.9, flowSpeed: 0.6,
     emissiveColor: 0x66ff33, emissiveStrength: 0.15,
     sprayIntensity: 1.2, sprayColor: 0xd8ffa8, sprayRise: 0.9,
-    sprayDrift: 0.8, spraySize: 6, poolScale: 1.15 },
+    sprayDrift: 0.8, spraySize: 3, poolScale: 1.15 },
 ];
 
 // ---------------------------------------------------------------------------
@@ -182,6 +199,7 @@ export function resolveLiquidMaterials(descriptor: LiquidTypeDescriptor): Liquid
       // its own — the common case, and what makes water look right untuned.
       foam:    descriptor.sprayColor != null ? new THREE.Color(descriptor.sprayColor) : appearance.foam,
       rise:    descriptor.sprayRise,
+      arc:     descriptor.sprayArc,
       drift:   descriptor.sprayDrift,
       size:    descriptor.spraySize,
     }),

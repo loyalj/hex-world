@@ -280,7 +280,11 @@ export function buildWaterfallFoamGeometry(
 export interface WaterfallSprayOptions {
   /** Density multiplier; 0 emits nothing. Default 1. */
   intensity?: number;
-  /** Particles emitted by an average fall at intensity 1. Default 26. */
+  /**
+   * Particles emitted by an average fall at intensity 1. Default 44 — density
+   * is what merges sprites into continuous haze, so this is the lever to reach
+   * for before per-particle alpha, which saturates to white.
+   */
   particlesPerSite?: number;
   /** Hard cap per fall, so a huge river doesn't blow the budget. Default 128. */
   maxPerSite?: number;
@@ -318,7 +322,7 @@ export function buildWaterfallSprayGeometry(
   const intensity = opts.intensity ?? 1;
   if (sites.length === 0 || intensity <= 0) return null;
 
-  const per = opts.particlesPerSite ?? 26;
+  const per = opts.particlesPerSite ?? 44;
   const cap = opts.maxPerSite       ?? 128;
 
   // Bigger falls throw more water: scale with the drop and the channel width.

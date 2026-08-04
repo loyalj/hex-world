@@ -65,10 +65,11 @@ features from actual need.
   `buildRiverGeometry`, so they land exactly where the sheet does and stream in
   and out with their chunk. Falls inherit the liquid's foam color, flow speed,
   and emissive by default, then tune through the descriptor: `sprayIntensity`,
-  `sprayColor`, `sprayRise` (energy — the arc's fall is derived from it, so the
-  shape holds at any value), `sprayDrift`, `spraySize`, `poolScale`. The
-  built-in lava throws sparse, heavy, ember-lit ash; acid a fine fume cloud
-  carried well downstream.
+  `sprayColor`, `sprayArc`, `sprayRise`, `sprayDrift`, `spraySize`,
+  `poolScale`. `sprayArc` is the axis that matters — 0 is mist (climbs, frays
+  on turbulence, swells and thins, never falls back), 1 is spatter (ballistic
+  arc that peaks and lands, flying outward, holding size and opacity). Water
+  and acid mist; the built-in lava throws sparse ember-lit droplets.
 - [ ] **Seasons and snow accumulation** — gradual snowline descent and river
   freeze driven by the temperature model the climate generator already computes,
   blended in the terrain shader. Needs a world-time input and per-cell temperature

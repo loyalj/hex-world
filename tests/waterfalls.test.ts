@@ -242,10 +242,15 @@ describe('waterfall materials', () => {
     expect((mats.waterfallFoam as THREE.ShaderMaterial).uniforms.uFoamIntensity.value).toBe(2);
   });
 
-  it('keeps spray a haze even for an opaque liquid', () => {
+  it('keeps per-particle alpha well under the liquid’s own opacity', () => {
+    // Particles overlap heavily near the fall; anything near the liquid's own
+    // opacity composites into a solid ball.
     const lava = resolveLiquidMaterials(DEFAULT_LIQUID_DESCRIPTORS[1]); // opacity 1.0
     expect((lava.surface as THREE.ShaderMaterial).uniforms.uOpacity.value).toBe(1);
-    expect((lava.waterfallSpray as THREE.ShaderMaterial).uniforms.uOpacity.value).toBeLessThanOrEqual(0.6);
+    expect((lava.waterfallSpray as THREE.ShaderMaterial).uniforms.uOpacity.value).toBeLessThan(0.75);
+
+    const water = resolveLiquidMaterials(DEFAULT_LIQUID_DESCRIPTORS[0]);
+    expect((water.waterfallSpray as THREE.ShaderMaterial).uniforms.uOpacity.value).toBeLessThan(0.4);
   });
 });
 
@@ -259,7 +264,7 @@ describe('per-liquid waterfall tuning', () => {
     expect((u.uFoamColor.value as THREE.Color).r).toBeCloseTo(0);
     expect(u.uRise.value).toBe(0.75);
     expect(u.uDrift.value).toBe(0.55);
-    expect(u.uSize.value).toBe(7);
+    expect(u.uSize.value).toBe(4.5);
   });
 
   it('takes descriptor overrides for mist color, energy, drift, and size', () => {
@@ -274,17 +279,33 @@ describe('per-liquid waterfall tuning', () => {
     expect(u.uSize.value).toBe(12);
   });
 
-  it('derives gravity from rise so the arc holds its shape at any energy', () => {
-    const low  = sprayUniforms({ id: 'a', name: 'A', sprayRise: 0.3 });
-    const high = sprayUniforms({ id: 'b', name: 'B', sprayRise: 1.5 });
-    expect(low.uGravity.value  / low.uRise.value).toBeCloseTo(high.uGravity.value / high.uRise.value);
-    // The pre-tuning defaults are what that ratio reproduces.
-    expect(sprayUniforms({ id: 'c', name: 'C' }).uGravity.value).toBeCloseTo(0.5);
+  it('defaults to rising mist, with no gravity uniform to tune', () => {
+    const mat = createWaterfallSprayMaterial();
+    expect(mat.uniforms.uArc.value).toBe(0);
+    // Gravity is implicit in the arc term (k·life·(1−life)), so it scales with
+    // rise instead of needing — and drifting out of sync with — its own knob.
+    expect(mat.uniforms.uGravity).toBeUndefined();
+    expect(mat.vertexShader).not.toContain('uGravity');
   });
 
-  it('lets the material factory override the derived gravity outright', () => {
-    const u = createWaterfallSprayMaterial({ rise: 0.3, gravity: 2 }).uniforms;
-    expect(u.uGravity.value).toBe(2);
+  it('exposes turbulent wander for the material factory', () => {
+    expect(createWaterfallSprayMaterial().uniforms.uSway.value).toBe(0.13);
+    expect(createWaterfallSprayMaterial({ sway: 0.4 }).uniforms.uSway.value).toBe(0.4);
+  });
+
+  it('switches to thrown spatter via sprayArc, and clamps it to 0–1', () => {
+    expect(sprayUniforms({ id: 'l', name: 'L', sprayArc: 1 }).uArc.value).toBe(1);
+    expect(sprayUniforms({ id: 'm', name: 'M', sprayArc: 0.4 }).uArc.value).toBe(0.4);
+    expect(sprayUniforms({ id: 'n', name: 'N', sprayArc: 5 }).uArc.value).toBe(1);
+    expect(sprayUniforms({ id: 'o', name: 'O', sprayArc: -2 }).uArc.value).toBe(0);
+  });
+
+  it('lets thrown droplets carry more alpha than stacking mist', () => {
+    // Mist piles up at one point and saturates; spatter separates as it flies.
+    const mist   = sprayUniforms({ id: 'p', name: 'P' }).uOpacity.value as number;
+    const thrown = sprayUniforms({ id: 'q', name: 'Q', sprayArc: 1 }).uOpacity.value as number;
+    expect(thrown).toBeGreaterThan(mist);
+    expect(thrown).toBeLessThan(1);
   });
 
   it('scales the plunge-pool footprint with poolScale', () => {
@@ -311,6 +332,9 @@ describe('per-liquid waterfall tuning', () => {
     expect(lava.spraySize!).toBeGreaterThan(acid.spraySize!);
     expect(lava.poolScale!).toBeLessThan(acid.poolScale!);
     expect(lava.sprayIntensity!).toBeLessThan(acid.sprayIntensity!);
+    // Molten rock is thrown; acid vapor rises.
+    expect(lava.sprayArc).toBe(1);
+    expect(acid.sprayArc ?? 0).toBe(0);
 
     // Lava's ash is not its foam color, and its emissive still lights it.
     const u = (resolveLiquidMaterials(lava).waterfallSpray as THREE.ShaderMaterial).uniforms;
