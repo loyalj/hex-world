@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { configureTerrainClouds, setTerrainCloudsEnabled, type CloudShadowOptions } from './CloudShadows.js';
 import { PrecipitationLayer, type PrecipitationOptions } from './Precipitation.js';
+import { Wind } from './Wind.js';
 import { liquidMaterialList, type LiquidMaterialSet } from '../geometry/LiquidTypes.js';
 
 export type WeatherType = 'clear' | 'rain' | 'snow';
@@ -8,7 +9,11 @@ export type WeatherType = 'clear' | 'rain' | 'snow';
 export interface WeatherOptions {
   /** Strength 0–1: scales particle density/opacity and cloud-shadow darkness. Default 1. */
   intensity?: number;
-  /** Wind in world units/sec — drifts the clouds AND streaks/blows the precipitation. Default (1.6, 0.9). */
+  /**
+   * Sustained wind in world units/sec — drifts the clouds AND streaks/blows
+   * the precipitation. Default (1.6, 0.9). Sets the shared {@link Wind}'s base
+   * vector, so it reaches anything else that wind is driving.
+   */
   wind?: THREE.Vector2;
   /**
    * Cloud shadows: `false` disables, `true`/omitted uses the per-type preset,
@@ -30,6 +35,11 @@ export interface WeatherOptions {
    * an effect once a {@link SkyDome} is wired up.
    */
   overcast?: number;
+  /**
+   * How much of the world wind the falling particles take, 0–1. Default 0.1.
+   * @see WeatherSystem.windResponse
+   */
+  windResponse?: number;
   /** Overrides for the particle layer (count, fall speed, color, …). */
   precipitation?: Omit<PrecipitationOptions, 'type' | 'intensity' | 'wind'>;
 }
@@ -82,8 +92,45 @@ export interface OvercastTarget {
  * weather.update(dt, controls.targetPosition);
  */
 export class WeatherSystem {
-  /** Wind in world units/sec. Mutate freely — clouds turn smoothly. */
-  readonly wind = new THREE.Vector2(1.6, 0.9);
+  private readonly _wind: Wind;
+  /** True when this system created its own wind and must therefore advance it. */
+  private readonly ownsWind: boolean;
+
+  /**
+   * The sustained wind in world units/sec. Mutate freely — clouds turn
+   * smoothly, because the drift offset is integrated rather than recomputed.
+   *
+   * This is {@link windField}'s `base` vector, so writing here is writing to
+   * the shared wind the whole world reads.
+   */
+  get wind(): THREE.Vector2 { return this._wind.base; }
+
+  /**
+   * The full shared {@link Wind} — gusts, sway phase, water drift — of which
+   * {@link wind} is the sustained vector. Hand the same one to a `HexWorld`
+   * (or let it hand you one) and the trees bend to the weather that is falling
+   * on them.
+   */
+  get windField(): Wind { return this._wind; }
+
+  /**
+   * How much of the world wind the falling particles take, 0–1. Default 0.1.
+   *
+   * Deliberately far below 1. The wind that bends a tree is measured against
+   * the tree standing still, but rain is *already moving* — it is falling at
+   * several times the wind's own speed, and it only spends a second or two in
+   * the air. Handing the particles the full ground wind slants the fall as hard
+   * as a gale and makes every gust visible as a lurch across the whole sky,
+   * which reads as the camera moving rather than as weather. A tenth is enough
+   * to see the rain lean the way the trees do without either of those.
+   *
+   * It scales the drift and the streak angle together, so raising it tilts the
+   * fall and lengthens the sideways travel as one thing.
+   */
+  windResponse = 0.1;
+
+  /** Reused scratch: the wind the particles actually get. */
+  private readonly precipWind = new THREE.Vector2();
 
   private readonly scene: THREE.Object3D;
   private terrainMaterial: THREE.ShaderMaterial | null;
@@ -120,7 +167,15 @@ export class WeatherSystem {
      * style accessors.
      */
     liquidMaterials?: () => Iterable<LiquidMaterialSet>;
+    /**
+     * The world's shared {@link Wind}. Omit and this system keeps a private one
+     * (and advances it itself); pass one — as `HexWorld` does — and the clouds
+     * and rain answer the same wind that bends the trees.
+     */
+    wind?: Wind;
   }) {
+    this._wind   = opts.wind ?? new Wind();
+    this.ownsWind = !opts.wind;
     this.scene = opts.scene;
     this.terrainMaterial = opts.terrainMaterial ?? null;
     this.roadMaterial    = opts.roadMaterial ?? null;
@@ -160,6 +215,7 @@ export class WeatherSystem {
   setWeather(type: WeatherType, opts: WeatherOptions = {}): void {
     this._type = type;
     if (opts.wind) this.wind.copy(opts.wind);
+    if (opts.windResponse !== undefined) this.windResponse = Math.max(0, opts.windResponse);
 
     const preset = CLOUD_PRESETS[type];
     this.clouds = {
@@ -183,7 +239,7 @@ export class WeatherSystem {
       this.layer = new PrecipitationLayer({
         ...opts.precipitation,
         type,
-        wind: this.wind,
+        wind: this.particleWind(),
       }).addTo(this.scene);
       // Gate particles by the cloud field only while the clouds exist and the
       // coverage leaves dry gaps (precipCoverage 1 = rain everywhere).
@@ -278,16 +334,29 @@ export class WeatherSystem {
    * update the particle layer. `center` is the camera's ground target.
    */
   update(dt: number, center: { x: number; y?: number; z: number }): void {
-    this.offset.addScaledVector(this.wind, dt);
+    if (this.ownsWind) this._wind.advance(dt);
+
+    // The deck drifts by the SUSTAINED wind, not the gusted one: a two-second
+    // gust moves the hedge below, and an overcast sky that surged with it would
+    // read as the whole world sliding.
+    this.offset.addScaledVector(this._wind.base, dt);
     for (const mat of this.cloudMaterials()) {
       const u = mat.uniforms;
       if ('uCloudOffset' in u) (u.uCloudOffset.value as THREE.Vector2).copy(this.offset);
     }
     if (this.layer) {
       this.layer.setCloudOffset(this.offset);
-      this.layer.setWind(this.wind);
+      // Falling rain is in the surface layer, so it takes the gust — the same
+      // surge that is bending the trees it is landing on, at windResponse of
+      // its strength.
+      this.layer.setWind(this.particleWind());
       this.layer.update(dt, center);
     }
+  }
+
+  /** The surface wind scaled to what falling particles should answer to. */
+  private particleWind(): THREE.Vector2 {
+    return this.precipWind.copy(this._wind.surface).multiplyScalar(this.windResponse);
   }
 
   /** Remove particles, switch off cloud shadows, clear the sky, free resources. */

@@ -63,6 +63,156 @@ features from actual need.
   `<colorspace_fragment>` so both sides reach exactly `uAtmoColor`. HexWorld:
   `sky: true` / `setSky(...)`, re-derived on terrain swaps, scatter materials
   auto-attached. Demo: `[K]`.
+- [x] **God rays / crepuscular shafts** *(2026-08-08)* — `GodRays`: the scene is
+  re-rendered at a quarter resolution with every material overridden to flat
+  black on a white clear, giving a mask of where the sky is open, and a
+  full-screen quad then marches that mask from each pixel toward the sun's
+  screen point with a per-step decay and adds the result to the frame.
+  **Deliberately not a composer.** The main render never goes through a target,
+  so the renderer's MSAA survives and nothing re-encodes an already-final image
+  — the same colour-space trap `attachAtmosphere` exists to dodge, and the
+  reason the composer item below stayed open. Call it straight after
+  `renderer.render(scene, camera)`.
+  It is a sink like the dome, and takes `sunDir` rather than `lightDir`: the
+  moon is the active light after dark, and pointing the shafts at it would fan
+  them out of the wrong side of the sky. The gates it shares with the
+  atmosphere are `daylight` (these *are* scattered light) and
+  `1 - overcast * 0.92`, read straight off the attached `SkyDome` so weather
+  reaches them with nothing wired. Sun height it shares only at the *bottom* —
+  the same `-0.05` cutoff as the dome's disc, since below the horizon the world
+  is in the way — but it reaches full by `0.02` rather than the dome's `0.1`,
+  because `daylight` is already a ramp over sun height and applying both would
+  square it, dimming the rays to nothing across exactly the dawn and dusk hours
+  they belong to. Two more gates are the pass's own, both fades rather than
+  pops: the projection mirrors behind the camera, and a pitched RTS camera
+  looks *down*, so the sun spends most of the day above the top edge — the
+  off-frame fade therefore runs out to ~3× the frame, which is cheap in
+  artifacts because `decay` already weights the clamped off-screen tail least.
+  With the gate shut the whole pass is skipped, which is most of the clock.
+  `intensity` means "brightness added at the sun" — the gain is divided by
+  Σ decay^i, so changing `decay` (how far the shafts throw) or `samples` (the
+  one real cost knob) doesn't silently rescale it. Ray colour follows the sun's
+  own, so dawn shafts go orange with the light. The dome is excluded from the
+  occlusion pass — it is the light, not an obstacle — and `exclude()` takes
+  particles and overlays. HexWorld: `godRays: true` / `setGodRays(...)`.
+  Demo: `[X]`, plus `[Y]` to swing to the sun and drop to the shallowest tilt.
+  Editor: View ▸ God rays, on by default.
+  **This shipped invisible, and the reason was the camera, not the pass.**
+  `RtsCameraController` had no yaw, so the view axis was always −Z, while
+  `DayNightCycle`'s arc tilts 30° toward +Z: sweeping all 1440 minutes, the
+  closest the sun ever came to the view axis while it was up was *exactly 90°*,
+  and the measured strength was 0.0000 at every minute at every pitch. The
+  30° pitch floor was the second wall — with a 45° vertical FOV the top of the
+  frame sat 7.5° *below* horizontal, so no sky reached the screen at all. Both
+  are fixed under "Camera can look at the sky" below; the same sweep now peaks
+  at 0.995 an hour after sunrise. Lesson worth keeping: before tuning a
+  screen-space effect, check the set of directions the camera can be pointed
+  at — no constant in the shader can fix a sun that is never on screen.
+- [x] **Map skirt — the map as a solid, not a surface** *(2026-08-08)* —
+  `MapSkirt` + `MapSkirtCore` + `SkirtMaterial`: a wall of cut earth around the
+  map's perimeter, top following the terrain's own contour, base one flat floor
+  under everything. Fell straight out of the camera work above — the moment the
+  tilt floor let the horizon into frame, the first thing on screen was daylight
+  under the map's edges.
+  Seam-tightness is the whole problem, and it is solved by *sharing* rather
+  than approximating: the terrain's vertex perturbation is a pure function of
+  world XZ, so calling the same function with the same options puts the skirt's
+  top vertices exactly where the terrain's edge vertices already are. **The
+  first cut shipped with the seam torn open**, because "the same options" were
+  hand-copied defaults and one had drifted — `noiseScale` 0.06 against the
+  terrain's 0.35, which is not a near miss but a different noise field
+  entirely. The four options that decide where a vertex lands are now
+  `CHUNK_GEOMETRY_DEFAULTS`, exported from HexChunkCore and *imported* here, and
+  a test builds real terrain and a real skirt from one map and requires the
+  inner ring to be coincident with terrain vertices rather than close to them.
+  Every default that has to agree across two builders should be shared this way;
+  a comment saying "must match" is not a mechanism. It
+  follows the five-point polyline the boundary fan actually emits, not the two
+  endpoints — every one of those points is perturbed independently, so the
+  midpoints do *not* lie on the line between the ends and a two-point wall
+  would gap. `HexWorld` forwards its own `geometryOptions`, since a mismatch
+  tears the seam along the entire edge rather than showing up as anything
+  subtle. The strip from the terrain's inset ring out to the full hex edge is
+  capped with a flat lip at ground height, so the cut reads as ground
+  continuing to the very rim.
+  The floor is derived from the elevation *range* plus exact worst-case bounds
+  (elevation jitter, carved river beds) rather than by sampling cells, so no
+  cell whose noise happened to dip further can poke through. Strata key off
+  **world Y**, never a per-face coordinate: that is what carries a layer's
+  level around every corner and makes four walls read as one block instead of
+  four painted panels. Bands pick colours by hash rather than gradient (real
+  bedding puts pale silt straight onto dark loam), with a dark topsoil line
+  under the turf. It borrows the terrain's `uLightDir`/`uLightColor`/`uAmbient`
+  so it darkens at dusk with the ground it holds up — `DayNightTargets` gained
+  a general `lightMaterials` for exactly this — and carries the shared
+  atmosphere haze, being the surface that most needs to dissolve into the
+  horizon rather than end against it.
+  **Corner seals** close the last hole. Three cells meet at every hex corner;
+  where one is off the map the terrain skips the corner fill that would have
+  joined the other two, and a flat per-face lip leaves an open wedge between
+  two rim cells of different elevation — sky, straight through the block. Each
+  wedge is bridged by a fan from the shared corner across the open end of the
+  bridge between the two cells, a vertical riser at that corner (which
+  genuinely exists at *both* heights, one per lip, and so takes a horizontal
+  normal — shading it as ground lights a wall like a floor and leaves its
+  winding undecidable), and soil down to the floor beneath as a backstop.
+  The fan **traces the terrain's terrace profile**, and has to: a terraced
+  slope is a staircase, and a straight line across it passes under every tread,
+  which is the sky showing through between the steps. `TERRACE_STEPS`,
+  `terraceFactors`, and `edgeTypeOf` are exported from HexChunkCore and shared
+  the same way the geometry defaults are — the interpolation is deliberately
+  *not* linear (`v` advances on every other step, which is what makes a tread
+  flat) and would have been impossible to guess. Flat and cliff edges really
+  are straight, so those stay two points. Sealing only the *starting* corner of each boundary
+  face visits every wedge exactly once — verified by counting, since twice
+  would z-fight and never would leave the hole.
+  Triangle winding is now enforced against the normal inside the emitter rather
+  than ordered by hand. Hex corner order is not obvious enough to reason about:
+  the lip and the wall were both inside-out on the first attempt, and the
+  corner riser was degenerate on the second.
+  The top follows the **ground** even under water, so a coast is cut honestly:
+  soil to the sea bed, then the water's own cross-section above it (`waterCut`,
+  on by default — without it every coastline keeps an open slot between bed and
+  surface). Water is identified by **terrain index**, the way the liquid
+  builders do it, not by the cell's `FLAG_WATER`: the first cut used the flag
+  and the band never fired on a real map, leaving exactly the slot it exists to
+  close. `waterTerrains` takes a custom liquid palette. Only the perimeter is built — `O(width + height)` — so it is recut
+  outright on every edit rather than needing chunk machinery.
+  *Known gap, left open deliberately:* a river running off the map edge carves
+  below the cell top while the wall's top is flat across the face, so a river
+  mouth exactly on the rim leaves a small notch. Closing it means mirroring
+  HexChunkCore's river branch here, which is the duplication that has already
+  bitten the waterfall code. `HexWorld`: `skirt: true` / `setSkirt(...)`.
+  Demo: `[I]`. Editor: View ▸ Map skirt, on by default.
+- [x] **Camera can look at the sky** *(2026-08-08)* — `RtsCameraController`
+  gains **yaw**: the camera now swings around its target instead of being
+  welded to the +Z side looking down −Z. Middle-drag became one two-axis
+  gesture (up/down tilts, left/right turns), and `rotateTo` / `rotateBy` /
+  `tiltTo` drive it from code — `rotateTo` takes the short way round, so 170°
+  to −170° is a 20° swing and not a 340° unwind, while `rotateBy` accumulates
+  past a full turn because that is what a "spin the view" binding wants. Yaw
+  is unclamped; a compass has no ends. At yaw 0 the placement math reduces
+  exactly to what it was, so every existing scene is untouched — there is a
+  regression test pinning that.
+  The **pitch floor drops from 30° to 6°** (`RtsCameraController`, `HexWorld`,
+  demo, editor). Above roughly half the vertical FOV the horizon never enters
+  the frame, which is a silent, total ceiling on every sky feature the library
+  has: the dome, the star field, sunrise and sunset colour, and the god rays
+  were all drawing things the camera was structurally unable to look at.
+  Panning degrades gracefully rather than breaking — `groundHit` simply
+  returns null for rays aimed above the horizon, so a drag that starts on sky
+  is a no-op instead of a lurch. Demo: middle-drag, `[Y]` to face the sun.
+  Both constraints are then **runtime-settable**, so the extra freedom is a
+  choice rather than something imposed on every project: `setPitchLimits` and
+  `setYawEnabled`. Tightening the limits glides the current angle back inside
+  them instead of snapping, and locking the heading swings it to rest (0) the
+  short way — from 350° it goes forward 10° to 360, not back the way it came —
+  then makes the drag gesture and both rotate calls no-ops, so a fixed-heading
+  mode cannot be nudged out of alignment. The library deliberately ships the
+  mechanism and no named modes: which limits count as "RTS" is a question
+  about the game, not about the camera. Editor: **View ▸ Camera ▸ RTS / Free**,
+  a radio pair whose presets (`rts` 30–66° heading-locked, `free` 6–80° free
+  look) live next to the UI that offers them; opens in Free.
 - [x] **River channel polish** *(2026-08-03, from visual review)* — waterfall
   water now actually renders on the cliff face (notched backstop wall +
   groove-hugging sheet welded to the downstream channel); channel walls flare
@@ -259,6 +409,174 @@ features from actual need.
   weights, and the fragment shader normalizes by their sum, so the factor
   divided straight back out — the map had been rendering with no AO at all. It
   also only ever ran on flat interior fans, never the cliff faces it was for.
+- [x] **Cliff strata** *(2026-08-08)* — the terrain shader already projects
+  triplanar, so a vertical face has never taken the flat ground's XZ projection;
+  what it lacked was *structure*. Grain tells you a wall is rock, but only
+  layering tells you how tall it is, and a carved gorge with no bedding reads as
+  a dark wall rather than as depth. `cliffStrata` bands the surface color along
+  world height: a per-bed value and colour draw plus a hairline dark seam at each
+  bedding plane, which is the part the eye actually counts. Because the bands are
+  a function of world position and nothing else, they run **continuous across
+  cells** — a canyon cut through six hexes reads as one cut through one rock
+  instead of as six adjacent walls — and they pick out every terrace step for
+  free.
+  The parts that took thought:
+  **Beds are neither level nor evenly spaced.** A regional dip (`tilt`) plus a
+  low-frequency warp keeps two unrelated cliffs from sharing a stripe at the same
+  altitude, which is the tell that gives a decal away; and the band coordinate is
+  bent by two sines *before* it is quantized, so thickness varies without a
+  per-bed table. The amplitudes are picked to keep that bend's derivative
+  positive (min ≈ 0.41) — a fold would run `floor()` backwards and mirror a bed
+  into the middle of the sequence.
+  **The derivative is taken before the branches.** `fwidth` is undefined under
+  non-uniform control flow, and the early-outs (flat ground, green surfaces,
+  too-distant) diverge along exactly the cliff silhouette and the grass line —
+  the two edges where a garbage derivative would be most visible. Band
+  coordinate and `fwidth` are therefore computed unconditionally at the top, and
+  everything else branches after. That derivative does double duty: it widens
+  the seam into a soft gradient at distance instead of a moiré, and fades the
+  whole pattern out once a bed is under a pixel, so a far cliff stops crawling
+  as the camera moves.
+  **It knows rock from grass the way the foliage tint knows leaves** — by the
+  surface's own relative green — but with a *local* copy of that test rather
+  than a call to `foliageMask`, because that one is switched off by
+  `uFoliageSelect: 0` for a mesh that is foliage all over, and strata must not
+  follow it into deciding rock is a leaf. Bedding goes on before the seasonal
+  turn and before snow: snow lies on the bands, it is not banded itself.
+  On by default, unlike the grid and the seasons — it is a property of rock
+  rather than a mode to opt into, and it needs no data the material doesn't
+  already carry. `configureCliffStrata` / `setCliffStrataEnabled` /
+  `HexWorld.setCliffStrata`, plus `TerrainMaterialOptions.strata` so a `.hexpack`
+  ships the bedding that matches its rock. The triplanar blend exponent became
+  `TerrainMaterialOptions.triplanarSharpness` at its existing value of 8 (clamped
+  to ≥1: `pow(0, 0)` on an axis-aligned face is NaN pixels, not a soft blend),
+  which is the one lever that side of it was missing. Demo: `[B]`.
+- [x] **Scatter texture** *(2026-08-09)* — the terrain shader puts real texture
+  on the ground (triplanar samples, splat blending, bedding on the cliffs) and a
+  tree standing in it was a handful of large facets of one flat green. The
+  mismatch, not the plant, is what read as plastic — and the bigger the canopy
+  facet the worse it got. `attachScatterTexture` multiplies fine procedural
+  value noise into `diffuseColor` on a scale finer than a facet, so each flat
+  plane stops being perfectly uniform while its edges stay exactly as crisp.
+  Explicitly *not* an attempt to soften the faceting: the low-poly silhouette is
+  the look, and this only touches the colour inside it.
+  The parts that took thought:
+  **The noise coordinate is the raw `position` attribute, not `transformed`.**
+  `transformed` is what wind sway bends, so sampling it would drag the mottling
+  across the canopy every time the plant leaned — a texture that swims over a
+  surface reads as a shader bug even when the motion is small. `position` never
+  moves. The instance *origin* is added to decorrelate one plant from the next,
+  but not the full instance matrix: rotating the pattern with the tree costs a
+  matrix multiply to achieve something nobody can see.
+  **`fwidth` before the branch, and a fade under a pixel.** Same lesson the
+  cliff strata learned: derivatives are undefined under non-uniform control
+  flow, so the derivative is taken unconditionally at the top and everything
+  else branches after. The fade matters more here than it did there, because a
+  sub-pixel noise does not average into a tint — it crawls as the camera moves,
+  and a whole forest of crawling trees is far worse than a flat one.
+  **Multiplicative, and before the season slot.** Multiplying preserves hue,
+  survives the tint recolouring underneath it, and is exactly a no-op at
+  strength 0; an additive term would wash a dark trunk and a bright canopy by
+  the same absolute amount and grey both. Landing before `SEASON_COLOR_SLOT`
+  puts it under both seasonal effects however they were attached — the foliage
+  tint recolours a mottled surface rather than flattening it, and snow settles
+  on top, which is what snow does to a texture. There is a test that scrambles
+  the attach order and asserts the composed ordering anyway.
+  Needs no data and no per-frame driver — unlike every other attach here it is
+  inert-or-on from the moment it is called. Scale is authored per material
+  against *facet* size rather than plant size (pine 5, broadleaf 6, rock 9, bush
+  11). Demo: `[P]`; the editor gets a strength slider under Environment.
+- [x] **Wind system** *(2026-08-08)* — `WeatherSystem` already owned a wind
+  vector, but only the clouds and the rain could see it, and nothing on the
+  ground moved at all. `Wind` promotes it to a property of the world: one
+  vector, advanced once a frame, that the cloud deck drifts by, the rain slants
+  and streaks along, the ripple pattern marches across open water with, and
+  every plant bends downwind to. `HexWorld` owns one eagerly and hands it to the
+  `WeatherSystem` it builds, so `setWind` and `setWeather` compose in either
+  order and the two can never disagree about which way the weather is going.
+  `setMaterialWind` fans it out over a mixed material list in one pass, skipping
+  whatever carries neither uniform family — the same shape as
+  `setAtmosphereColor`.
+  The parts that took thought:
+  **The gust travels.** A scalar multiplier on the whole world is the tell that
+  gives a wind away — every tree leans at the same instant, which reads as one
+  animated object. Instead the sway phase is offset by the plant's own position
+  *projected onto the wind direction*, so the surge crosses a wood tree by tree
+  at a rate `waveLength` sets. It is one `dot` in the vertex shader and it is
+  most of what makes the effect work.
+  **Sustained and surface wind are different things.** `base` is what the cloud
+  deck drifts by; `surface` is `base` swung in speed by `gustiness` and in
+  direction by `turbulence`, and it is what the rain and the plants follow. A
+  whole overcast deck does not surge in a two-second gust — the hedge under it
+  does — and having both available is what lets each consumer take the one that
+  is true of it. Gust and wander ride *different* rates, too: a squall that
+  always veers as it strengthens reads as a single moving object.
+  **Phase is integrated, not `time × speed`.** Recovering it in the shader from
+  a shared clock times a changing rate rewinds the wave every time the wind
+  picks up, which reads as the trees briefly swaying backwards. The same
+  reasoning that keeps the cloud offset and the water drift on the CPU — and
+  the same reason the ice code damps the wave rather than scaling `uTime`. The
+  phase wraps on a whole multiple of 2π so an overnight session keeps float
+  precision without a discontinuity at the seam.
+  **The wind is pulled into object space, not the vertex into world space.**
+  `transformed` is bent after `<begin_vertex>`, which means the bend has to
+  happen in the space the vertex is already in; a scatter instance carries a
+  random Y rotation, so the world wind comes back through its basis as
+  `v * mat3(modelMatrix * instanceMatrix)` — the transpose, which for a rotation
+  is the inverse, and which avoids an `inverse()` the GLSL1 path doesn't have.
+  Being ahead of `<project_vertex>` also means a swaying tree carries its haze
+  and its snow with it. The bend is biased downwind rather than centred (wind
+  pushes one way) and the tip drops by the sagitta, or a leaning tree grows
+  taller than the still one beside it.
+  **Which plants bend is not the renderer's call.** `attachWindSway` is opt-in
+  per material, exactly as `attachSeasonalTint` is — `HexWorld.setWind` drives
+  every material carrying the patch and applies it to none, so a boulder stays
+  put. `amplitude` is tip displacement as a *fraction of plant height*, so it
+  means the same thing on a seedling and an oak. Its own `uSwayEnabled` gate
+  rather than a zeroed amplitude, so disabling survives the per-frame push and
+  a stopped plant stands upright instead of freezing mid-lean.
+  **A river ignores the wind.** Open water takes a `uWindDrift` offset (so the
+  ripple pattern marches downwind) and a `uWindChop` factor (so it roughens, and
+  onshore wind thickens the surf), but the river and estuary shaders sample
+  neither: their direction is the channel's, and a gust must never run a stream
+  backwards uphill. Shore foam takes chop and not drift for the matching reason
+  — the surf band is anchored to the beach it breaks on. Both uniforms are zero
+  until a wind drives them, so a scene without one is untouched.
+  **Gusting exposed a latent bug in the precipitation drift.** The particle
+  shader positioned the field at `position.xz + uWind * uTime`, which is exact
+  while the wind is constant and wrong the moment it isn't: the field jumps by
+  (change in wind) × (elapsed time), so a gust a minute into a session
+  displaces the whole sky sideways, and the error grows without bound as
+  `uTime` does. It is the same trap the cloud offset, the sway phase and the
+  water drift were all already avoiding, and nothing had caught it because
+  before this the wind never moved. Drift is now integrated on the CPU into a
+  `uWindOffset` uniform and wrapped on the volume period (invisible, since the
+  shader folds the field into `uArea` anyway); `uWind` stays live and is read
+  only to aim the rain streak, which is a direction and so is correct
+  instantaneous.
+  **Tuning, after looking at it.** Three numbers came down from where they were
+  first set: precipitation takes a tenth of the wind (`windResponse`, an option
+  rather than a constant, because it is the one that most wants overriding —
+  rain is already moving several times faster than the air and is only airborne
+  a second or two, so the full ground wind slants it like a gale and makes every
+  gust read as the camera lurching); sway amplitudes came down ~30%, since past
+  roughly a tenth of a plant's height a bend stops reading as wind and starts
+  reading as rubber; and the water chop term came down to a fifth, because it
+  rides on the highlight that is already the brightest thing on the surface and
+  gets to "choppier" long before it gets to "turned up". The water *drift* came
+  down hardest of all, from 0.15 to 0.02, and that one was closer to a mistake
+  than a taste call: the drift is added to `worldXZ` **before** the shader's
+  `* 4.5` frequency multiplier, so one world unit of it carries the pattern
+  across four and a half noise features. At 0.15 a lake was marching at eleven
+  times its own wave animation — rapids, not a breeze — and it was worst at
+  exactly the low wind speeds that should have looked calm. The test on it
+  reads both constants off the real shader and asserts the derived rate stays
+  under the water's own, rather than pinning the number. Every chop factor is
+  written `1.0 + k · chop` so that windless scenes stay bit-identical whatever
+  `k` becomes — there is a test on that shape rather than on the constants.
+  The one behaviour change: rain now gusts by default, because the wind advances
+  from the first frame whether or not `setWind` has been called. `setWind` gates
+  only the push out to the materials. Demo: `[W]` toggle, `[Q]` veer.
 - [ ] **Post-processing integration** — an optional composer in `HexWorld` for
   **selective bloom on emissive liquids** (lava, acid). Threshold bloom is the
   wrong tool: the library's shaders write final LDR color straight to
@@ -274,6 +592,11 @@ features from actual need.
   `external: [/^three(\/|$)/]` in the vite config so `three/addons` stays a peer
   import instead of being bundled. Keep it opt-in so the à-la-carte path stays
   composer-free.
+  *Narrowed:* the god rays above wanted a composer too and did without one —
+  an extra pass rendered to its own target and added over the finished frame
+  costs no MSAA and re-encodes nothing. Selective bloom is the same shape (a
+  layer rendered small, blurred, additively composited), so this item is now
+  only about the emissive-liquid case, and it may not need a composer either.
   *Dropped from the original scope:* SSAO (superseded by the baked AO above —
   screen-space cannot beat exact knowledge of a static height field) and the
   unit selection outline pass (deferred with the selection API it would need).

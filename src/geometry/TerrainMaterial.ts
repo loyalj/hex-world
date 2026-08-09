@@ -117,9 +117,26 @@ const fragmentShader = /* glsl */`
 
   uniform sampler2DArray uTerrainTex;
   uniform float uTexScale;
+  // Triplanar blend exponent. Higher is sharper: a vertical wall takes its
+  // side projection almost purely, at the cost of a tighter, more visible
+  // transition across the terrace faces in between. Default 8.
+  uniform float uTriplanarSharpness;
   uniform vec3  uLightDir;
   uniform vec3  uLightColor;
   uniform vec3  uAmbient;
+
+  // Cliff strata (see configureCliffStrata). Bedding planes banded along world
+  // height, showing only where the ground is steep enough to be bare rock.
+  uniform float uStrataEnabled;
+  uniform float uStrataStrength;
+  uniform float uStrataScale;
+  uniform float uStrataContrast;
+  uniform float uStrataSeam;
+  uniform float uStrataWarp;
+  uniform float uStrataTilt;
+  uniform vec3  uStrataTint;
+  uniform float uStrataSlope;
+  uniform float uStrataRockOnly;
 
   // Hex grid overlay (see configureTerrainGrid). uGridFwd/uGridInv hold the
   // layout's axial↔world 2×2 matrices flattened row-major (already scaled by
@@ -178,7 +195,7 @@ const fragmentShader = /* glsl */`
   }
 
   vec4 sampleTriplanar(float typeIdx) {
-    vec3 blend = pow(abs(vNormal), vec3(8.0));
+    vec3 blend = pow(abs(vNormal), vec3(uTriplanarSharpness));
     blend /= dot(blend, vec3(1.0));
 
     vec4 xSample = texture(uTerrainTex, vec3(vWorldPos.yz * uTexScale, typeIdx));
@@ -190,6 +207,89 @@ const fragmentShader = /* glsl */`
 
   vec4 sampleSlot(int slot, float typeIdx) {
     return sampleTriplanar(typeIdx) * vColor[slot];
+  }
+
+  /**
+   * Sedimentary bedding on bare rock.
+   *
+   * Triplanar projection already stops a cliff face taking the flat ground's
+   * XZ-projected texture, so the wall reads as rock grain rather than as smear
+   * — but grain alone has no *structure*, and structure is what makes a carved
+   * gorge read as depth instead of as a dark wall. Beds do that: they are
+   * horizontal, so they pick out every terrace and overhang, and they are
+   * continuous across cells, so a canyon carved through six hexes reads as one
+   * cut through one rock rather than as six adjacent walls.
+   *
+   * base   — resolved surface color, before lighting
+   * upness — the shaded normal's y, 1 on flat ground and 0 on a vertical face
+   */
+  vec3 cliffStrata(vec3 base, float upness, vec3 worldPos) {
+    // The band coordinate and its screen derivative come FIRST, before any
+    // branch. fwidth is undefined under non-uniform control flow, and the
+    // early-outs below diverge along exactly the two edges where this effect
+    // fades — the cliff silhouette and the grass line — so a derivative taken
+    // after them would be garbage precisely where it shows.
+
+    // Height, but not *level* height. A dip tilts the whole sequence along one
+    // regional direction and a low-frequency warp folds it, so the beds read as
+    // rock that was laid down and then bent — dead-flat bands across a whole
+    // map look like a decal, and the eye catches it immediately once two
+    // unrelated cliffs share a stripe at the same altitude.
+    float h = worldPos.y
+            + dot(worldPos.xz, vec2(0.83, 0.55)) * uStrataTilt
+            + (tNoise(worldPos.xz * 0.06) - 0.5) * 2.0 * uStrataWarp;
+
+    // Bending the band coordinate before it is quantized varies bed thickness
+    // without breaking continuity. The two amplitudes are chosen to keep the
+    // derivative positive (min ≈ 0.41) — a fold here would make floor() run
+    // backwards and put a mirrored bed in the middle of the sequence.
+    float b = h * uStrataScale;
+    b += sin(b * 1.7) * 0.22 + sin(b * 0.63) * 0.35;
+    float px = fwidth(b);
+
+    // Steep faces only. Bedding is what's visible where soil and cover have
+    // fallen away, which on this terrain is exactly the cliff walls and the
+    // carved channel sides — flat ground shows its surface, not its section.
+    float face = 1.0 - smoothstep(0.0, max(uStrataSlope, 1e-4), upness);
+    if (face <= 0.0) return base;
+
+    // Banding a grass bank would read as painted stripes. Measured the same
+    // relative way FOLIAGE_GLSL measures green so it survives a dark texture
+    // and a bright one alike, but kept local rather than calling foliageMask:
+    // that one is switched off by uFoliageSelect for a mesh that is foliage all
+    // over, and strata must not follow it into thinking rock is a leaf.
+    float green = (base.g - max(base.r, base.b)) / max(base.g, 1e-4);
+    float rock  = mix(1.0, 1.0 - smoothstep(0.02, 0.20, green), uStrataRockOnly);
+    if (rock <= 0.0) return base;
+
+    // Below roughly a pixel per bed the pattern is no longer bedding, it is
+    // noise — fade it out with the derivative rather than let a distant cliff
+    // crawl as the camera moves.
+    float detail = 1.0 - smoothstep(0.35, 1.0, px);
+    if (detail <= 0.0) return base;
+
+    float idx   = floor(b);
+    float phase = b - idx;
+
+    // Two decorrelated draws per bed: how pale it is, and how warm. One hash
+    // driving both would tie every pale bed to the same color and the sequence
+    // would come out as a single gradient repeated.
+    float pale   = tHash(vec2(idx, 11.3));
+    float warmth = tHash(vec2(idx, 47.9));
+
+    // A bedding plane reads from two things at once: neighbouring beds differ
+    // in value and color, and the joint between them is a thin dark line where
+    // shadow and damp collect. The beds do the geology; the seam does the
+    // drawing, and it is the seam the eye actually counts.
+    vec3 bed = base * (1.0 + (pale - 0.5) * 2.0 * uStrataContrast);
+    bed = mix(bed, bed * uStrataTint, warmth);
+
+    // Seam width tracks the derivative, so it stays a hairline up close and
+    // widens into a soft gradient at distance instead of aliasing to a moiré.
+    float seamW = max(px * 1.2, 0.03);
+    bed *= 1.0 - uStrataSeam * (1.0 - smoothstep(0.0, seamW, min(phase, 1.0 - phase)));
+
+    return mix(base, bed, clamp(uStrataStrength * face * detail * rock, 0.0, 1.0));
   }
 
   vec2 gridAxial(vec2 p) {
@@ -262,6 +362,13 @@ const fragmentShader = /* glsl */`
     float cliff = 1.0 - abs(n.y);
     c.rgb *= 1.0 - cliff * 0.125;
 
+    // Bedding goes on the rock before anything is laid over the rock: the turn
+    // reads the color to find what is living, and snow lies on the bands rather
+    // than being banded itself.
+    if (uStrataEnabled > 0.5) {
+      c.rgb = cliffStrata(c.rgb, abs(n.y), vWorldPos);
+    }
+
     // The turn goes on before the snow — grass is gold under a first frost, not
     // frost under gold. Which of the three splat slots counts as grass is not
     // asked here: seasonalFoliage measures it off the resolved color, so a hex
@@ -316,6 +423,21 @@ export interface TerrainMaterialOptions {
   lightDir?: THREE.Vector3;
   lightColor?: THREE.Color;
   ambient?: THREE.Color;
+  /**
+   * Triplanar blend exponent — how hard the shader commits to one projection
+   * axis. Default 8: a vertical wall takes its side projection almost purely.
+   * Lower values widen the cross-fade, which softens the transition across
+   * terrace faces at the cost of a little blur on them. Clamped to a minimum
+   * of 1 — an exponent of 0 would make `pow(0, 0)` on an axis-aligned face,
+   * which is undefined and shows up as NaN pixels.
+   */
+  triplanarSharpness?: number;
+  /**
+   * Cliff strata styling, applied at construction. Equivalent to calling
+   * {@link configureCliffStrata} afterwards; here so a `.hexpack` can ship the
+   * bedding that matches its rock.
+   */
+  strata?: CliffStrataOptions;
 }
 
 export function createTerrainMaterial(
@@ -324,7 +446,7 @@ export function createTerrainMaterial(
 ): THREE.ShaderMaterial {
   const lightDir = (opts.lightDir ?? new THREE.Vector3(0.6, 1, 0.5)).clone().normalize();
 
-  return new THREE.ShaderMaterial({
+  const material = new THREE.ShaderMaterial({
     glslVersion: THREE.GLSL3,
     vertexShader,
     fragmentShader,
@@ -337,6 +459,7 @@ export function createTerrainMaterial(
       ...THREE.UniformsUtils.clone(THREE.UniformsLib.lights),
       uTerrainTex:  { value: terrainTex },
       uTexScale:    { value: opts.texScale    ?? 0.2 },
+      uTriplanarSharpness: { value: Math.max(1, opts.triplanarSharpness ?? 8) },
       uLightDir:    { value: lightDir },
       uLightColor:  { value: opts.lightColor  ?? new THREE.Color(0xffffff) },
       uAmbient:     { value: opts.ambient     ?? new THREE.Color(0x595959) },
@@ -371,9 +494,102 @@ export function createTerrainMaterial(
       // per world — see HexWorldSeasonOptions.terrainFoliage.
       ...foliageUniforms({ summer: 0x86b888, autumn: 0xbba360, bare: 0x9a8f74 }),
       uSnowTerrain: { value: -1 },
+      // Cliff strata — on by default, unlike the grid and the seasons. It is
+      // not a mode the scene opts into but a property of rock, and it needs no
+      // data the material doesn't already have; a pack turns it off by passing
+      // `strata: { enabled: false }` rather than by never enabling it.
+      ...cliffStrataUniforms(),
     },
     side: THREE.DoubleSide,
   });
+
+  if (opts.strata) configureCliffStrata(material, opts.strata);
+  return material;
+}
+
+/** Builds the cliff-strata uniform set, at the defaults documented on {@link CliffStrataOptions}. */
+function cliffStrataUniforms(): Record<string, THREE.IUniform> {
+  return {
+    uStrataEnabled:  { value: 1 },
+    uStrataStrength: { value: 1 },
+    // Elevation steps are ELEVATION_SCALE (0.5) world units tall, so ~3 beds
+    // per unit puts six of them on a four-step cliff — enough to count, few
+    // enough that each one still has a face.
+    uStrataScale:    { value: 3 },
+    uStrataContrast: { value: 0.14 },
+    uStrataSeam:     { value: 0.22 },
+    uStrataWarp:     { value: 0.08 },
+    uStrataTilt:     { value: 0.03 },
+    // Kept very close to white on purpose. Like every other THREE.Color uniform
+    // in this shader it arrives linearized, while the shader itself works in the
+    // texture's own sRGB-ish space — so a tint that looks mild as a hex code
+    // lands noticeably stronger on the rock than it reads.
+    uStrataTint:     { value: new THREE.Color(0xfffaf0) },
+    uStrataSlope:    { value: 0.65 },
+    uStrataRockOnly: { value: 1 },
+  };
+}
+
+/**
+ * Appearance of the cliff strata drawn by the terrain shader. All fields
+ * optional — unset fields keep their current value.
+ */
+export interface CliffStrataOptions {
+  /** Show or hide the bedding. Defaults to true when {@link configureCliffStrata} is called; on out of the box. */
+  enabled?: boolean;
+  /** Overall amount, 0 (no bedding) to 1 (the full pattern). Default 1 — tune {@link contrast} and {@link seam} for the look, this for the dose. */
+  strength?: number;
+  /** Beds per world unit. Higher is finer layering. Default 3, i.e. one bed per two-thirds of an elevation step. */
+  scale?: number;
+  /** How far neighbouring beds differ in value, 0–1. Default 0.14. */
+  contrast?: number;
+  /** Strength of the thin dark line at each bedding plane, 0–1. Default 0.22 — this is the part the eye actually counts. */
+  seam?: number;
+  /** How far the sequence folds away from level, in world units. 0 is dead-flat banding. Default 0.08. */
+  warp?: number;
+  /** Regional dip: world units of rise per unit travelled along the dip direction. Default 0.03. */
+  tilt?: number;
+  /** Colour the paler beds lean toward, as a multiplier. Default a warm off-white. */
+  tint?: THREE.ColorRepresentation;
+  /** Surface upness (normal y) at which bedding has faded out completely. Default 0.65 — walls and steep channel sides, not hillsides. */
+  slope?: number;
+  /** 1 leaves living green surfaces unbanded, 0 bands everything steep. Default 1. */
+  rockOnly?: number;
+}
+
+/**
+ * Style the cliff strata baked into the terrain shader, enabling it unless
+ * `enabled: false` is passed. Every field is a uniform flip — no geometry
+ * rebuild, safe to call per frame. A material without the uniforms (a custom
+ * one, an older pack's) is skipped.
+ *
+ * @example
+ * configureCliffStrata(world.terrainMaterial, { scale: 5, seam: 0.3 }); // finer, sharper beds
+ * configureCliffStrata(mat, { warp: 0, tilt: 0 });                      // dead-level layers
+ * setCliffStrataEnabled(mat, false);
+ */
+export function configureCliffStrata(
+  material: THREE.ShaderMaterial,
+  opts: CliffStrataOptions = {},
+): void {
+  const u = material.uniforms;
+  if (!u || !('uStrataEnabled' in u)) return;
+  if (opts.strength !== undefined) u.uStrataStrength.value = opts.strength;
+  if (opts.scale    !== undefined) u.uStrataScale.value    = opts.scale;
+  if (opts.contrast !== undefined) u.uStrataContrast.value = opts.contrast;
+  if (opts.seam     !== undefined) u.uStrataSeam.value     = opts.seam;
+  if (opts.warp     !== undefined) u.uStrataWarp.value     = opts.warp;
+  if (opts.tilt     !== undefined) u.uStrataTilt.value     = opts.tilt;
+  if (opts.tint     !== undefined) (u.uStrataTint.value as THREE.Color).set(opts.tint);
+  if (opts.slope    !== undefined) u.uStrataSlope.value    = opts.slope;
+  if (opts.rockOnly !== undefined) u.uStrataRockOnly.value = opts.rockOnly;
+  u.uStrataEnabled.value = (opts.enabled ?? true) ? 1 : 0;
+}
+
+/** Show or hide the cliff strata without touching its styling. */
+export function setCliffStrataEnabled(material: THREE.ShaderMaterial, enabled: boolean): void {
+  const u = material.uniforms;
+  if (u && 'uStrataEnabled' in u) u.uStrataEnabled.value = enabled ? 1 : 0;
 }
 
 /** Appearance and behavior of the shader hex grid overlay. All fields optional — unset fields keep their current value. */

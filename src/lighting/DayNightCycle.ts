@@ -2,8 +2,9 @@ import * as THREE from 'three';
 import type { SunShadowRig } from './SunShadows.js';
 import type { LiquidMaterialSet } from '../geometry/LiquidTypes.js';
 import { setLiquidLightTint } from '../geometry/WaterMaterial.js';
-// Type-only (erased at compile) — SkyDome imports DayNightState back.
+// Type-only (erased at compile) — both import DayNightState back.
 import type { SkyDome } from '../sky/SkyDome.js';
+import type { GodRays } from '../sky/GodRays.js';
 
 export interface DayNightOptions {
   /** Starting time of day, 0–1 with 0 = midnight and 0.5 = noon. Default 0.5. */
@@ -104,12 +105,23 @@ export interface DayNightTargets {
    * roads darken with the ground they sit on instead of glowing after dark.
    */
   roadMaterial?: THREE.ShaderMaterial;
+  /**
+   * Any other materials using the same hand-rolled light uniforms
+   * (`uLightDir` / `uLightColor` / `uAmbient`) — the map skirt, and your own
+   * shaders that borrowed the trio. Materials without them are skipped.
+   */
+  lightMaterials?: Iterable<THREE.ShaderMaterial | undefined | null>;
   /** Liquid material sets to tint (water darkens at night; emissive is unaffected). */
   liquidMaterials?: Iterable<LiquidMaterialSet>;
   /** Scene whose background color tracks the sky. */
   scene?: THREE.Scene;
   /** Gradient sky dome — takes the horizon/zenith colors and the luminary glow. */
   sky?: SkyDome;
+  /**
+   * Crepuscular rays — take the sun's direction and color, and fade out with
+   * the daylight, so the shafts fan from the same disc the dome draws.
+   */
+  godRays?: GodRays;
 }
 
 /**
@@ -304,7 +316,7 @@ export class DayNightCycle {
   /**
    * Evaluate and push the state onto scene objects: sun rig (or plain light),
    * ambient light, terrain material uniforms, liquid tints, scene background,
-   * and the sky dome. Returns the applied state.
+   * the sky dome, and its god rays. Returns the applied state.
    */
   applyTo(targets: DayNightTargets): DayNightState {
     const s = this.evaluate();
@@ -325,11 +337,15 @@ export class DayNightCycle {
     }
     applyLightUniforms(targets.terrainMaterial, s);
     applyLightUniforms(targets.roadMaterial, s);
+    if (targets.lightMaterials) {
+      for (const mat of targets.lightMaterials) applyLightUniforms(mat ?? undefined, s);
+    }
     if (targets.liquidMaterials) setLiquidLightTint(targets.liquidMaterials, s.liquidTint);
     if (targets.scene?.background instanceof THREE.Color) {
       targets.scene.background.copy(s.skyColor);
     }
     targets.sky?.setDayNight(s);
+    targets.godRays?.setDayNight(s);
 
     return s;
   }

@@ -37,13 +37,18 @@ const fragmentShader = /* glsl */`
     float t = uTime * uFlowSpeed;
     float shore = vUv.y;
 
-    float hl = waterNoise(vec3(vWorldXZ * 4.5 * uWaveScale, t * 0.1));
-    vec3 waterColor = uColor + hl * 0.2 * (1.0 - vIce);
+    float hl = waterNoise(vec3((vWorldXZ + uWindDrift) * 4.5 * uWaveScale, t * 0.1));
+    // Same light touch as the open surface, and the same factor — a shoreline
+    // that roughened harder than the water it joins would show the seam.
+    vec3 waterColor = uColor + hl * 0.2 * (1.0 + 0.12 * uWindChop) * (1.0 - vIce);
 
     // Surf is the first thing a freeze takes: no waves reaching the shore, no
     // foam where they used to break. What's left is the pale rime the ice
     // color supplies further down.
-    float foam = clamp(Foam(shore, vWorldXZ, t) * uFoamIntensity, 0.0, 1.0) * (1.0 - vIce);
+    //
+    // Wind thickens it but does not move it: the foam band is anchored to the
+    // shoreline it breaks on, so it takes uWindChop and not uWindDrift.
+    float foam = clamp(Foam(shore, vWorldXZ, t) * uFoamIntensity * (1.0 + 0.07 * uWindChop), 0.0, 1.0) * (1.0 - vIce);
     vec3 color = mix(waterColor, uFoamColor, foam);
 
     gl_FragColor = liquidOutput(color, vVisibility, vExplored, vWorldXZ, vIce);

@@ -142,6 +142,19 @@ export const LIQUID_APPEARANCE_GLSL = /* glsl */`
   uniform float uCloudCoverage;
   uniform float uCloudOpacity;
 
+  // The shared world wind, from the same Wind the clouds above drift by (see
+  // setMaterialWind). uWindDrift is how far the ripple pattern has marched
+  // downwind, in world units, integrated on the CPU so a change of wind turns
+  // the surface rather than teleporting it; uWindChop is 0–1 surface wind, and
+  // roughens the water and builds the surf as it rises.
+  //
+  // Only *open* water reads these. A river's direction is its channel's, not
+  // the weather's — see RiverMaterial — so it and the estuary leave them alone
+  // and a wind never runs a stream backwards uphill. Both are zero until a wind
+  // drives them, which is what keeps a scene with none looking untouched.
+  uniform vec2  uWindDrift;
+  uniform float uWindChop;
+
   ${CLOUD_GLSL}
   ${ATMOSPHERE_GLSL}
 
@@ -215,8 +228,13 @@ const fragmentShader = /* glsl */`
     // Damp the moving highlight rather than the clock: scaling uTime would
     // rewind the wave's phase as ice forms, which reads as the lake flowing
     // backwards into winter.
-    float hl = waterNoise(vec3(vWorldXZ * 4.5 * uWaveScale, uTime * uFlowSpeed * 0.2));
-    color += hl * 0.2 * (1.0 - vIce);
+    float hl = waterNoise(vec3((vWorldXZ + uWindDrift) * 4.5 * uWaveScale, uTime * uFlowSpeed * 0.2));
+    // Wind roughens the surface as well as moving it — a lake under a storm
+    // that only drifts faster still reads as a calm lake. Kept to a light touch
+    // on the existing highlight rather than a second effect: this term rides on
+    // top of a value that is already the brightest thing on the water, so it
+    // reaches "visibly choppier" well before it reaches "obviously turned up".
+    color += hl * 0.2 * (1.0 + 0.12 * uWindChop) * (1.0 - vIce);
     gl_FragColor = liquidOutput(color, vVisibility, vExplored, vWorldXZ, vIce);
   }
 `;
@@ -272,6 +290,8 @@ export function liquidAppearanceUniforms(
     uEmissive:         { value: colors?.emissive         ?? new THREE.Color(0, 0, 0) },
     uEmissiveStrength: { value: colors?.emissiveStrength ?? 0 },
     uLightTint:        { value: new THREE.Color(1, 1, 1) },
+    uWindDrift:        { value: new THREE.Vector2() },
+    uWindChop:         { value: 0 },
     uIceColor:         { value: colors?.iceColor         ?? new THREE.Color(0xdce9f2) },
     uIceOpacity:       { value: colors?.iceOpacity       ?? 0.97 },
     ...cloudShadowUniforms(),

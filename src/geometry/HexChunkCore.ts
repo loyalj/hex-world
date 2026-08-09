@@ -155,20 +155,58 @@ export interface ChunkArrays {
   roads:   RoadChunkArrays | null;
 }
 
+/**
+ * Defaults for the four options that decide *where a terrain vertex lands*.
+ * Exported because anything meeting the terrain's edge has to place its own
+ * vertices the same way — see `MapSkirtCore`, which shares the perturbation
+ * outright. Copying these values by hand instead of importing them produces a
+ * seam that tears along the whole map edge, which is exactly how it went the
+ * first time.
+ */
+export const CHUNK_GEOMETRY_DEFAULTS = {
+  elevationScale:      ELEVATION_SCALE,
+  perturbStrength:     0.8,
+  elevPerturbStrength: 0.2,
+  noiseScale:          0.35,
+} as const;
+
 const SOLID_FACTOR  = 0.8;
 const BLEND_FACTOR  = 1 - SOLID_FACTOR;
 const INNER_TO_OUTER = 1 / 0.866025404;
 
 const TERRACES_PER_SLOPE = 2;
-const TERRACE_STEPS      = TERRACES_PER_SLOPE * 2 + 1;
+/** Steps across one terraced slope — treads and risers together. */
+export const TERRACE_STEPS = TERRACES_PER_SLOPE * 2 + 1;
 const H_STEP             = 1 / TERRACE_STEPS;
 const V_STEP             = 1 / (TERRACES_PER_SLOPE + 1);
 
-function getEdgeType(e1: number, e2: number): number {
+/**
+ * How the ground between two cells is built: 0 flat, 1 terraced slope, 2 cliff.
+ * Exported because anything that has to meet the *side* of a bridge has to
+ * know which of the three it is — only a terraced one has steps to follow.
+ */
+export function edgeTypeOf(e1: number, e2: number): number {
   const d = Math.abs(e1 - e2);
   if (d === 0) return 0;
   if (d === 1) return 1;
   return 2;
+}
+
+const getEdgeType = edgeTypeOf;
+
+/**
+ * Interpolation factors for one terrace step, 0…{@link TERRACE_STEPS}: `h`
+ * across the ground plane and `v` up. They differ, and that is the whole
+ * effect — `v` only advances on every other step, which is what turns a ramp
+ * into a flight of treads and risers.
+ *
+ * Exported alongside {@link TERRACE_STEPS} so a builder meeting the open end
+ * of a terraced bridge can trace the same staircase instead of cutting a
+ * straight line across it. The profile is symmetric, so it does not matter
+ * which of the two cells you walk from.
+ */
+export function terraceFactors(step: number): { h: number; v: number } {
+  return { h: step * H_STEP, v: Math.floor((step + 1) / 2) * V_STEP };
 }
 
 function nbOffset(col: number, row: number, d: number): { col: number; row: number } {
@@ -213,10 +251,10 @@ export function buildChunkArrays(
   bounds: ChunkBounds,
   opts: ChunkGeometryOptions = {},
 ): ChunkArrays {
-  const elevScale           = opts.elevationScale      ?? ELEVATION_SCALE;
-  const perturbStrength     = opts.perturbStrength      ?? 0.8;
-  const elevPerturbStrength = opts.elevPerturbStrength  ?? 0.2;
-  const noiseScale          = opts.noiseScale           ?? 0.35;
+  const elevScale           = opts.elevationScale      ?? CHUNK_GEOMETRY_DEFAULTS.elevationScale;
+  const perturbStrength     = opts.perturbStrength      ?? CHUNK_GEOMETRY_DEFAULTS.perturbStrength;
+  const elevPerturbStrength = opts.elevPerturbStrength  ?? CHUNK_GEOMETRY_DEFAULTS.elevPerturbStrength;
+  const noiseScale          = opts.noiseScale           ?? CHUNK_GEOMETRY_DEFAULTS.noiseScale;
   const cliffThreshold      = opts.cliffThreshold       ?? 2;
   const colorMode           = opts.colorMode            ?? 'splat';
   const isSplat             = colorMode === 'splat';
@@ -463,8 +501,7 @@ export function buildChunkArrays(
   // ---- terrace lerp helpers ----
 
   const tlPos = (a: CV, b: CV, step: number): [number, number, number] => {
-    const h = step * H_STEP;
-    const v = Math.floor((step + 1) / 2) * V_STEP;
+    const { h, v } = terraceFactors(step);
     return [a[0] + (b[0] - a[0]) * h, a[1] + (b[1] - a[1]) * v, a[2] + (b[2] - a[2]) * h];
   };
 

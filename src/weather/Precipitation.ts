@@ -53,7 +53,15 @@ function vertexShader(type: PrecipitationType): string {
     uniform float uArea;
     uniform float uHeight;
     uniform float uFallSpeed;
+    // The instantaneous wind — used ONLY to aim the rain streak, which is a
+    // direction and so is correct to read live.
     uniform vec2  uWind;
+    // How far the field has actually blown, integrated on the CPU. Horizontal
+    // drift reads this and never \`uWind * uTime\`: with a wind that gusts, the
+    // product jumps by (change in wind) × (elapsed time) the instant the wind
+    // moves, which after a minute of running teleports the whole field tens of
+    // units sideways. Integrating turns the same gust into a nudge.
+    uniform vec2  uWindOffset;
     uniform float uOpacity;
     ${isRain ? 'uniform float uStreak;' : 'uniform float uSway;\n    uniform float uSize;'}
 
@@ -85,7 +93,7 @@ function vertexShader(type: PrecipitationType): string {
     void main() {
       float speed = uFallSpeed * (0.7 + aSeed * 0.6);
       float y = mod(position.y - uTime * speed, uHeight);
-      vec2 xz = position.xz + uWind * uTime;
+      vec2 xz = position.xz + uWindOffset;
       ${isRain ? '' : `
       // Flakes wander instead of falling straight.
       xz += uSway * vec2(sin(uTime * 0.8 + aSeed * 39.0 + y * 0.4),
@@ -225,6 +233,7 @@ export class PrecipitationLayer {
         uHeight:    { value: height },
         uFallSpeed: { value: fallSpeed },
         uWind:      { value: (opts.wind ?? new THREE.Vector2(0, 0)).clone() },
+        uWindOffset: { value: new THREE.Vector2() },
         uColor:     { value: new THREE.Color(opts.color ?? (isRain ? 0xc4d4e8 : 0xffffff)) },
         uOpacity:   { value: this.baseOpacity },
         ...(isRain
@@ -282,7 +291,13 @@ export class PrecipitationLayer {
     this.object.visible = particles > 0;
   }
 
-  /** Set the horizontal wind drift (world units/sec). Streak direction follows. */
+  /**
+   * Set the horizontal wind drift (world units/sec). Streak direction follows.
+   *
+   * Safe to call every frame with a gusting wind: the drift it feeds is
+   * integrated in {@link update}, so a change of wind bends the fall from where
+   * it had got to rather than displacing the whole field.
+   */
   setWind(wind: THREE.Vector2): void {
     (this.material.uniforms.uWind.value as THREE.Vector2).copy(wind);
   }
@@ -349,6 +364,14 @@ export class PrecipitationLayer {
     this.elapsed = (this.elapsed + dt) % 16384;
     const u = this.material.uniforms;
     u.uTime.value = this.elapsed;
+    // Integrate the drift rather than letting the shader recompute it — see
+    // uWindOffset. Wrapped to the volume period, because the shader wraps the
+    // field into uArea anyway: a modulo here is invisible on screen and keeps
+    // the offset from growing until float32 loses sub-unit precision.
+    const area = u.uArea.value as number;
+    const off  = u.uWindOffset.value as THREE.Vector2;
+    off.addScaledVector(u.uWind.value as THREE.Vector2, dt);
+    off.set(off.x % area, off.y % area);
     (u.uCenter.value as THREE.Vector3).set(center.x, center.y ?? 0, center.z);
   }
 

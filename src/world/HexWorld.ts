@@ -20,8 +20,8 @@ import {
   buildTerrainLookup, buildWaterTerrainSet,
 } from '../geometry/TerrainTypes.js';
 import { buildTerrainTextureArray } from '../geometry/TerrainTextures.js';
-import type { TerrainGridOptions, TerrainMaterialOptions } from '../geometry/TerrainMaterial.js';
-import { configureTerrainGrid, createTerrainMaterial } from '../geometry/TerrainMaterial.js';
+import type { CliffStrataOptions, TerrainGridOptions, TerrainMaterialOptions } from '../geometry/TerrainMaterial.js';
+import { configureCliffStrata, configureTerrainGrid, createTerrainMaterial } from '../geometry/TerrainMaterial.js';
 import type { LiquidTypeDescriptor, LiquidMaterialSet } from '../geometry/LiquidTypes.js';
 import { DEFAULT_LIQUID_DESCRIPTORS, resolveLiquidMaterials, liquidMaterialList } from '../geometry/LiquidTypes.js';
 import { createRoadMaterial } from '../geometry/RoadMaterial.js';
@@ -29,7 +29,10 @@ import { RtsCameraController } from '../camera/RtsCameraController.js';
 import { SunShadowRig, type SunShadowOptions } from '../lighting/SunShadows.js';
 import { DayNightCycle, type DayNightOptions } from '../lighting/DayNightCycle.js';
 import { WeatherSystem, type WeatherType, type WeatherOptions } from '../weather/WeatherSystem.js';
+import { Wind, setMaterialWind, type WindOptions } from '../weather/Wind.js';
 import { SkyDome, averageTerrainColor, type SkyDomeOptions } from '../sky/SkyDome.js';
+import { GodRays, type GodRaysOptions } from '../sky/GodRays.js';
+import { MapSkirt, type MapSkirtMeshOptions } from '../geometry/MapSkirt.js';
 import { attachAtmosphere } from '../sky/Atmosphere.js';
 import { ClimateData } from '../season/ClimateData.js';
 import { SeasonCycle, type SeasonOptions } from '../season/SeasonCycle.js';
@@ -106,10 +109,22 @@ export interface HexWorldCameraOptions {
   far?: number;
   initialDistance?: number;
   initialPitch?: number;
+  /** Initial compass heading in degrees; 0 (the default) looks toward −Z. */
+  initialYaw?: number;
+  /**
+   * Shallowest tilt, in degrees above the horizon. Default 6 — low enough to
+   * put the horizon well inside the frame, which is what lets a sky, a sunset,
+   * or {@link GodRays} be seen at all. Raise it to keep the view strictly
+   * top-down.
+   */
   minPitch?: number;
   maxPitch?: number;
   minDistance?: number;
   maxDistance?: number;
+  /** Degrees of pitch change per pixel of vertical middle-drag. Default 0.3. */
+  tiltSpeed?: number;
+  /** Degrees of yaw change per pixel of horizontal middle-drag. Default 0.3. */
+  yawSpeed?: number;
 }
 
 export interface HexWorldOptions {
@@ -190,6 +205,29 @@ export interface HexWorldOptions {
    */
   sky?: boolean | SkyDomeOptions;
   /**
+   * Crepuscular rays fanning out from the sun past ridgelines and trees:
+   * `true` for the tuned defaults, or a {@link GodRaysOptions} object. Drawn as
+   * one extra low-resolution pass after the frame, so the renderer's
+   * antialiasing is untouched, and skipped entirely whenever the sun is down,
+   * behind the camera, or buried under cloud. Best paired with `sky` (the dome
+   * supplies the disc the shafts start at and the overcast that puts them
+   * out). Also creatable later via {@link HexWorld.setGodRays}. Default off.
+   */
+  godRays?: boolean | GodRaysOptions;
+  /**
+   * Close the map's open edges with a wall of cut earth: `true` for the tuned
+   * defaults, or a {@link MapSkirtMeshOptions} object. The terrain is a
+   * surface rather than a solid, so any camera low enough to see the horizon
+   * also sees under it — the skirt gives the map a bottom and four sides,
+   * banded with soil strata like a block cut out of the ground.
+   *
+   * Its top follows the terrain's own contour (including where that contour is
+   * a sea bed), and it takes the world's `geometryOptions` automatically so the
+   * seam stays tight. Also creatable later via {@link HexWorld.setSkirt}.
+   * Default off.
+   */
+  skirt?: boolean | MapSkirtMeshOptions;
+  /**
    * Seasons, snow accumulation, and freezing water: `true` for the tuned
    * defaults, or a {@link HexWorldSeasonOptions} object. Builds a
    * {@link ClimateData} for the map (or takes one you already generated),
@@ -200,6 +238,16 @@ export interface HexWorldOptions {
    * Default off.
    */
   seasons?: boolean | HexWorldSeasonOptions;
+  /**
+   * The shared world wind: `true` for the tuned defaults, or a
+   * {@link WindOptions} object. One vector, gusting on its own clock, that
+   * drifts the cloud deck, slants the rain, marches the ripples across open
+   * water, and bends every plant whose material carries
+   * {@link attachWindSway} — which is the call that decides *which* scatter
+   * answers it, since a boulder should not. Also switchable later via
+   * {@link HexWorld.setWind}. Default off.
+   */
+  wind?: boolean | WindOptions;
   /** Start the render loop immediately. Default true. */
   autoStart?: boolean;
   /**
@@ -300,6 +348,8 @@ export class HexWorld {
   private terrainMaterial: THREE.ShaderMaterial;
   /** Last hex-grid styling from setHexGrid — null until first use. */
   private gridOptions: TerrainGridOptions | null = null;
+  /** Last cliff-strata styling from setCliffStrata — null until first use (the material's own defaults stand). */
+  private strataOptions: CliffStrataOptions | null = null;
   private _terrainDefinitions: TerrainDefinition[];
   private _terrainLookup: Map<number, TerrainDefinition>;
   private waterTerrainSet: Set<number>;
@@ -353,7 +403,18 @@ export class HexWorld {
   private _dayNight: DayNightCycle | null = null;
   private _weather: WeatherSystem | null = null;
   private _sky: SkyDome | null = null;
+  private _godRays: GodRays | null = null;
+  private _skirt: MapSkirt | null = null;
   private _seasons: SeasonCycle | null = null;
+  /**
+   * The world's one wind. Built eagerly and shared with the
+   * {@link WeatherSystem} whenever that is created, so the two can never
+   * disagree about which way the weather is going regardless of the order they
+   * are switched on in. Inert — and not even advanced — until
+   * {@link setWind}.
+   */
+  private readonly _wind = new Wind();
+  private windEnabled = false;
   private _climate: ClimateData | null = null;
   /** True only when this world built the climate itself, and so may dispose it. */
   private ownsClimate = false;
@@ -373,6 +434,8 @@ export class HexWorld {
   private readonly roadMaterial: THREE.ShaderMaterial;
   /** Scatter definitions this world streams, so their materials can be hazed too. */
   private readonly scatterDefinitions: ScatterDefinition[];
+  /** Kept so a skirt built later matches the terrain's perturbation exactly. */
+  private readonly geometryOptions: ChunkGeometryOptions | undefined;
   /** The default lights, kept so the day/night cycle can drive them. */
   private defaultAmbient: THREE.AmbientLight | null = null;
   private defaultSun: THREE.DirectionalLight | null = null;
@@ -393,8 +456,21 @@ export class HexWorld {
   get dayNight(): DayNightCycle | null { return this._dayNight; }
   /** The weather system, once {@link setWeather} has been called. */
   get weather(): WeatherSystem | null { return this._weather; }
+  /**
+   * The world's shared wind — the one vector behind cloud drift, rain slant,
+   * plant sway, and the ripples marching across open water. Always present, so
+   * it can be configured before or after anything that reads it; switch it on
+   * with {@link setWind}.
+   *
+   * `world.wind.base` is the same `THREE.Vector2` as `world.weather.wind`.
+   */
+  get wind(): Wind { return this._wind; }
   /** The sky dome, if enabled via the `sky` option or {@link setSky}. */
   get sky(): SkyDome | null { return this._sky; }
+  /** The god-ray pass, if enabled via the `godRays` option or {@link setGodRays}. */
+  get godRays(): GodRays | null { return this._godRays; }
+  /** The map skirt, if enabled via the `skirt` option or {@link setSkirt}. */
+  get skirt(): MapSkirt | null { return this._skirt; }
   /** The season cycle, if enabled via the `seasons` option or {@link setSeasons}. */
   get seasons(): SeasonCycle | null { return this._seasons; }
   /**
@@ -484,6 +560,7 @@ export class HexWorld {
     this.liquidMaterials    = opts.liquidMaterials
       ?? new Map(this._liquidDescriptors.map(d => [d.id, resolveLiquidMaterials(d)]));
 
+    this.geometryOptions = opts.geometryOptions;
     this.chunks = new ChunkManager({
       map:                  this._map,
       layout:               this.layout,
@@ -495,7 +572,7 @@ export class HexWorld {
       terrainDefinitions:   this._terrainDefinitions,
       chunkSize:            opts.chunkSize  ?? 32,
       loadRadius:           opts.loadRadius ?? 5,
-      geometryOptions:      opts.geometryOptions,
+      geometryOptions:      this.geometryOptions,
       waterGeometryOptions: opts.waterGeometryOptions,
       workerFactory:        opts.chunkWorker === true ? createDefaultChunkWorker
                           : opts.chunkWorker || undefined,
@@ -511,7 +588,13 @@ export class HexWorld {
       initialTarget:   { x: this._map.width / 2, z: this._map.height / 2 },
       initialDistance: cam.initialDistance ?? 60,
       ...(cam.initialPitch !== undefined ? { initialPitch: cam.initialPitch } : {}),
-      minPitch:        cam.minPitch    ?? 30,
+      ...(cam.initialYaw   !== undefined ? { initialYaw:   cam.initialYaw   } : {}),
+      ...(cam.tiltSpeed    !== undefined ? { tiltSpeed:    cam.tiltSpeed    } : {}),
+      ...(cam.yawSpeed     !== undefined ? { yawSpeed:     cam.yawSpeed     } : {}),
+      // 6°, not the old 30°: above ~22° (half the default vertical FOV) the
+      // horizon never enters the frame at all, which silently made the sky
+      // dome's best hours and the god rays impossible to look at.
+      minPitch:        cam.minPitch    ?? 6,
       maxPitch:        cam.maxPitch    ?? 66,
       minDistance:     cam.minDistance ?? 6,
       maxDistance:     cam.maxDistance ?? 80,
@@ -558,8 +641,12 @@ export class HexWorld {
     );
 
     // The sky is built before the first applyDayNight so it takes the opening
-    // time of day rather than a frame of default blue.
+    // time of day rather than a frame of default blue. The rays follow it, so
+    // they find the dome to take their overcast from.
+    // Before the sky, so the dome's first haze pass already includes the wall.
+    if (opts.skirt) this.setSkirt(typeof opts.skirt === 'object' ? opts.skirt : {});
     if (opts.sky) this.setSky(typeof opts.sky === 'object' ? opts.sky : {});
+    if (opts.godRays) this.setGodRays(typeof opts.godRays === 'object' ? opts.godRays : {});
 
     if (opts.dayNight) {
       this._dayNight = new DayNightCycle(typeof opts.dayNight === 'object' ? opts.dayNight : {});
@@ -568,6 +655,8 @@ export class HexWorld {
 
     // After the day clock, so the season cycle can inherit its dayLength.
     if (opts.seasons) this.setSeasons(typeof opts.seasons === 'object' ? opts.seasons : {});
+
+    if (opts.wind) this.setWind(typeof opts.wind === 'object' ? opts.wind : {});
 
     if (opts.autoStart !== false) this.start();
   }
@@ -607,6 +696,13 @@ export class HexWorld {
         this.applyDayNight();
       }
       this.advanceSeasons(dt);
+      // Ahead of the weather, so the cloud drift and the rain slant this frame
+      // are the gust the trees are already bending to. Advanced unconditionally
+      // — it is two dozen scalar ops, and it is what makes a shower gust
+      // whether or not anything on the ground has been wired up to answer it.
+      // `setWind` gates only the push out to the materials.
+      this._wind.advance(dt);
+      if (this.windEnabled) this.applyWind();
       this._sky?.update(this.camera, dt);
       this._weather?.update(dt, this.controls.targetPosition);
       this.sunShadows?.update(this.camera);
@@ -618,6 +714,12 @@ export class HexWorld {
       this.onFrame?.(dt);
       this.events.emit('frame', { dt });
       this.renderer.render(this.scene, this.camera);
+      if (this._godRays) {
+        // With a dome the rays read overcast off it; without one nothing else
+        // is carrying the weather to them.
+        if (!this._sky && this._weather) this._godRays.setOvercast(this._weather.overcast);
+        this._godRays.render(this.renderer, this.scene, this.camera);
+      }
     };
     tick();
   }
@@ -679,6 +781,9 @@ export class HexWorld {
   setMap(map: HexMap): void {
     this.chunks.setMap(map);
     this._map = map;
+    // The wall is cut to one map's edges and floored under its lowest ground —
+    // both change with the map, so it is rebuilt rather than carried over.
+    this._skirt?.setMap(map);
     this.picker.reset();
     this.controls.snapTo(map.width / 2, map.height / 2);
     // Territory and resources live in the new map's metadata channel — redraw
@@ -754,6 +859,7 @@ export class HexWorld {
     this.waterTerrainSet     = buildWaterTerrainSet(this._terrainDefinitions);
     this.chunks.setTerrainDefinitions(this._terrainDefinitions, this.terrainMaterial);
     this.reapplyHexGrid();
+    this.reapplyCliffStrata();
     this._weather?.setTerrainMaterial(this.terrainMaterial);
     this.applyDayNight();
     this.refreshSky();
@@ -774,6 +880,7 @@ export class HexWorld {
     this.waterTerrainSet     = buildWaterTerrainSet(definitions);
     this.chunks.setTerrainDefinitions(definitions, material);
     this.reapplyHexGrid();
+    this.reapplyCliffStrata();
     this._weather?.setTerrainMaterial(material);
     this.applyDayNight();
     this.refreshSky();
@@ -805,6 +912,32 @@ export class HexWorld {
   private reapplyHexGrid(): void {
     if (!this.gridOptions) return;
     configureTerrainGrid(this.terrainMaterial, this.layout, this.gridOptions);
+  }
+
+  /**
+   * Toggle or restyle the sedimentary bedding the terrain shader draws on bare
+   * rock — horizontal layers picking out every cliff face, terrace and carved
+   * channel side. On by default; `false` turns it off, an options object
+   * restyles (and enables unless `enabled: false`). Survives terrain material
+   * swaps.
+   *
+   * @example
+   * world.setCliffStrata({ scale: 5, seam: 0.3 });  // finer, sharper beds
+   * world.setCliffStrata(false);
+   */
+  setCliffStrata(options: CliffStrataOptions | boolean = true): void {
+    if (typeof options === 'boolean') {
+      this.strataOptions = { ...this.strataOptions, enabled: options };
+    } else {
+      this.strataOptions = { ...this.strataOptions, ...options, enabled: options.enabled ?? true };
+    }
+    this.reapplyCliffStrata();
+  }
+
+  /** Strata styling survives terrain material swaps — re-push it onto the current material. */
+  private reapplyCliffStrata(): void {
+    if (!this.strataOptions) return;
+    configureCliffStrata(this.terrainMaterial, this.strataOptions);
   }
 
   /**
@@ -849,6 +982,10 @@ export class HexWorld {
       liquidMaterials: this.liquidMaterials.values(),
       scene:           this.skyFollowsCycle ? this.scene : undefined,
       sky:             this._sky ?? undefined,
+      godRays:         this._godRays ?? undefined,
+      // The skirt borrows the terrain's light uniforms, so it darkens at dusk
+      // with the ground it holds up rather than glowing after dark.
+      lightMaterials:  this._skirt ? [this._skirt.material] : undefined,
     });
   }
 
@@ -862,6 +999,9 @@ export class HexWorld {
   *hazeMaterials(): Generator<THREE.Material> {
     yield this.terrainMaterial;
     yield this.roadMaterial;
+    // The wall stands at the very edge of the map — the first thing that has
+    // to dissolve into the horizon rather than ending against it.
+    if (this._skirt) yield this._skirt.material;
     for (const set of this.liquidMaterials.values()) {
       for (const mat of liquidMaterialList(set)) if (mat) yield mat;
     }
@@ -900,6 +1040,7 @@ export class HexWorld {
     this._sky = null;
     if (options === false) {
       this._weather?.setSky(null);
+      this._godRays?.attachSky(null);
       return null;
     }
     if (typeof options === 'object') this.skyOptions = { ...this.skyOptions, ...options };
@@ -916,8 +1057,95 @@ export class HexWorld {
     }).addTo(this.scene);
     this._sky.update(this.camera);
     this._weather?.setSky(this._sky);
+    this._godRays?.attachSky(this._sky);
     this.applyDayNight();
     return this._sky;
+  }
+
+  /**
+   * Enable, restyle, or (with `false`) remove the crepuscular rays — shafts of
+   * light fanning out from the sun wherever the terrain breaks its edge.
+   *
+   * They cost one extra render of the scene per frame at a quarter of the
+   * canvas resolution, with every material replaced by flat black, and only
+   * while the sun is up, in front of the camera, and not buried under cloud —
+   * outside that the pass is skipped and costs nothing at all. `decay` is the
+   * knob to reach for first: it sets how far the shafts throw.
+   *
+   * With a sky dome present the rays take their overcast from it, so weather
+   * puts out the shafts and the sun disc together, and the dome itself is kept
+   * out of the occlusion pass.
+   *
+   * @example
+   * world.setGodRays(true);
+   * world.setGodRays({ intensity: 0.8, decay: 0.96 }); // long, strong shafts
+   * world.setGodRays(false);
+   */
+  /**
+   * Enable, restyle, or (with `false`) remove the map skirt — the wall of cut
+   * earth that gives the map a bottom and four sides instead of ending where
+   * its triangles stop.
+   *
+   * The geometry options that have to agree with the terrain
+   * (`perturbStrength`, `noiseScale`, `elevationScale`,
+   * `elevPerturbStrength`) are taken from the world's own `geometryOptions`
+   * unless you override them — pass them by hand only if you are also building
+   * terrain by hand, since a mismatch tears the seam along the entire edge.
+   *
+   * @example
+   * world.setSkirt(true);
+   * world.setSkirt({ depth: 4, bandScale: 2.4 });  // deeper block, finer strata
+   * world.setSkirt(false);
+   */
+  setSkirt(options: MapSkirtMeshOptions | boolean = true): MapSkirt | null {
+    if (options === false) {
+      this._skirt?.dispose();
+      this._skirt = null;
+      this.refreshSky(); // drop it from the hazed material list
+      return null;
+    }
+    const opts = typeof options === 'object' ? options : {};
+    if (this._skirt) {
+      this._skirt.configure(opts);
+      return this._skirt;
+    }
+    const geo = this.skirtGeometryOptions;
+    this._skirt = new MapSkirt(this._map, this.layout, { ...geo, ...opts }).addTo(this.scene);
+    // Picked up by the sky's material list and the day/night light, so the
+    // wall hazes and darkens with the ground above it from the first frame.
+    this.refreshSky();
+    this.applyDayNight();
+    return this._skirt;
+  }
+
+  /** The subset of the world's chunk geometry options the skirt must match. */
+  private get skirtGeometryOptions(): MapSkirtMeshOptions {
+    const g = this.geometryOptions ?? {};
+    return {
+      ...(g.elevationScale      !== undefined ? { elevationScale:      g.elevationScale } : {}),
+      ...(g.perturbStrength     !== undefined ? { perturbStrength:     g.perturbStrength } : {}),
+      ...(g.elevPerturbStrength !== undefined ? { elevPerturbStrength: g.elevPerturbStrength } : {}),
+      ...(g.noiseScale          !== undefined ? { noiseScale:          g.noiseScale } : {}),
+    };
+  }
+
+  setGodRays(options: GodRaysOptions | boolean = true): GodRays | null {
+    if (options === false) {
+      this._godRays?.dispose();
+      this._godRays = null;
+      return null;
+    }
+    const opts = typeof options === 'object' ? options : {};
+    if (this._godRays) {
+      this._godRays.configure(opts);
+      return this._godRays;
+    }
+    this._godRays = new GodRays({ ...opts, sky: opts.sky !== undefined ? opts.sky : this._sky });
+    // Without a cycle driving it there is no sun to follow, so it takes the
+    // static default light — the same direction the terrain is lit from.
+    if (this._dayNight) this.applyDayNight();
+    else this._godRays.setSun(DEFAULT_LIGHT_DIR);
+    return this._godRays;
   }
 
   /**
@@ -1177,6 +1405,10 @@ export class HexWorld {
       roadMaterial:    this.roadMaterial,
       liquidMaterials: () => this.liquidMaterials.values(),
       sky:             this._sky,
+      // The world's wind, not one of its own — so `setWind` and `setWeather`
+      // compose in either order, and the rain slants the way the trees lean.
+      // Ownership stays here: this world advances it, so the weather must not.
+      wind:            this._wind,
     });
     // Re-pushed here, not just from setSeasons, so the order the two are
     // enabled in doesn't matter — weather created after seasons still gets the
@@ -1184,6 +1416,66 @@ export class HexWorld {
     this.refreshPrecipitationMask();
     this._weather.setWeather(type, options);
     return this._weather;
+  }
+
+  /**
+   * Every material the wind can move: each liquid layer, and the scatter
+   * materials. Materials that carry none of the wind uniforms are skipped by
+   * {@link setMaterialWind}, so this can be handed out whole.
+   *
+   * The terrain is absent because a hillside does not move, and the road with
+   * it. What lives here is water — which drifts and roughens — and whichever
+   * plants have been given {@link attachWindSway}.
+   */
+  *windMaterials(): Generator<THREE.Material> {
+    for (const set of this.liquidMaterials.values()) {
+      for (const mat of liquidMaterialList(set)) if (mat) yield mat;
+    }
+    for (const mat of this.scatterMaterials()) yield mat;
+  }
+
+  /**
+   * Enable, restyle, or (with `false`) still the world's wind: one vector that
+   * drifts the cloud deck, slants the rain, bends the plants, and marches the
+   * ripples across open water. Options accumulate across calls; returns the
+   * shared {@link Wind} for direct control (`world.wind.setPolar(…)` mid-storm).
+   *
+   * **Which plants bend is yours to say.** This drives every material that
+   * carries {@link attachWindSway} and attaches the patch to none of them — the
+   * same division as the seasonal foliage tint, and for the same reason: that a
+   * hedge answers the wind and a boulder does not is a fact about your scatter,
+   * not about the renderer. Water needs no such call; every liquid material
+   * already carries the uniforms and sits at zero until this is switched on.
+   *
+   * The wind itself exists and advances from the first frame either way, which
+   * is why a shower gusts before anything on the ground is wired up to it.
+   *
+   * @example
+   * attachWindSway(broadleafMat, { height: 1.9 });
+   * attachWindSway(bushMat, { height: 0.5, stiffness: 1.2, amplitude: 0.16 });
+   * world.setWind({ heading: Math.PI * 0.25, speed: 4 });
+   *
+   * @example
+   * world.setWind({ gustiness: 0.7, gustPeriod: 4 });  // squally
+   * world.setWind(false);                              // dead calm
+   */
+  setWind(options: WindOptions | boolean = true): Wind {
+    if (options === false) {
+      this.windEnabled = false;
+      // Push the stilling out once rather than leaving every material holding
+      // the last frame's gust — a plant frozen mid-lean is worse than no wind.
+      setMaterialWind(this.windMaterials(), null);
+      return this._wind;
+    }
+    if (typeof options === 'object') this._wind.configure(options);
+    this.windEnabled = true;
+    this.applyWind();
+    return this._wind;
+  }
+
+  /** Push the current wind onto everything that answers it. */
+  private applyWind(): void {
+    setMaterialWind(this.windMaterials(), this._wind);
   }
 
   /**
@@ -1306,6 +1598,7 @@ export class HexWorld {
     this.applyDayNight();
     this._weather?.refresh();
     this.refreshSky();
+    if (this.windEnabled) this.applyWind();
   }
 
   /** Stop the loop and free everything this world created. */
@@ -1330,6 +1623,8 @@ export class HexWorld {
     this.chunks.dispose();
     this.controls.dispose();
     this._weather?.dispose();
+    this._godRays?.dispose();
+    this._skirt?.dispose();
     this._sky?.dispose();
     this.releaseClimate();
     this.sunShadows?.dispose();

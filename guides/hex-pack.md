@@ -145,7 +145,7 @@ const pack = await loadHexPack(source, options);
 |---|---|---|
 | `gltfLoader` | `GltfLoaderLike` | A `GLTFLoader` instance for loading scatter models. If omitted, `scatterDefinitions` will be empty. |
 | `mapIds` | `string[]` | Load only these map IDs. Default: load all maps. |
-| `terrainMaterialOptions` | `TerrainMaterialOptions` | Lighting and texture scale forwarded to `createTerrainMaterial`. |
+| `terrainMaterialOptions` | `TerrainMaterialOptions` | Lighting, texture scale, triplanar sharpness, and cliff-strata styling forwarded to `createTerrainMaterial`. |
 
 `GltfLoaderLike` is satisfied by any object with `loadAsync(url: string): Promise<{ scene: THREE.Group }>`, so the standard `three/addons` `GLTFLoader` works directly.
 

@@ -7,7 +7,7 @@ import { ChunkManager } from '../geometry/ChunkManager.js';
 import { createRoadMaterial } from '../geometry/RoadMaterial.js';
 import { buildTerrainTextureArray } from '../geometry/TerrainTextures.js';
 import { DEFAULT_TERRAIN_DESCRIPTORS, resolveTerrainDefinitions, buildWaterTerrainSet } from '../geometry/TerrainTypes.js';
-import { configureTerrainGrid, createTerrainMaterial } from '../geometry/TerrainMaterial.js';
+import { configureTerrainGrid, createTerrainMaterial, setCliffStrataEnabled } from '../geometry/TerrainMaterial.js';
 import { resolveLiquidMaterials, DEFAULT_LIQUID_DESCRIPTORS } from '../geometry/LiquidTypes.js';
 import type { TerrainColorMode } from '../geometry/ChunkManager.js';
 import { HexHashGrid } from '../geometry/HexHashGrid.js';
@@ -38,7 +38,12 @@ import { UnitManager } from '../units/UnitManager.js';
 import { SunShadowRig } from '../lighting/SunShadows.js';
 import { DayNightCycle, formatTimeOfDay } from '../lighting/DayNightCycle.js';
 import { WeatherSystem, type WeatherType } from '../weather/WeatherSystem.js';
+import { setMaterialWind } from '../weather/Wind.js';
+import { attachWindSway } from '../weather/WindSway.js';
+import { attachScatterTexture, setScatterTextureEnabled } from '../geometry/ScatterTexture.js';
 import { SkyDome, averageTerrainColor } from '../sky/SkyDome.js';
+import { MapSkirt } from '../geometry/MapSkirt.js';
+import { GodRays } from '../sky/GodRays.js';
 import { attachAtmosphere } from '../sky/Atmosphere.js';
 import { ClimateData } from '../season/ClimateData.js';
 import { SeasonCycle, formatSeason, type SeasonScope } from '../season/SeasonCycle.js';
@@ -135,7 +140,9 @@ const controls = new RtsCameraController({
   domElement: renderer.domElement,
   initialTarget:   { x: MAP_WIDTH / 2, z: MAP_HEIGHT / 2 },
   initialDistance: 60,
-  minPitch: 30,
+  // 6°, not 30°: above ~22° (half the vertical FOV) the horizon never enters
+  // the frame, so the sky's best hours — and the god rays — can't be looked at.
+  minPitch: 6,
   maxPitch: 66,
   minDistance: 6,
   maxDistance: 80,
@@ -210,6 +217,9 @@ let lastFpsTime = performance.now();
 async function start() {
   const waterGeoOptions = {};
   let gridVisible = false;
+  // On out of the box — the toggle is here to show the before/after, since it
+  // is the kind of change you only see by taking it away.
+  let strataVisible = true;
 
   let terrainMaterial: THREE.Material;
   if (TERRAIN_COLOR_MODE === 'splat') {
@@ -226,6 +236,17 @@ async function start() {
   // --- Sky, day/night + weather ---
   const shaderTerrainMat = terrainMaterial instanceof THREE.ShaderMaterial ? terrainMaterial : undefined;
 
+  // Flat-shaded low-poly plants read as plastic next to textured ground, so
+  // break each facet up with fine procedural mottling. Scale is per material
+  // and tracks facet size: a pine's cone is one big smooth sweep and wants the
+  // coarsest pattern, a bush's lobes are tiny and want the finest. Rock takes
+  // it too — it is the one that most obviously wants grain.
+  attachScatterTexture(pineMat,      { scale: 5,  strength: 0.16 });
+  attachScatterTexture(broadleafMat, { scale: 6,  strength: 0.18 });
+  attachScatterTexture(bushMat,      { scale: 11, strength: 0.14 });
+  attachScatterTexture(rockMat,      { scale: 9,  strength: 0.20 });
+  let scatterTexture = true;
+
   // Scatter uses stock three materials, which have no haze of their own —
   // scene.fog is the wrong tool (it mixes before tone mapping and encoding, so
   // the same color lands far brighter on a tree than on the hill behind it).
@@ -233,9 +254,15 @@ async function start() {
 
   // Every material that carries the atmosphere uniforms, so the map edge and
   // everything standing on it dissolve into the same horizon color.
+  // The map as a block of earth rather than a surface: without it, the low
+  // tilt the camera now allows looks straight under the terrain's edge.
+  const skirt = new MapSkirt(map, layout, { depth: 2.5 }).addTo(scene);
+  let skirtVisible = true;
+
   function* hazeMaterials(): Generator<THREE.Material> {
     if (shaderTerrainMat) yield shaderTerrainMat;
     yield roadMaterial;
+    yield skirt.material;
     yield* scatterMats;
     for (const set of liquidMaterials.values()) {
       for (const mat of [set.surface, set.shore, set.estuary, set.river, set.waterfallFoam, set.waterfallSpray]) {
@@ -252,6 +279,11 @@ async function start() {
   }).addTo(scene);
   let skyVisible = true;
 
+  // Shafts fanning past the ridgelines. Handed the dome so the weather that
+  // greys it out puts the rays out too, and so the dome itself — which is the
+  // light, not an obstacle — stays out of the occlusion pass.
+  const godRays = new GodRays({ sky });
+
   // Starts paused at noon (which reproduces the static default lighting);
   // [N] lets time flow, [,]/[.] scrub in 30-minute steps.
   const dayNight = new DayNightCycle({ dayLength: 90, paused: true });
@@ -263,8 +295,10 @@ async function start() {
       terrainMaterial: shaderTerrainMat,
       roadMaterial,
       liquidMaterials: liquidMaterials.values(),
+      lightMaterials:  [skirt.material],
       scene,
       sky,
+      godRays,
     });
   }
   applyDayNight();
@@ -278,6 +312,32 @@ async function start() {
   });
   const WEATHER_TYPES: WeatherType[] = ['clear', 'rain', 'snow'];
   let weatherIndex = 0;
+
+  // --- Wind ---
+  // The weather built its own wind above; take it rather than making a second,
+  // so the shower and the hillside under it agree on which way the air is
+  // going. HexWorld does the same thing from the other side — it owns the wind
+  // and hands it to the WeatherSystem it builds.
+  const wind = weather.windField;
+  wind.configure({ heading: Math.PI * 0.28, speed: 3.4 });
+  let windEnabled = true;
+
+  // Which scatter bends is the whole reason this is per-material: the three
+  // plants take the patch and the rock does not. Amplitudes are per plant too —
+  // a bush is short, soft and mostly leaf, so it moves far more of its own
+  // height than a pine does, and a stiff conifer barely moves at all.
+  attachWindSway(pineMat,      { height: 2.2, stiffness: 2.6, amplitude: 0.035, flutter: 0.2 });
+  attachWindSway(broadleafMat, { height: 1.9, stiffness: 2.0, amplitude: 0.07 });
+  attachWindSway(bushMat,      { height: 0.5, stiffness: 1.2, amplitude: 0.125, flutter: 0.6 });
+
+  function* windMaterials(): Generator<THREE.Material> {
+    yield pineMat; yield broadleafMat; yield bushMat;
+    for (const set of liquidMaterials.values()) {
+      for (const mat of [set.surface, set.shore, set.estuary, set.river, set.waterfallFoam, set.waterfallSpray]) {
+        if (mat) yield mat;
+      }
+    }
+  }
 
   // --- Seasons ---
   // The demo generates through plugins rather than the full pipeline, so there
@@ -878,6 +938,8 @@ async function start() {
       // New terrain means new latitudes and elevations under the snowline.
       refreshClimate();
       chunkManager.dispose();
+      // New elevations mean a new contour along the rim and a new floor depth.
+      skirt.rebuild();
       updateMinimap();
     } else if (e.key === 'g' || e.key === 'G') {
       activeGenIndex = (activeGenIndex + 1) % GENERATORS.length;
@@ -889,6 +951,8 @@ async function start() {
       // New terrain means new latitudes and elevations under the snowline.
       refreshClimate();
       chunkManager.dispose();
+      // New elevations mean a new contour along the rim and a new floor depth.
+      skirt.rebuild();
       updateMinimap();
     } else if (e.key === 'e' || e.key === 'E') {
       hideUnexplored = !hideUnexplored;
@@ -915,11 +979,28 @@ async function start() {
         gridVisible = !gridVisible;
         configureTerrainGrid(terrainMaterial, layout, { enabled: gridVisible });
       }
+    } else if (e.key === 'b' || e.key === 'B') {
+      if (terrainMaterial instanceof THREE.ShaderMaterial) {
+        strataVisible = !strataVisible;
+        setCliffStrataEnabled(terrainMaterial, strataVisible);
+      }
     } else if (e.key === 'o' || e.key === 'O') {
       sunRig.setEnabled(!sunRig.enabled);
     } else if (e.key === 'k' || e.key === 'K') {
       skyVisible = !skyVisible;
       sky.setEnabled(skyVisible);
+    } else if (e.key === 'x' || e.key === 'X') {
+      godRays.setEnabled(!godRays.enabled);
+    } else if (e.key === 'i' || e.key === 'I') {
+      skirtVisible = !skirtVisible;
+      skirt.setEnabled(skirtVisible);
+    } else if (e.key === 'y' || e.key === 'Y') {
+      // Swing to face the sun and drop to the shallowest tilt — the shafts are
+      // a low-sun effect, so without this you have to go looking for the one
+      // heading and hour they happen at.
+      const s = dayNight.evaluate();
+      controls.rotateTo(Math.atan2(-s.sunDir.x, -s.sunDir.z) * 180 / Math.PI);
+      controls.tiltTo(controls.minPitchDeg);
     } else if (e.key === 'n' || e.key === 'N') {
       dayNight.paused = !dayNight.paused;
     } else if (e.key === ',') {
@@ -931,6 +1012,15 @@ async function start() {
     } else if (e.key === 'm' || e.key === 'M') {
       weatherIndex = (weatherIndex + 1) % WEATHER_TYPES.length;
       weather.setWeather(WEATHER_TYPES[weatherIndex]);
+    } else if (e.key === 'p' || e.key === 'P') {
+      scatterTexture = !scatterTexture;
+      for (const mat of scatterMats) setScatterTextureEnabled(mat, scatterTexture);
+    } else if (e.key === 'w' || e.key === 'W') {
+      windEnabled = !windEnabled;
+    } else if (e.key === 'q' || e.key === 'Q') {
+      // Swing the wind a sixth of a turn — the fastest way to see that the
+      // trees, the rain and the ripples all take the same vector.
+      wind.setPolar(wind.heading + Math.PI / 3, wind.speed);
     } else if (e.key === 'v' || e.key === 'V') {
       seasons.paused = !seasons.paused;
     } else if (e.key === 'j' || e.key === 'J') {
@@ -1020,7 +1110,10 @@ async function start() {
       climate.update();
       for (const mat of snowMaterials()) setSeasonPhase(mat, seasons.phase);
     }
+    // weather.update advances the wind itself (it owns this one), so this only
+    // has to carry the result out to everything that isn't weather.
     weather.update(dt, controls.targetPosition);
+    setMaterialWind(windMaterials(), windEnabled ? wind : null);
     sky.update(camera, dt);
     sunRig.update(camera);
     unitManager.update(dt);
@@ -1083,14 +1176,22 @@ async function start() {
       `Chunks:    ${chunkManager.loadedChunkCount} loaded  (${CHUNK_SIZE}×${CHUNK_SIZE} cells each)\n` +
       `Total:     ${chunkManager.chunksX * chunkManager.chunksY} chunks in map\n` +
       `Zoom:      ${controls.currentDistance.toFixed(1)}  (min ${controls.minDist} / max ${controls.maxDist})\n` +
-      `Tilt:      ${controls.currentPitchDeg.toFixed(1)}°  (min ${controls.minPitchDeg}° / max ${controls.maxPitchDeg}°)\n` +
+      `Tilt:      ${controls.currentPitchDeg.toFixed(1)}°  (min ${controls.minPitchDeg}° / max ${controls.maxPitchDeg}°)  middle-drag up/down\n` +
+      `Heading:   ${controls.currentYawDeg.toFixed(0)}°  middle-drag left/right\n` +
       `Hex grid:  ${gridVisible ? 'ON  [H] toggle' : 'OFF  [H] toggle'}\n` +
+      `Strata:    ${strataVisible ? 'ON  [B] toggle' : 'OFF [B] toggle'}\n` +
       `Shadows:   ${sunRig.enabled ? 'ON  [O] toggle' : 'OFF [O] toggle'}\n` +
       `Time:      ${formatTimeOfDay(dayNight.time)}  ${dayNight.paused ? 'paused' : 'running'}  [N] play/pause  [,][.] scrub\n` +
       `Weather:   ${weather.type}  [M] cycle  (overcast ${weather.overcast.toFixed(2)})\n` +
+      `Scatter tex: ${scatterTexture ? 'ON  [P] toggle' : 'OFF [P] toggle'}\n` +
+      `Wind:      ${windEnabled ? 'ON  [W] toggle' : 'OFF [W] toggle'}  ` +
+        `${(((wind.heading * 180 / Math.PI) % 360) + 360) % 360 | 0}° [Q] veer  ` +
+        `${wind.speed.toFixed(1)} u/s, gust ×${wind.gust.toFixed(2)}\n` +
       `Season:    ${formatSeason(seasons.phase)}  ${seasons.paused ? 'paused' : 'running'}  [V] play/pause  [ [ ][ ] ] scrub\n` +
       `Scope:     ${seasonScope === 'local' ? 'whole map' : 'continental'}  [J] toggle\n` +
       `Sky:       ${skyVisible ? 'ON  [K] toggle' : 'OFF [K] toggle'}\n` +
+      `Map skirt: ${skirtVisible ? 'ON  [I] toggle' : 'OFF [I] toggle'}  (base y ${skirt.baseY.toFixed(1)})\n` +
+      `God rays:  ${godRays.enabled ? 'ON  [X] toggle' : 'OFF [X] toggle'}  (strength ${godRays.strength.toFixed(2)})  [Y] face the sun\n` +
       `Hide unexplored: ${hideUnexplored ? 'ON  [E] toggle' : 'OFF  [E] toggle'}\n` +
       `Dim explored:    ${dimExplored    ? 'ON  [F] toggle' : 'OFF  [F] toggle'}\n` +
       `Explored:  ${fogData.exploredCount} / ${MAP_WIDTH * MAP_HEIGHT} cells\n` +
@@ -1102,6 +1203,8 @@ async function start() {
       `\n${unitLine}\n${hoverLine}`;
 
     renderer.render(scene, camera);
+    // After the frame, never through it — the canvas keeps its MSAA.
+    godRays.render(renderer, scene, camera);
     drawViewportOverlay();
   }
   animate();
