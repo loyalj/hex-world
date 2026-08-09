@@ -9,6 +9,7 @@ import type { HexLayout } from '../math/HexLayout.js';
 import {
   buildChunkArrays,
   computeFlatNormals,
+  type AmbientOcclusionOptions,
   type ChunkArrays,
   type ChunkBounds,
   type ChunkGeometryOptions,
@@ -36,6 +37,7 @@ export interface ChunkWorkerGeometryOptions {
   riverbedTerrain?:     number;
   riverBankFlare?:      number;
   riverbedBlend?:       number;
+  ambientOcclusion?:    boolean | AmbientOcclusionOptions;
 }
 
 /** Uploads (or replaces) the worker's map snapshot, layout, and build options. */
@@ -120,6 +122,7 @@ export function createChunkWorkerHandler(): (msg: ChunkWorkerRequest) => ChunkWo
           arrays.terrain.colors.buffer as ArrayBuffer,
           arrays.terrain.cellIndices.buffer as ArrayBuffer,
           arrays.terrain.normals.buffer as ArrayBuffer,
+          arrays.terrain.occlusion.buffer as ArrayBuffer,
         ];
         if (arrays.terrain.terrainTypes) transfer.push(arrays.terrain.terrainTypes.buffer as ArrayBuffer);
         if (arrays.roads) {
@@ -129,6 +132,7 @@ export function createChunkWorkerHandler(): (msg: ChunkWorkerRequest) => ChunkWo
             arrays.roads.colors.buffer as ArrayBuffer,
             arrays.roads.cellIndices.buffer as ArrayBuffer,
             arrays.roads.normals!.buffer as ArrayBuffer,
+            arrays.roads.occlusion.buffer as ArrayBuffer,
           );
         }
         return { response: { type: 'built', id: msg.id, arrays }, transfer };

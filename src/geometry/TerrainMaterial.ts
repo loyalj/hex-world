@@ -1,6 +1,8 @@
 import * as THREE from 'three';
 import type { HexLayout } from '../math/HexLayout.js';
 import { CLOUD_GLSL, cloudShadowUniforms } from '../weather/CloudShadows.js';
+import { ATMOSPHERE_GLSL, atmosphereUniforms } from '../sky/Atmosphere.js';
+import { SNOW_GLSL, FOLIAGE_GLSL, seasonUniforms, snowAppearanceUniforms, foliageUniforms } from '../season/SeasonGLSL.js';
 
 const vertexShader = /* glsl */`
   #include <common>
@@ -8,8 +10,12 @@ const vertexShader = /* glsl */`
 
   uniform vec3 uLightDir;
 
-  in vec3 terrainType;
-  in vec3 cellIndex;
+  in vec3  terrainType;
+  in vec3  cellIndex;
+  // Baked height-field occlusion (HexChunkCore). Geometry built without the
+  // attribute reads 0 here, which is exactly "fully open" — so the older
+  // à-la-carte chunk arrays keep rendering unchanged.
+  in float occlusion;
 
   uniform sampler2D uFogData;
   uniform vec2      uFogDataSize;
@@ -17,22 +23,39 @@ const vertexShader = /* glsl */`
   uniform float     uHideUnexplored;
   uniform float     uDimExplored;
 
+  // Per-cell climate (see SeasonGLSL) — B channel is snow depth, A is the
+  // season-adjusted temperature the foliage tint turns on. Sampled per vertex
+  // from the same three cellIndex lookups the fog uses, so the snowline and the
+  // autumn line interpolate across the triangle instead of coming out
+  // hex-shaped.
+  uniform sampler2D uClimateData;
+  uniform vec2      uClimateSize;
+  uniform float     uSeasonEnabled;
+
   out vec3  vColor;
   out vec3  vWorldPos;
   out vec3  vNormal;
   out vec3  vTerrainType;
   out float vVisibility;
   out float vExplored;
+  out float vSnow;
+  out float vTemp;
+  out float vOcclusion;
+
+  vec2 cellUV(float ci, vec2 size) {
+    float x = mod(ci, size.x);
+    float y = floor(ci / size.x);
+    return (vec2(x, y) + 0.5) / size;
+  }
 
   vec2 fogCellUV(float ci) {
-    float x = mod(ci, uFogDataSize.x);
-    float y = floor(ci / uFogDataSize.x);
-    return (vec2(x, y) + 0.5) / uFogDataSize;
+    return cellUV(ci, uFogDataSize);
   }
 
   void main() {
     vColor       = color;
     vTerrainType = terrainType;
+    vOcclusion   = occlusion;
 
     vec4 worldPos = modelMatrix * vec4(position, 1.0);
     vWorldPos     = worldPos.xyz;
@@ -61,6 +84,17 @@ const vertexShader = /* glsl */`
     } else {
       vVisibility = 1.0;
       vExplored   = 1.0;
+    }
+
+    if (uSeasonEnabled > 0.5) {
+      vec4 c0 = texture(uClimateData, cellUV(cellIndex.x, uClimateSize));
+      vec4 c1 = texture(uClimateData, cellUV(cellIndex.y, uClimateSize));
+      vec4 c2 = texture(uClimateData, cellUV(cellIndex.z, uClimateSize));
+      vSnow = (c0.b + c1.b + c2.b) / 3.0;
+      vTemp = (c0.a + c1.a + c2.a) / 3.0;
+    } else {
+      vSnow = 0.0;
+      vTemp = 1.0;   // "warm" — grass stays summer green while seasons are off
     }
 
     gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
@@ -108,16 +142,29 @@ const fragmentShader = /* glsl */`
   uniform float uCloudCoverage;
   uniform float uCloudOpacity;
 
+  // Seasonal snow (see configureSeason). uSnowTerrain is the texture-array
+  // layer holding the pack's snow surface, so winter ground keeps the same
+  // grain as the rest of the terrain instead of reading as flat white paint;
+  // -1 falls back to uSnowColor alone.
+  uniform float uSeasonEnabled;
+  uniform float uSnowTerrain;
+
   in vec3  vColor;
+  in float vOcclusion;
   in vec3  vWorldPos;
   in vec3  vNormal;
   in vec3  vTerrainType;
   in float vVisibility;
   in float vExplored;
+  in float vSnow;
+  in float vTemp;
 
   out vec4 fragColor;
 
   ${CLOUD_GLSL}
+  ${ATMOSPHERE_GLSL}
+  ${SNOW_GLSL}
+  ${FOLIAGE_GLSL}
 
   float tHash(vec2 p) {
     return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
@@ -203,13 +250,38 @@ const fragmentShader = /* glsl */`
       float cloud = cloudMask(cloudField(vWorldPos.xz, uCloudOffset, uCloudScale), uCloudCoverage);
       sunVis *= 1.0 - cloud * uCloudOpacity;
     }
-    vec3  light = uAmbient + uLightColor * diff * sunVis;
+    // Baked occlusion attenuates only ambient, the same split shadows use:
+    // a lit cliff face keeps its full sun term and darkens where the sky is
+    // blocked, and the effect reaches full strength exactly where it should
+    // — in shade, where ambient is all the light there is.
+    vec3  light = uAmbient * (1.0 - vOcclusion) + uLightColor * diff * sunVis;
 
     float mv = tNoise(vWorldPos.xz * 0.28) * 0.7 + tNoise(vWorldPos.xz * 0.07) * 0.3;
     c.rgb *= 0.93 + mv * 0.14;
 
     float cliff = 1.0 - abs(n.y);
     c.rgb *= 1.0 - cliff * 0.125;
+
+    // The turn goes on before the snow — grass is gold under a first frost, not
+    // frost under gold. Which of the three splat slots counts as grass is not
+    // asked here: seasonalFoliage measures it off the resolved color, so a hex
+    // half grass and half rock turns exactly the grass half. Seed 0 — the
+    // per-plant hue scatter that keeps a wood from reading as one decal would
+    // only mottle ground cover, which turns as one field.
+    if (uSeasonEnabled > 0.5) {
+      c.rgb = seasonalFoliage(c.rgb, vTemp, 0.0);
+    }
+
+    // Snow goes on before lighting so it shades and shadows like real ground.
+    if (uSeasonEnabled > 0.5) {
+      float snow = snowCoverage(vSnow, n.y, vWorldPos.xz);
+      if (snow > 0.0) {
+        vec3 snowRgb = uSnowTerrain >= 0.0
+          ? sampleTriplanar(uSnowTerrain).rgb * uSnowColor
+          : uSnowColor;
+        c.rgb = mix(c.rgb, snowRgb, snow);
+      }
+    }
 
     vec3 lit = c.rgb * light;
 
@@ -223,7 +295,9 @@ const fragmentShader = /* glsl */`
     }
 
     if (vExplored < 0.01) discard;
-    fragColor = vec4(lit * vVisibility * vExplored, 1.0);
+    // Haze goes on last: it sits between the eye and the surface, so it hazes
+    // the fog-of-war dimming too rather than being dimmed by it.
+    fragColor = vec4(applyAtmosphere(lit * vVisibility * vExplored, vWorldPos.xz), 1.0);
   }
 `;
 
@@ -283,6 +357,20 @@ export function createTerrainMaterial(
       uGridFadeEnd:   { value: 70 },
       // Cloud shadows — off until configureTerrainClouds enables them.
       ...cloudShadowUniforms(),
+      // Distance haze — off until a SkyDome (or configureAtmosphere) enables it.
+      ...atmosphereUniforms(),
+      // Seasonal snow and foliage — off until configureSeason supplies a
+      // ClimateData. The foliage reference green defaults to the built-in
+      // grassland color; HexWorld re-resolves it from the active pack.
+      ...seasonUniforms(),
+      ...snowAppearanceUniforms(),
+      // Ground cover keeps its own palette, because it does not do what a
+      // canopy does: grass goes straw and then dun, where a wood goes gold and
+      // then bare. Sharing the plant palette turns a whole hillside rust, which
+      // reads as the map being recolored rather than as a season. Overridable
+      // per world — see HexWorldSeasonOptions.terrainFoliage.
+      ...foliageUniforms({ summer: 0x86b888, autumn: 0xbba360, bare: 0x9a8f74 }),
+      uSnowTerrain: { value: -1 },
     },
     side: THREE.DoubleSide,
   });

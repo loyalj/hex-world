@@ -65,12 +65,15 @@ function vertexShader(type: PrecipitationType): string {
     uniform float uCloudScale;
     uniform float uCloudCoverage;
 
-    // Per-cell weather mask hook (seasons/temperature layer, future): a
-    // texture spanning uMaskRect (xy = world min corner, zw = size) whose R
-    // channel scales precipitation 0..1 at that world position.
+    // Per-cell weather mask: a texture spanning uMaskRect (xy = world min
+    // corner, zw = size) whose selected channel scales precipitation 0..1 at
+    // that world position. A ClimateData drives this — snow gates on the snow
+    // channel, rain on its inverse, so the two never fall on the same hex.
     uniform float uMaskEnabled;
     uniform sampler2D uMask;
     uniform vec4  uMaskRect;
+    uniform vec4  uMaskChannel;
+    uniform float uMaskInvert;
 
     attribute float aSeed;
     ${isRain ? 'attribute float aTip;' : ''}
@@ -102,7 +105,10 @@ function vertexShader(type: PrecipitationType): string {
       }
       if (uMaskEnabled > 0.5) {
         vec2 muv = (world - uMaskRect.xy) / uMaskRect.zw;
-        vAlpha *= texture2D(uMask, clamp(muv, 0.0, 1.0)).r;
+        // uMaskChannel is a one-hot selector, so any channel of the bound
+        // texture can drive the gate without a branch per channel.
+        float m = dot(texture2D(uMask, clamp(muv, 0.0, 1.0)), uMaskChannel);
+        vAlpha *= mix(m, 1.0 - m, uMaskInvert);
       }
 
       vec3 wp = vec3(world.x, uCenter.y + y, world.y);
@@ -232,6 +238,8 @@ export class PrecipitationLayer {
         uMaskEnabled:   { value: 0 },
         uMask:          { value: null },
         uMaskRect:      { value: new THREE.Vector4(0, 0, 1, 1) },
+        uMaskChannel:   { value: new THREE.Vector4(1, 0, 0, 0) },
+        uMaskInvert:    { value: 0 },
       },
       vertexShader:   vertexShader(this.type),
       fragmentShader: fragmentShader(this.type),
@@ -300,16 +308,35 @@ export class PrecipitationLayer {
   }
 
   /**
-   * Per-cell weather mask hook (for the seasons/temperature layer): a texture
-   * whose R channel scales precipitation at each world position. `rect` is
-   * the world-space span of the texture (min corner + size). Pass null to
-   * clear.
+   * Per-cell weather mask: a texture whose selected channel scales
+   * precipitation at each world position. `rect` is the world-space span of
+   * the texture (min corner + size). Pass null to clear.
+   *
+   * The seasons layer drives this with a `ClimateData` texture: snow gates on
+   * the snow channel (`'b'`) and rain on the same channel inverted, so
+   * precipitation falls as snow exactly where snow is lying and as rain
+   * everywhere else, with no band where both or neither appear.
+   *
+   * @example
+   * snow.setMask(climate.texture, worldRect, { channel: 'b' });
+   * rain.setMask(climate.texture, worldRect, { channel: 'b', invert: true });
    */
-  setMask(texture: THREE.Texture | null, rect?: { x: number; z: number; width: number; depth: number }): void {
+  setMask(
+    texture: THREE.Texture | null,
+    rect?: { x: number; z: number; width: number; depth: number },
+    opts: { channel?: 'r' | 'g' | 'b' | 'a'; invert?: boolean } = {},
+  ): void {
     const u = this.material.uniforms;
     u.uMask.value = texture;
     u.uMaskEnabled.value = texture ? 1 : 0;
     if (texture && rect) u.uMaskRect.value.set(rect.x, rect.z, rect.width, rect.depth);
+    if (opts.channel !== undefined) {
+      const c = opts.channel;
+      (u.uMaskChannel.value as THREE.Vector4).set(
+        c === 'r' ? 1 : 0, c === 'g' ? 1 : 0, c === 'b' ? 1 : 0, c === 'a' ? 1 : 0,
+      );
+    }
+    if (opts.invert !== undefined) u.uMaskInvert.value = opts.invert ? 1 : 0;
   }
 
   /**

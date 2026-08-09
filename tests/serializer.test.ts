@@ -147,6 +147,41 @@ describe('JSON serialization', () => {
     expect(() => deserializeMapJSON(JSON.stringify(p))).toThrow(/out of range/);
   });
 
+  it('accepts descriptor sets positionally or as an object', () => {
+    const m = makeMap();
+    const terrain = [
+      { index: 9, id: 'goo', name: 'Goo', color: 0x00ff00, liquidType: 'goo', texture: { type: 'procedural' as const } },
+    ];
+    const scatter = [
+      { id: 'pine', name: 'Pine', layerIndex: 0, tiers: [[{ assetId: 'pine-lg', yOffset: 1 }]] },
+    ];
+    const liquid = [{ id: 'goo', name: 'Goo', color: 0x00ff00 }];
+
+    // Legacy positional form (scatter, terrain, liquid).
+    const positional = deserializeMapJSON(serializeMapJSON(m, {}, scatter, terrain, liquid));
+    expect(positional.scatterDescriptors[0].id).toBe('pine');
+    expect(positional.terrainDescriptors[0].id).toBe('goo');
+    expect(positional.liquidDescriptors[0].id).toBe('goo');
+
+    // Object form — the only way to carry resources and factions.
+    const object = deserializeMapJSON(serializeMapJSON(m, {}, {
+      scatterDescriptors:  scatter,
+      terrainDescriptors:  terrain,
+      liquidDescriptors:   liquid,
+      resourceDescriptors: [{ id: 'ore', name: 'Ore', color: 0xb0b6c0 }],
+      factions:            [{ id: 'red', name: 'Kelmar', color: 0xff0000 }],
+    }));
+    expect(object.scatterDescriptors[0].id).toBe('pine');
+    expect(object.resourceDescriptors[0].id).toBe('ore');
+    expect(object.factions[0].name).toBe('Kelmar');
+  });
+
+  it('defaults resource and faction sets to empty for maps without them', () => {
+    const r = deserializeMapJSON(serializeMapJSON(makeMap()));
+    expect(r.resourceDescriptors).toEqual([]);
+    expect(r.factions).toEqual([]);
+  });
+
   it('rebuilds the isWater predicate from embedded terrain descriptors', () => {
     const m = new HexMap({ width: 8, height: 8 });
     m.setTerrain(2, 2, 9); m.setElevation(2, 2, -1); // custom liquid index

@@ -18,6 +18,35 @@ import type { TerrainDefinition } from './TerrainTypes.js';
 import { DEFAULT_TERRAIN_DEFINITIONS, buildWaterTerrainSet, buildLiquidTerrainSets } from './TerrainTypes.js';
 import type { LiquidTypeDescriptor, LiquidMaterialSet } from './LiquidTypes.js';
 import { DEFAULT_LIQUID_DESCRIPTORS, liquidMaterialList } from './LiquidTypes.js';
+import { Emitter } from '../events/Emitter.js';
+
+/** Payload for {@link ChunkManagerEventMap.chunkLoaded} and `chunkUnloaded`. */
+export interface ChunkEvent {
+  /** Chunk column index (cell column / `chunkSize`). */
+  cx: number;
+  /** Chunk row index (cell row / `chunkSize`). */
+  cy: number;
+  /** The half-open cell range this chunk covers, clamped to the map. */
+  bounds: ChunkBounds;
+}
+
+/** Events emitted by {@link ChunkManager.events}. */
+export interface ChunkManagerEventMap {
+  /**
+   * A chunk's meshes are in the scene and renderable. Fires from the same place
+   * for synchronous and worker builds, so `chunkWorker: true` doesn't change
+   * when (relative to the geometry existing) consumers hear about it — only how
+   * many frames later. Use it to place props, spawn decorations, or drive a
+   * "world loading" indicator.
+   */
+  chunkLoaded: ChunkEvent;
+  /**
+   * A chunk's meshes have been removed from the scene and disposed — because it
+   * streamed out of range, or because `dispose()` / `setMap()` tore everything
+   * down. Anything you parented to that chunk's region should go now.
+   */
+  chunkUnloaded: ChunkEvent;
+}
 
 /**
  * Explicit renderOrder for the transparent mesh layers, bottom → top.
@@ -110,6 +139,16 @@ export interface ChunkManagerOptions {
  * for the affected chunk on the next `update()`.
  */
 export class ChunkManager {
+  /**
+   * Streaming lifecycle events — `chunkLoaded` once a chunk's meshes are in the
+   * scene, `chunkUnloaded` once they're out of it and disposed.
+   *
+   * ```ts
+   * chunks.events.on('chunkLoaded', ({ bounds }) => spawnPropsIn(bounds));
+   * ```
+   */
+  readonly events = new Emitter<ChunkManagerEventMap>();
+
   private map: HexMap;
   private readonly layout: HexLayout;
   private readonly scene: THREE.Scene;
@@ -568,6 +607,9 @@ export class ChunkManager {
       this.applyFog(this.roadMaterial);
       const rdMesh = new THREE.Mesh(roadsGeo, this.roadMaterial);
       rdMesh.frustumCulled = true;
+      // Roads don't cast (they lie flush on the ground) but they receive, so a
+      // tree's shadow crosses the road instead of stopping at its edge.
+      rdMesh.receiveShadow = true;
       rdMesh.renderOrder = RENDER_ORDER_ROADS;
       this.scene.add(rdMesh);
       this.roadChunks.set(k, rdMesh);
@@ -581,6 +623,10 @@ export class ChunkManager {
         if (this.fogData) this.applyFogToScatterMeshes(scMeshes);
       }
     }
+
+    // Last, so a listener that walks the chunk's meshes sees the complete set —
+    // terrain, every liquid layer, roads, and scatter.
+    this.emitChunkEvent('chunkLoaded', k, b);
   }
 
   /**
@@ -646,9 +692,21 @@ export class ChunkManager {
     }
   }
 
+  /** Build a {@link ChunkEvent} from a chunk key, but only if anyone is listening. */
+  private emitChunkEvent(type: keyof ChunkManagerEventMap, k: string, bounds?: ChunkBounds): void {
+    if (this.events.listenerCount(type) === 0) return;
+    const [cx, cy] = k.split(',').map(Number);
+    this.events.emit(type, { cx, cy, bounds: bounds ?? this.bounds(cx, cy) });
+  }
+
   private unloadChunk(k: string): void {
     const mesh = this.chunks.get(k);
     if (!mesh) return;
+    // Captured before the map can be swapped out from under a listener —
+    // `bounds()` clamps to the current map, and setMap() unloads then re-points.
+    const bounds = this.events.listenerCount('chunkUnloaded') > 0
+      ? this.bounds(...(k.split(',').map(Number) as [number, number]))
+      : undefined;
     this.scene.remove(mesh);
     mesh.geometry.dispose();
     this.chunks.delete(k);
@@ -687,11 +745,18 @@ export class ChunkManager {
       for (const m of scMeshes) {
         this.scene.remove(m);
         m.dispose();
+        // buildScatterMeshes gives each mesh its own clone of the definition's
+        // geometry so it can carry per-instance cellIndex values. That clone is
+        // owned by this mesh (InstancedMesh.dispose only frees the instance
+        // buffers), so it has to go too — the definition's original is
+        // untouched and stays reusable.
+        m.geometry.dispose();
       }
       this.scatterChunks.delete(k);
     }
 
     this.dirty.delete(k);
+    this.emitChunkEvent('chunkUnloaded', k, bounds);
   }
 
   /**
@@ -839,6 +904,7 @@ export class ChunkManager {
       } else if (newRoadsGeo && this.roadMaterial) {
         const newRdMesh = new THREE.Mesh(newRoadsGeo, this.roadMaterial);
         newRdMesh.frustumCulled = true;
+        newRdMesh.receiveShadow = true;
         newRdMesh.renderOrder = RENDER_ORDER_ROADS;
         this.scene.add(newRdMesh);
         this.roadChunks.set(k, newRdMesh);
@@ -846,7 +912,9 @@ export class ChunkManager {
 
       const oldScMeshes = this.scatterChunks.get(k);
       if (oldScMeshes) {
-        for (const m of oldScMeshes) { this.scene.remove(m); m.dispose(); }
+        // geometry.dispose() too — see the note in the unload path; each mesh
+        // owns its clone of the definition's geometry.
+        for (const m of oldScMeshes) { this.scene.remove(m); m.dispose(); m.geometry.dispose(); }
         this.scatterChunks.delete(k);
       }
       if (this.hashGrid && this.scatterDefinitions && this.scatterDefinitions.length > 0) {

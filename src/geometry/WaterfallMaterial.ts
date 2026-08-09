@@ -4,6 +4,7 @@ import {
   type LiquidColorOptions,
 } from './WaterMaterial.js';
 import { FOG_VERT_DECL, FOG_VERT_BODY, FOG_FRAG_DECL, fogUniforms } from './FogGLSL.js';
+import { SEASON_VERT_DECL, SEASON_VERT_BODY, SEASON_FRAG_DECL } from '../season/SeasonGLSL.js';
 
 // ---------------------------------------------------------------------------
 // Plunge-pool foam
@@ -11,6 +12,7 @@ import { FOG_VERT_DECL, FOG_VERT_BODY, FOG_FRAG_DECL, fogUniforms } from './FogG
 
 const foamVertexShader = /* glsl */`
   ${FOG_VERT_DECL}
+  ${SEASON_VERT_DECL}
   varying vec2 vUv;
   varying vec2 vWorldXZ;
   void main() {
@@ -18,12 +20,14 @@ const foamVertexShader = /* glsl */`
     vec4 worldPos = modelMatrix * vec4(position, 1.0);
     vWorldXZ = worldPos.xz;
     ${FOG_VERT_BODY}
+    ${SEASON_VERT_BODY}
     gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
   }
 `;
 
 const foamFragmentShader = /* glsl */`
   ${FOG_FRAG_DECL}
+  ${SEASON_FRAG_DECL}
   uniform float uTime;
   uniform vec3  uColor;
   uniform vec3  uFoamColor;
@@ -42,12 +46,15 @@ const foamFragmentShader = /* glsl */`
     float rings = sin(r * 13.0 - t * 3.4) * 0.5 + 0.5;
     float churn = waterNoise(vec3(vWorldXZ * 3.4 * uWaveScale, t * 0.5));
     float edge  = 1.0 - smoothstep(0.15, 1.0, r);
-    float foam  = clamp(edge * mix(0.35, 1.15, rings * churn) * uFoamIntensity, 0.0, 1.0);
-    if (foam < 0.012) discard;
+    // A pool under a frozen fall has nothing falling into it — the churn goes
+    // still and what's left is the flat ice disc the rim fades out of.
+    float foam  = clamp(edge * mix(0.35, 1.15, rings * churn) * uFoamIntensity, 0.0, 1.0)
+                * (1.0 - vIce);
+    if (foam < 0.012 && vIce < 0.012) discard;
 
     vec3 color = mix(uColor, uFoamColor, foam);
-    vec4 lit   = liquidOutput(color, vVisibility, vExplored, vWorldXZ);
-    gl_FragColor = vec4(lit.rgb, lit.a * foam);
+    vec4 lit   = liquidOutput(color, vVisibility, vExplored, vWorldXZ, vIce);
+    gl_FragColor = vec4(lit.rgb, lit.a * max(foam, vIce * edge));
   }
 `;
 
@@ -87,6 +94,7 @@ export function createWaterfallFoamMaterial(colors?: LiquidColorOptions): THREE.
 
 const sprayVertexShader = /* glsl */`
   ${FOG_VERT_DECL}
+  ${SEASON_VERT_DECL}
   uniform float uTime;
   uniform float uFlowSpeed;
   uniform float uOpacity;
@@ -106,6 +114,10 @@ const sprayVertexShader = /* glsl */`
   float sprayHash(float n) { return fract(sin(n) * 43758.5453123); }
 
   void main() {
+    // Resolved up front, unlike the other liquid shaders: the freeze has to
+    // reach the lifetime clock a few lines down, not just the final color.
+    ${SEASON_VERT_BODY}
+
     vec2 dir   = aSite.xy;
     vec2 right = vec2(-dir.y, dir.x);
     float halfW = aSite.z;
@@ -119,7 +131,13 @@ const sprayVertexShader = /* glsl */`
 
     // Each particle runs its own looping 0→1 lifetime, offset by its seed so a
     // fall emits continuously instead of pulsing whole batches at once.
-    float life = fract(uTime * uRate * uFlowSpeed * (0.7 + 0.6 * h3) + aSeed * 7.13);
+    //
+    // Freezing stops that clock rather than deleting the particles: each one
+    // halts wherever its seed had it, so the plume hangs in the air as
+    // suspended crystals instead of the fall simply blinking out. Everything
+    // downstream — height, spread, size, alpha — is a function of life, so
+    // stilling it here freezes the whole cloud in place.
+    float life = fract(uTime * uRate * uFlowSpeed * (0.7 + 0.6 * h3) * (1.0 - vIce) + aSeed * 7.13);
 
     // A minority of particles are veil mist clinging to the falling sheet;
     // the rest are the plume kicked up where it lands.
@@ -153,7 +171,9 @@ const sprayVertexShader = /* glsl */`
     // Turbulent wander stands in for the eddies coming off the sheet. Scaled
     // by life so a puff leaves the source tight and frays as it rises — and
     // all but switched off for spatter, which follows its throw, not the air.
-    vec2 wander = uSway * life * (1.0 - 0.85 * uArc) * vec2(
+    // Driven by uTime rather than life, so it needs stilling separately or a
+    // frozen cloud would go on shivering.
+    vec2 wander = uSway * life * (1.0 - 0.85 * uArc) * (1.0 - vIce) * vec2(
       sin(uTime * 0.9 + aSeed * 41.0 + climb * 2.6),
       cos(uTime * 0.7 + aSeed * 27.0 + climb * 2.2)
     );
@@ -186,6 +206,7 @@ const sprayVertexShader = /* glsl */`
 
 const sprayFragmentShader = /* glsl */`
   ${FOG_FRAG_DECL}
+  ${SEASON_FRAG_DECL}
   uniform vec3 uFoamColor;
   varying float vAlpha;
   varying vec2  vWorldXZ;
@@ -200,7 +221,7 @@ const sprayFragmentShader = /* glsl */`
     if (a < 0.006) discard;
     // Colour (not alpha) comes from the shared liquid path, so mist picks up
     // the day/night tint, cloud shadows, and any emissive glow the liquid has.
-    vec4 lit = liquidOutput(uFoamColor, vVisibility, vExplored, vWorldXZ);
+    vec4 lit = liquidOutput(uFoamColor, vVisibility, vExplored, vWorldXZ, vIce);
     gl_FragColor = vec4(lit.rgb, a);
   }
 `;

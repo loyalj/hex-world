@@ -82,8 +82,34 @@ export function* generateFbmTerrainSteps(
       }
       if (map.featureLayerCount > 1) {
         const t = map.getTerrain(col, row);
-        const rockLevel = t === TerrainType.Rock ? 1 : 0;
+        // Two densities rather than one. A single level draws a single tier —
+        // see the threshold table in ScatterBuilder — so every boulder on the
+        // map came out the same size at the same spacing, which reads as a
+        // pattern rather than as scree. The higher ground is the rockier.
+        const rockLevel = t !== TerrainType.Rock ? 0
+          : n > (rockThreshold + snowThreshold) / 2 ? 2 : 1;
         map.setFeatureLevel(col, row, 1, rockLevel);
+      }
+      // Layers 2 and 3 exist only on maps that asked for them, so a two-layer
+      // map generates exactly as it did before.
+      //
+      // Broadleaf woods take the warm lowlands and thin out toward the
+      // treeline, while layer 0's conifers hold an even density all the way up.
+      // Neither layer excludes the other — the scatter builder competes for
+      // each slot — so the shift in their relative densities is what makes the
+      // wood change species as the ground rises, without a hard line anywhere.
+      if (map.featureLayerCount > 2) {
+        const lowland = (mudThreshold + rockThreshold) / 2;
+        const broadleaf = isWater || n >= rockThreshold || n < mudThreshold ? 0
+          : n < lowland ? 3 : 1;
+        map.setFeatureLevel(col, row, 2, broadleaf);
+      }
+      // Scrub fills in where trees thin out: densest on the dry ground below
+      // the woods, present but sparse as understory within them.
+      if (map.featureLayerCount > 3) {
+        const bush = isWater || n >= rockThreshold || n < desertThreshold ? 0
+          : n < mudThreshold ? 2 : 1;
+        map.setFeatureLevel(col, row, 3, bush);
       }
     }
     if ((row & 15) === 15) yield (row + 1) / map.height;

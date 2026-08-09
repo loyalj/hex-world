@@ -1,6 +1,10 @@
 import * as THREE from 'three';
 import { FOG_VERT_DECL, FOG_VERT_BODY, FOG_FRAG_DECL, fogUniforms } from './FogGLSL.js';
 import { CLOUD_GLSL, cloudShadowUniforms } from '../weather/CloudShadows.js';
+import { ATMOSPHERE_GLSL, atmosphereUniforms } from '../sky/Atmosphere.js';
+import {
+  SEASON_VERT_DECL, SEASON_VERT_BODY, SEASON_FRAG_DECL, seasonUniforms, freezeUniforms,
+} from '../season/SeasonGLSL.js';
 // Type-only (erased at compile) — no runtime cycle with LiquidTypes.
 import type { LiquidMaterialSet } from './LiquidTypes.js';
 
@@ -126,6 +130,8 @@ export const LIQUID_APPEARANCE_GLSL = /* glsl */`
   uniform vec3  uEmissive;
   uniform float uEmissiveStrength;
   uniform vec3  uLightTint;
+  uniform vec3  uIceColor;
+  uniform float uIceOpacity;
 
   // Drifting cloud shadows — the SAME field the terrain shader samples (a
   // WeatherSystem keeps offset/coverage in sync), so clouds darken lakes and
@@ -137,6 +143,7 @@ export const LIQUID_APPEARANCE_GLSL = /* glsl */`
   uniform float uCloudOpacity;
 
   ${CLOUD_GLSL}
+  ${ATMOSPHERE_GLSL}
 
   // Emissive is nearly exempt from fog dimming — a glowing surface should
   // punch through explored-but-unseen darkness at close to full strength
@@ -144,7 +151,15 @@ export const LIQUID_APPEARANCE_GLSL = /* glsl */`
   // uLightTint is the scene-light tint (white by default; a day/night cycle
   // darkens it at night) — deliberately NOT applied to emissive, so lava and
   // acid keep glowing in the dark. Cloud shadows follow the same rule.
-  vec4 liquidOutput(vec3 color, float visibility, float explored, vec2 worldXZ) {
+  // ice is how far this liquid has frozen at this cell, derived per material
+  // from the climate temperature against its own freezePoint (see SeasonGLSL):
+  // 0 open, 1 solid. Liquids with no freezePoint — lava, acid — always pass 0.
+  vec4 liquidOutput(vec3 color, float visibility, float explored, vec2 worldXZ, float ice) {
+    // Frozen liquid stops being liquid: it goes pale, its glow dies, and it
+    // turns opaque enough to read as a surface you could stand on rather than
+    // a window onto the bed below.
+    color = mix(color, uIceColor, ice);
+
     vec3 tint = uLightTint;
     if (uCloudsEnabled > 0.5) {
       float cloud = cloudMask(cloudField(worldXZ, uCloudOffset, uCloudScale), uCloudCoverage);
@@ -153,13 +168,23 @@ export const LIQUID_APPEARANCE_GLSL = /* glsl */`
       // ambient share under full cloud.
       tint *= 1.0 - cloud * uCloudOpacity * 0.55;
     }
-    vec3 lit = color * tint * visibility + uEmissive * uEmissiveStrength * mix(0.75, 1.0, visibility);
-    return vec4(lit, uOpacity * explored);
+    vec3 lit = color * tint * visibility
+             + uEmissive * uEmissiveStrength * mix(0.75, 1.0, visibility) * (1.0 - ice);
+    // Distance haze last, and on color only: alpha is unchanged because the
+    // terrain showing through a far lake is hazed to the same value anyway.
+    return vec4(applyAtmosphere(lit, worldXZ), mix(uOpacity, uIceOpacity, ice) * explored);
+  }
+
+  // Pre-seasons signature, kept so custom liquid shaders built against the
+  // exported GLSL keep compiling untouched.
+  vec4 liquidOutput(vec3 color, float visibility, float explored, vec2 worldXZ) {
+    return liquidOutput(color, visibility, explored, worldXZ, 0.0);
   }
 `;
 
 const vertexShader = /* glsl */`
   ${FOG_VERT_DECL}
+  ${SEASON_VERT_DECL}
   attribute float depth;
   varying vec2  vWorldXZ;
   varying float vDepth;
@@ -168,12 +193,14 @@ const vertexShader = /* glsl */`
     vWorldXZ = worldPos.xz;
     vDepth   = depth;
     ${FOG_VERT_BODY}
+    ${SEASON_VERT_BODY}
     gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
   }
 `;
 
 const fragmentShader = /* glsl */`
   ${FOG_FRAG_DECL}
+  ${SEASON_FRAG_DECL}
   uniform float uTime;
   uniform vec3  uShallow;
   uniform vec3  uDeep;
@@ -185,9 +212,12 @@ const fragmentShader = /* glsl */`
 
   void main() {
     vec3 color = mix(uShallow, uDeep, vDepth);
+    // Damp the moving highlight rather than the clock: scaling uTime would
+    // rewind the wave's phase as ice forms, which reads as the lake flowing
+    // backwards into winter.
     float hl = waterNoise(vec3(vWorldXZ * 4.5 * uWaveScale, uTime * uFlowSpeed * 0.2));
-    color += hl * 0.2;
-    gl_FragColor = liquidOutput(color, vVisibility, vExplored, vWorldXZ);
+    color += hl * 0.2 * (1.0 - vIce);
+    gl_FragColor = liquidOutput(color, vVisibility, vExplored, vWorldXZ, vIce);
   }
 `;
 
@@ -211,6 +241,22 @@ export interface LiquidColorOptions {
   waveScale?: number;
   /** Shore/estuary foam intensity multiplier. Default 1. */
   foamIntensity?: number;
+  /**
+   * Season-adjusted temperature at or below which this liquid freezes, on the
+   * generator's 0–1 scale. Undefined means it never freezes — see
+   * `LiquidTypeDescriptor.freezePoint`.
+   */
+  freezePoint?: number;
+  /** Width of the transition around {@link LiquidColorOptions.freezePoint}. Default 0.06. */
+  freezeBand?: number;
+  /** Color a frozen surface blends toward. Default a pale blue-white. */
+  iceColor?: THREE.Color;
+  /**
+   * Surface alpha once fully frozen. Higher than {@link LiquidColorOptions.opacity}
+   * on purpose — ice you can see straight through reads as water that stopped
+   * moving. Default 0.97.
+   */
+  iceOpacity?: number;
 }
 
 /** Builds the uniform set matching LIQUID_APPEARANCE_GLSL. */
@@ -226,7 +272,12 @@ export function liquidAppearanceUniforms(
     uEmissive:         { value: colors?.emissive         ?? new THREE.Color(0, 0, 0) },
     uEmissiveStrength: { value: colors?.emissiveStrength ?? 0 },
     uLightTint:        { value: new THREE.Color(1, 1, 1) },
+    uIceColor:         { value: colors?.iceColor         ?? new THREE.Color(0xdce9f2) },
+    uIceOpacity:       { value: colors?.iceOpacity       ?? 0.97 },
     ...cloudShadowUniforms(),
+    ...atmosphereUniforms(),
+    ...seasonUniforms(),
+    ...freezeUniforms(colors?.freezePoint, colors?.freezeBand),
   };
 }
 

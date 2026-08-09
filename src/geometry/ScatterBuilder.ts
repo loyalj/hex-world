@@ -37,15 +37,26 @@ function perturbXZ(x: number, z: number): [number, number] {
 /**
  * Returns a deterministic spawn hash for a given definition, using the definition's
  * own layerIndex as the hash channel so placement is stable regardless of array order.
+ *
+ * Layers past the third take a fresh channel from the grid rather than an
+ * offset of channel A. An offset stays almost perfectly *ordered* against the
+ * channel it came from — layer 3's hash was below layer 0's for 85% of slots —
+ * and since the lowest hash wins the slot, that isn't two layers mixing, it's
+ * one layer beating the other nearly everywhere. Channels `d` and `e` are
+ * already spoken for by the variant pick and the instance rotation, so the
+ * fresh streams start above them.
  */
 function spawnHashForDef(
   hash: { a: number; b: number; c: number },
   layerIndex: number,
+  hashGrid: HexHashGrid,
+  x: number,
+  z: number,
 ): number {
   if (layerIndex === 0) return hash.a;
   if (layerIndex === 1) return hash.b;
   if (layerIndex === 2) return hash.c;
-  return ((hash.a + layerIndex * 0.618033988) % 1.0 + 1.0) % 1.0;
+  return hashGrid.channel(x, z, layerIndex + 2);
 }
 
 function pickFromLayer(
@@ -99,7 +110,7 @@ function addSlot(
 
   for (const def of eligibleDefs) {
     const level = map.getFeatureLevel(col, row, def.layerIndex);
-    const sh    = spawnHashForDef(hash, def.layerIndex);
+    const sh    = spawnHashForDef(hash, def.layerIndex, hashGrid, rawX, rawZ);
     const pick  = pickFromLayer(def.tiers, level, sh, hash.d);
     if (pick && sh < winnerHash) {
       winnerHash    = sh;
@@ -192,7 +203,19 @@ export function buildScatterMeshes(
   for (const [key, matrices] of accumulator) {
     const ref  = collectionRef.get(key)!;
     const coll = ref.def.tiers[ref.tierIdx][ref.variantIdx];
-    const mesh = new THREE.InstancedMesh(coll.geometry, coll.material, matrices.length);
+    const cells = cellAccumulator.get(key)!;
+    // Each mesh takes its own clone of the definition's geometry so it can
+    // carry this chunk's cell indices as a GPU attribute — fog resolves scatter
+    // on the CPU by rewriting matrices, but seasonal snow has to shade per
+    // instance, which only the shader can do. Writing the attribute onto the
+    // shared coll.geometry instead would let the last chunk built overwrite
+    // every earlier chunk's indices. ChunkManager disposes these clones.
+    const geometry = coll.geometry.clone();
+    geometry.setAttribute(
+      'cellIndex',
+      new THREE.InstancedBufferAttribute(new Float32Array(cells), 1),
+    );
+    const mesh = new THREE.InstancedMesh(geometry, coll.material, matrices.length);
     mesh.frustumCulled = false;
     // Inert until the renderer enables shadow maps (see SunShadowRig).
     mesh.castShadow    = true;
@@ -201,7 +224,7 @@ export function buildScatterMeshes(
       mesh.setMatrixAt(i, matrices[i]);
     }
     mesh.instanceMatrix.needsUpdate = true;
-    mesh.userData.fogCellIndices = new Int32Array(cellAccumulator.get(key)!);
+    mesh.userData.fogCellIndices = new Int32Array(cells);
     const origMatrices = new Float32Array(matrices.length * 16);
     for (let i = 0; i < matrices.length; i++) matrices[i].toArray(origMatrices, i * 16);
     mesh.userData.originalMatrices = origMatrices;

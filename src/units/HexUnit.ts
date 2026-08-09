@@ -64,10 +64,12 @@ export class HexUnit {
    */
   onCellEnter?: (col: number, row: number) => void;
   /**
-   * Called when the unit reaches the end of its path.
-   * Use this to return to an idle animation.
+   * Called when the unit stops moving — either because it walked its path to
+   * the end (`completed: true`) or because {@link stop} cut the move short
+   * (`completed: false`). Use this to return to an idle animation; check the
+   * flag when "arrived" has to mean *arrived* (turn resolution, triggers).
    */
-  onMoveEnd?: () => void;
+  onMoveEnd?: (completed: boolean) => void;
 
   private _path: HexCoord[] = [];
   private _segIdx  = 0;    // current segment: path[_segIdx] → path[_segIdx+1]
@@ -109,7 +111,7 @@ export class HexUnit {
     if (this.isMoving) {
       this.isMoving = false;
       this._path = [];
-      this.onMoveEnd?.();
+      this.onMoveEnd?.(false);
     }
   }
 
@@ -142,7 +144,7 @@ export class HexUnit {
         this._snapToCell(map, layout);
         this._path = [];
         this.isMoving = false;
-        this.onMoveEnd?.();
+        this.onMoveEnd?.(true);
         return;
       }
       this._loadSegment(this._segIdx, map, layout);

@@ -55,6 +55,38 @@ export interface LiquidTypeDescriptor {
   /** Shore/estuary foam intensity multiplier. 0 disables foam. Default 1. */
   foamIntensity?: number;
 
+  // --- Freezing -------------------------------------------------------------
+
+  /**
+   * The season-adjusted temperature at or below which this liquid turns solid,
+   * on the same 0–1 scale as the generator's temperature field (0 = polar,
+   * 1 = equatorial). Omit for a liquid that never freezes.
+   *
+   * A point rather than a flag, because substances don't all give up at the
+   * same cold: water skins over across a good part of the map in deep winter
+   * (`0.12`), a low-freezing liquid might only seize at the poles (`0.03`), and
+   * lava simply never does. Set it and the liquid's surface, shore, estuary,
+   * river, and waterfall materials all still their motion and go over to
+   * {@link LiquidTypeDescriptor.iceColor} together.
+   *
+   * Compare against it on the CPU with `ClimateData.isFrozen(col, row, freezePoint)`
+   * — the same number the shader uses, so gameplay and rendering agree.
+   */
+  freezePoint?: number;
+  /**
+   * How wide the thaw/freeze transition is around {@link LiquidTypeDescriptor.freezePoint}.
+   * Larger values give a longer stretch of half-frozen surface. Default 0.06.
+   */
+  freezeBand?: number;
+  /** Hex color a frozen surface blends toward. Default a pale blue-white (0xdce9f2). */
+  iceColor?: number;
+  /**
+   * Surface alpha once fully frozen. Higher than {@link LiquidTypeDescriptor.opacity}
+   * on purpose — ice you can see straight through reads as water that merely
+   * stopped moving. Default 0.97.
+   */
+  iceOpacity?: number;
+
   // --- Waterfalls -----------------------------------------------------------
   // A liquid's falls inherit its foam color, flow speed, wave scale, foam
   // intensity, and emissive glow, so a new liquid looks right before touching
@@ -141,8 +173,12 @@ export interface LiquidMaterialSet {
  * reference their custom liquid IDs.
  */
 export const DEFAULT_LIQUID_DESCRIPTORS: LiquidTypeDescriptor[] = [
+  // Water is the one built-in liquid that freezes. 0.12 sits below the snow
+  // threshold, so a lake skins over a while after the ground around it has
+  // gone white — snow first, then ice, which is the order it happens in.
   { id: 'water', name: 'Water',
-    shallowColor: 0x527fb3, deepColor: 0x1e477a, foamColor: 0xeaf3ff },
+    shallowColor: 0x527fb3, deepColor: 0x1e477a, foamColor: 0xeaf3ff,
+    freezePoint: 0.12 },
   // Lava inverts the usual depth reading: deepColor is HOTTER, not darker, so
   // the pool center looks molten while the edges read as cooling crust.
   // A lava fall doesn't mist — molten rock is THROWN. `sprayArc: 1` swaps the
@@ -186,6 +222,12 @@ export function resolveLiquidMaterials(descriptor: LiquidTypeDescriptor): Liquid
     emissiveStrength: descriptor.emissiveStrength,
     waveScale:        descriptor.waveScale,
     foamIntensity:    descriptor.foamIntensity,
+    // Omitted freezePoint stays undefined, which the materials read as "never
+    // freezes" — lava and acid get winter for free by saying nothing.
+    freezePoint:      descriptor.freezePoint,
+    freezeBand:       descriptor.freezeBand,
+    iceColor:         descriptor.iceColor != null ? new THREE.Color(descriptor.iceColor) : undefined,
+    iceOpacity:       descriptor.iceOpacity,
   };
   return {
     surface: createWaterMaterial(appearance),

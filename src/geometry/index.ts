@@ -21,6 +21,8 @@ export * from './TerrainTextures.js';
 export * from './HexHashGrid.js';
 export * from './ScatterTypes.js';
 export * from './ScatterBuilder.js';
+export * from './ScatterShapes.js';
+export * from './RockMaterial.js';
 export * from './TerrainTypes.js';
 export * from './LiquidTypes.js';
 export * from './RiverWidth.js';

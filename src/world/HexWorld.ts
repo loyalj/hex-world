@@ -3,7 +3,8 @@ import { HexMap } from '../map/HexMap.js';
 import type { HexOrientation } from '../math/HexOrientation.js';
 import { POINTY_TOP } from '../math/HexOrientation.js';
 import type { HexLayout } from '../math/HexLayout.js';
-import { createLayout } from '../math/HexLayout.js';
+import { createLayout, hexToWorld } from '../math/HexLayout.js';
+import { offsetToHex } from '../math/HexCoord.js';
 import { ChunkManager } from '../geometry/ChunkManager.js';
 import { createDefaultChunkWorker, type ChunkWorkerLike } from '../geometry/WorkerChunkBuilder.js';
 import type { ChunkGeometryOptions } from '../geometry/HexChunk.js';
@@ -28,6 +29,75 @@ import { RtsCameraController } from '../camera/RtsCameraController.js';
 import { SunShadowRig, type SunShadowOptions } from '../lighting/SunShadows.js';
 import { DayNightCycle, type DayNightOptions } from '../lighting/DayNightCycle.js';
 import { WeatherSystem, type WeatherType, type WeatherOptions } from '../weather/WeatherSystem.js';
+import { SkyDome, averageTerrainColor, type SkyDomeOptions } from '../sky/SkyDome.js';
+import { attachAtmosphere } from '../sky/Atmosphere.js';
+import { ClimateData } from '../season/ClimateData.js';
+import { SeasonCycle, type SeasonOptions } from '../season/SeasonCycle.js';
+import {
+  configureSeason, resolveSnowTerrain, resolveFoliageColor, setSeasonPhase,
+  type SeasonAppearanceOptions, type FoliageTintOptions,
+} from '../season/SeasonGLSL.js';
+import { attachSnow } from '../season/SnowAttach.js';
+import type { TemperatureModelOptions } from '../generators/TemperatureModel.js';
+import { TerritoryLayer, type FactionDescriptor, type TerritoryLayerOptions } from '../gameplay/TerritoryLayer.js';
+import { ResourceLayer, type ResourceLayerOptions } from '../gameplay/ResourceLayer.js';
+import type { ResourceDescriptor, ResourceIconRegistry } from '../gameplay/ResourceTypes.js';
+import { Emitter, type Unsubscribe } from '../events/Emitter.js';
+import type { ChunkManagerEventMap } from '../geometry/ChunkManager.js';
+import type { UnitManager, UnitManagerEventMap } from '../units/UnitManager.js';
+
+/** A cell address. Cell events carry these directly rather than a wrapper object. */
+export interface CellRef {
+  col: number;
+  row: number;
+}
+
+/** Payload for the pointer-driven cell events. */
+export interface CellPointerEvent extends CellRef {
+  /** `PointerEvent.button`: 0 left, 1 middle, 2 right. */
+  button: number;
+  /** The originating DOM event, for modifier keys and `preventDefault`. */
+  pointer: PointerEvent;
+}
+
+/**
+ * Everything {@link HexWorld.events} can emit. Chunk streaming and unit events
+ * are re-emitted verbatim from {@link ChunkManager.events} and (once
+ * {@link HexWorld.trackUnits} is wired) {@link UnitManager.events}, so one
+ * subscription point covers the whole world.
+ */
+export interface HexWorldEventMap extends ChunkManagerEventMap, UnitManagerEventMap {
+  /**
+   * Once per rendered frame, after chunks, picking, and the overlay layers have
+   * updated and before the draw call. The multi-subscriber form of
+   * {@link HexWorld.onFrame}, which still fires first.
+   */
+  frame: { dt: number };
+  /**
+   * The cell under the pointer changed — including to and from `null` when the
+   * cursor leaves the map. One subscription that always knows what's under the
+   * cursor; use it for a status readout or a hover highlight that has to clear.
+   */
+  cellHover: { cell: CellRef | null; previous: CellRef | null };
+  /** The pointer moved onto this cell. Paired with `cellLeave`. */
+  cellEnter: CellRef;
+  /** The pointer moved off this cell. Fires before the matching `cellEnter`. */
+  cellLeave: CellRef;
+  /**
+   * A press and release on the same cell without dragging past
+   * {@link HexWorldOptions.clickTolerance}. Fires for every button, so a
+   * right-click that *isn't* a camera pan reads as the cancel gesture it is.
+   */
+  cellClick: CellPointerEvent;
+  /**
+   * A button went down over a cell. Fires synchronously from the DOM handler,
+   * so `pointer.preventDefault()` still works — the hook for consuming an input
+   * before the camera controller acts on it.
+   */
+  cellPointerDown: CellPointerEvent;
+  /** {@link HexWorld.setMap} swapped the map. Chunk events for the new map follow. */
+  mapChanged: { map: HexMap };
+}
 
 export interface HexWorldCameraOptions {
   /** Vertical field of view in degrees. Default 45. */
@@ -107,8 +177,67 @@ export interface HexWorldOptions {
    * creatable later via {@link HexWorld.setTimeOfDay}. Default off.
    */
   dayNight?: boolean | DayNightOptions;
+  /**
+   * Gradient sky dome + matching distance haze: `true` for the tuned defaults,
+   * or a SkyDomeOptions object. The dome takes its colors from the day/night
+   * cycle and greys over under rain/snow, while terrain, roads, and every
+   * liquid layer dissolve into its horizon color, so the map edge fades into
+   * atmosphere instead of ending against the background. `groundTint` defaults
+   * to the average color of the terrain palette (re-derived on terrain swaps).
+   * Scatter materials get the same haze via {@link attachAtmosphere}; hand your
+   * own unit/prop materials to it as well. Also creatable later via
+   * {@link HexWorld.setSky}. Default off.
+   */
+  sky?: boolean | SkyDomeOptions;
+  /**
+   * Seasons, snow accumulation, and freezing water: `true` for the tuned
+   * defaults, or a {@link HexWorldSeasonOptions} object. Builds a
+   * {@link ClimateData} for the map (or takes one you already generated),
+   * advances a {@link SeasonCycle} alongside the day clock, and drives snow on
+   * the terrain and scatter plus ice on every liquid whose descriptor sets a
+   * `freezePoint`. Precipitation follows too — snow falls where snow lies, rain
+   * everywhere else. Also creatable later via {@link HexWorld.setSeasons}.
+   * Default off.
+   */
+  seasons?: boolean | HexWorldSeasonOptions;
   /** Start the render loop immediately. Default true. */
   autoStart?: boolean;
+  /**
+   * How far the pointer may travel between press and release and still count as
+   * a `cellClick`, in CSS pixels. This is what keeps a right-drag pan from
+   * firing a click when the button comes up. Default 5.
+   */
+  clickTolerance?: number;
+}
+
+/** Season options plus the rendering and wiring knobs {@link HexWorld.setSeasons} adds. */
+export interface HexWorldSeasonOptions extends SeasonOptions, SeasonAppearanceOptions {
+  /**
+   * Options to rebuild the base temperature field with when no
+   * {@link ClimateData} is supplied. Pass the same ones the map was generated
+   * with — `climateData.temperatureOptions` records them — or the seasons will
+   * be computed against a different climate than the biomes were.
+   */
+  temperature?: TemperatureModelOptions;
+  /**
+   * Seconds between seasonal passes over the map. The pass is O(cells), so on a
+   * continent-scale map running it every frame is waste — snow does not move
+   * fast enough to notice. Default 0.25.
+   */
+  applyInterval?: number;
+  /**
+   * Foliage styling for the *ground* only, applied over
+   * {@link SeasonAppearanceOptions.foliage}.
+   *
+   * The two want to differ. Ground cover turns straw where a wood turns gold,
+   * and the terrain shader ships that way already — this is for tuning it
+   * without dragging every tree along, which is what setting `foliage` alone
+   * would do.
+   *
+   * @example
+   * world.setSeasons({ terrainFoliage: { autumn: 0xc9b070, strength: 0.8 } });
+   */
+  terrainFoliage?: FoliageTintOptions;
 }
 
 // Defaults match the reference consumer (hex-world-editor) so a bare
@@ -146,6 +275,25 @@ export class HexWorld {
   /** Called once per frame after chunks/picking update, before rendering. */
   onFrame: ((dt: number) => void) | null = null;
 
+  /**
+   * Typed world events — pointer/cell interaction, the frame tick, chunk
+   * streaming, and (after {@link trackUnits}) unit movement. Subscribing beats
+   * wiring raycasts and callbacks by hand, and unlike the single-slot
+   * `onFrame` / `onCellEnter` hooks any number of systems can listen.
+   *
+   * ```ts
+   * world.events.on('cellClick', ({ col, row, button }) => {
+   *   if (button === 0) select(col, row);
+   * });
+   * const off = world.events.on('cellHover', ({ cell }) => showTooltip(cell));
+   * off();   // unsubscribe
+   * ```
+   *
+   * {@link dispose} drops every listener before tearing anything down, so no
+   * events fire against a half-disposed world.
+   */
+  readonly events = new Emitter<HexWorldEventMap>();
+
   private _map: HexMap;
   private _liquidDescriptors: LiquidTypeDescriptor[];
   private liquidMaterials: Map<string, LiquidMaterialSet>;
@@ -165,11 +313,66 @@ export class HexWorld {
     this.mouseX = e.clientX;
     this.mouseY = e.clientY;
   };
+  /** Pixels of drag still counted as a click rather than a camera pan. */
+  private readonly clickTolerance: number;
+  /** The in-flight press, until it resolves into a click or is disqualified as a drag. */
+  private pressed: { x: number; y: number; button: number; cell: CellRef | null } | null = null;
+  /** Subscriptions this world made on other emitters (chunks, tracked unit managers). */
+  private readonly forwarders: Unsubscribe[] = [];
+
+  private readonly onPointerDown = (e: PointerEvent) => {
+    // A tap has no preceding pointermove, so the frame loop's hover cell is
+    // stale (or null) on touch — pick at the event's own position instead.
+    this.mouseX = e.clientX;
+    this.mouseY = e.clientY;
+    const cell = this.picker.pick(e.clientX, e.clientY);
+    this.pressed = { x: e.clientX, y: e.clientY, button: e.button, cell };
+    if (cell) {
+      this.events.emit('cellPointerDown', { col: cell.col, row: cell.row, button: e.button, pointer: e });
+    }
+  };
+
+  private readonly onPointerUp = (e: PointerEvent) => {
+    const press = this.pressed;
+    this.pressed = null;
+    if (!press || press.button !== e.button || !press.cell) return;
+    const dx = e.clientX - press.x;
+    const dy = e.clientY - press.y;
+    if (dx * dx + dy * dy > this.clickTolerance * this.clickTolerance) return;
+    this.events.emit('cellClick', {
+      col: press.cell.col, row: press.cell.row, button: e.button, pointer: e,
+    });
+  };
+
+  /** A cancelled pointer (gesture takeover, focus loss) is not a click. */
+  private readonly onPointerCancel = () => { this.pressed = null; };
+
   private rafId: number | null = null;
   private lastFrameTime = 0;
   private hovered: { col: number; row: number } | null = null;
   private _dayNight: DayNightCycle | null = null;
   private _weather: WeatherSystem | null = null;
+  private _sky: SkyDome | null = null;
+  private _seasons: SeasonCycle | null = null;
+  private _climate: ClimateData | null = null;
+  /** True only when this world built the climate itself, and so may dispose it. */
+  private ownsClimate = false;
+  private seasonOptions: HexWorldSeasonOptions = {};
+  private seasonApplyAccum = 0;
+  private _territory: TerritoryLayer | null = null;
+  private _resources: ResourceLayer | null = null;
+  /** Kept so gameplay layers built later can share the world's fog. */
+  private _fogData: FogData | null;
+  /** Last sky styling, so a terrain swap can rebuild the dome's biome tint. */
+  private skyOptions: SkyDomeOptions | null = null;
+  /**
+   * Kept so the sky's distance haze, the day/night light, and the cloud
+   * shadows all reach the road overlay too. Built in the constructor, once the
+   * terrain's light options are known, so the decal matches the ground.
+   */
+  private readonly roadMaterial: THREE.ShaderMaterial;
+  /** Scatter definitions this world streams, so their materials can be hazed too. */
+  private readonly scatterDefinitions: ScatterDefinition[];
   /** The default lights, kept so the day/night cycle can drive them. */
   private defaultAmbient: THREE.AmbientLight | null = null;
   private defaultSun: THREE.DirectionalLight | null = null;
@@ -190,6 +393,21 @@ export class HexWorld {
   get dayNight(): DayNightCycle | null { return this._dayNight; }
   /** The weather system, once {@link setWeather} has been called. */
   get weather(): WeatherSystem | null { return this._weather; }
+  /** The sky dome, if enabled via the `sky` option or {@link setSky}. */
+  get sky(): SkyDome | null { return this._sky; }
+  /** The season cycle, if enabled via the `seasons` option or {@link setSeasons}. */
+  get seasons(): SeasonCycle | null { return this._seasons; }
+  /**
+   * Per-cell climate once seasons are on — the same bytes the shaders sample,
+   * so `climate.snowDepth(col, row)` is exactly what the player can see.
+   */
+  get climate(): ClimateData | null { return this._climate; }
+  /** The fog-of-war state this world renders with, if the `fogData` option was set. */
+  get fog(): FogData | null { return this._fogData; }
+  /** The territory layer, once {@link setFactions} has been called. */
+  get territory(): TerritoryLayer | null { return this._territory; }
+  /** The resource layer, once {@link setResourceTypes} has been called. */
+  get resources(): ResourceLayer | null { return this._resources; }
 
   /** True if the terrain index belongs to any liquid type. */
   isWater = (terrain: number): boolean => this.waterTerrainSet.has(terrain);
@@ -199,7 +417,10 @@ export class HexWorld {
     terrainDefinitions: TerrainDefinition[];
   }) {
     this.container = opts.container;
+    this.clickTolerance = opts.clickTolerance ?? 5;
     this.skyFollowsCycle = opts.background !== null;
+    this.scatterDefinitions = opts.scatterDefinitions ?? [];
+    this._fogData = opts.fogData ?? null;
     this._map = opts.map ?? new HexMap({
       width:  opts.width  ?? 100,
       height: opts.height ?? 100,
@@ -253,6 +474,7 @@ export class HexWorld {
       ambient:    DEFAULT_AMBIENT,
       ...opts.terrainMaterialOptions,
     };
+    this.roadMaterial         = createRoadMaterial(this.terrainMaterialOptions);
     this.terrainMaterial      = prepared.terrainMaterial;
     this._terrainDefinitions  = prepared.terrainDefinitions;
     this._terrainLookup       = buildTerrainLookup(this._terrainDefinitions);
@@ -269,7 +491,7 @@ export class HexWorld {
       material:             this.terrainMaterial,
       liquidMaterials:      this.liquidMaterials,
       liquidDescriptors:    this._liquidDescriptors,
-      roadMaterial:         createRoadMaterial(),
+      roadMaterial:         this.roadMaterial,
       terrainDefinitions:   this._terrainDefinitions,
       chunkSize:            opts.chunkSize  ?? 32,
       loadRadius:           opts.loadRadius ?? 5,
@@ -321,11 +543,31 @@ export class HexWorld {
     this.resizeObserver.observe(this.container);
 
     window.addEventListener('pointermove', this.onPointerMove);
+    // Canvas-scoped: a press that begins on surrounding UI is that UI's, and a
+    // release outside the canvas after a drag was never a click anyway.
+    const canvas = this.renderer.domElement;
+    canvas.addEventListener('pointerdown',   this.onPointerDown);
+    canvas.addEventListener('pointerup',     this.onPointerUp);
+    canvas.addEventListener('pointercancel', this.onPointerCancel);
+
+    // One subscription point for the whole world: chunk streaming events reach
+    // `world.events` without the consumer having to know about `world.chunks`.
+    this.forwarders.push(
+      this.chunks.events.on('chunkLoaded',   e => this.events.emit('chunkLoaded', e)),
+      this.chunks.events.on('chunkUnloaded', e => this.events.emit('chunkUnloaded', e)),
+    );
+
+    // The sky is built before the first applyDayNight so it takes the opening
+    // time of day rather than a frame of default blue.
+    if (opts.sky) this.setSky(typeof opts.sky === 'object' ? opts.sky : {});
 
     if (opts.dayNight) {
       this._dayNight = new DayNightCycle(typeof opts.dayNight === 'object' ? opts.dayNight : {});
       this.applyDayNight();
     }
+
+    // After the day clock, so the season cycle can inherit its dayLength.
+    if (opts.seasons) this.setSeasons(typeof opts.seasons === 'object' ? opts.seasons : {});
 
     if (opts.autoStart !== false) this.start();
   }
@@ -364,14 +606,67 @@ export class HexWorld {
         this._dayNight.advance(dt);
         this.applyDayNight();
       }
+      this.advanceSeasons(dt);
+      this._sky?.update(this.camera, dt);
       this._weather?.update(dt, this.controls.targetPosition);
       this.sunShadows?.update(this.camera);
       this.chunks.update(this.camera, dt);
-      this.hovered = this.picker.pick(this.mouseX, this.mouseY);
+      // No-ops unless a claim/placement changed since the last frame.
+      this._territory?.update();
+      this._resources?.update();
+      this.updateHover();
       this.onFrame?.(dt);
+      this.events.emit('frame', { dt });
       this.renderer.render(this.scene, this.camera);
     };
     tick();
+  }
+
+  /**
+   * Re-pick under the cursor and turn the change into events. The picker
+   * returns a fresh object per pick, so cells are compared by value — identity
+   * would report a change every frame.
+   */
+  private updateHover(): void {
+    const previous = this.hovered;
+    const cell = this.picker.pick(this.mouseX, this.mouseY);
+    this.hovered = cell;
+
+    if (previous?.col === cell?.col && previous?.row === cell?.row) return;
+
+    // Leave before enter, so a highlight handler can clear the old cell and
+    // paint the new one in that order without tracking the previous itself.
+    if (previous) this.events.emit('cellLeave', { col: previous.col, row: previous.row });
+    if (cell)     this.events.emit('cellEnter', { col: cell.col, row: cell.row });
+    this.events.emit('cellHover', { cell, previous });
+  }
+
+  /**
+   * Re-emit a {@link UnitManager}'s events through {@link events}, so unit
+   * movement arrives alongside cell and chunk events instead of on a second
+   * emitter the rest of the game has to know about. Returns an unsubscribe
+   * function; {@link dispose} also drops every forward this world set up.
+   *
+   * `HexWorld` does not own the manager — construct it as usual and hand it
+   * over:
+   *
+   * ```ts
+   * const units = new UnitManager({ scene: world.scene, map: world.map, layout: world.layout, fogData: world.fog ?? undefined });
+   * world.trackUnits(units);
+   * world.events.on('unitArrived', ({ unit }) => endTurn(unit));
+   * ```
+   */
+  trackUnits(manager: UnitManager): Unsubscribe {
+    const types = [
+      'unitAdded', 'unitRemoved', 'unitMoveStart', 'unitCellEnter', 'unitArrived', 'unitMoveEnd',
+    ] as const;
+    const offs = types.map(type =>
+      // Each `type` is a literal here, so the payload types line up per event.
+      manager.events.on(type, (payload) => { this.events.emit(type, payload as never); }),
+    );
+    const off = (): void => { for (const o of offs) o(); };
+    this.forwarders.push(off);
+    return off;
   }
 
   /** Stop the render loop (state is kept; call start() to resume). */
@@ -380,12 +675,65 @@ export class HexWorld {
     this.rafId = null;
   }
 
-  /** Swap in a different map; chunks rebuild and the camera recenters. */
+  /** Swap in a different map; chunks rebuild, climate re-derives, camera recenters. */
   setMap(map: HexMap): void {
     this.chunks.setMap(map);
     this._map = map;
     this.picker.reset();
     this.controls.snapTo(map.width / 2, map.height / 2);
+    // Territory and resources live in the new map's metadata channel — redraw
+    // from it rather than leaving the old map's borders and icons on screen.
+    this._territory?.refresh();
+    this._resources?.refresh();
+    // Climate belongs to the map it was computed from, in both its values and
+    // its dimensions — see refreshClimateForMap.
+    this.refreshClimateForMap();
+    // After the layers refresh, so a listener that reads them sees the new map's
+    // borders and icons rather than the outgoing map's.
+    this.events.emit('mapChanged', { map });
+  }
+
+  /**
+   * Re-derive the climate for the current map, and re-point everything reading
+   * it. No-op unless seasons are running.
+   *
+   * A climate is not merely *about* a map, it is shaped like one: temperature
+   * comes from that map's latitudes and elevations, and the texture is sized to
+   * its cell count. Carry one across a map swap and it isn't stale so much as
+   * misaddressed — every `cellIndex` lookup lands somewhere arbitrary in the old
+   * map's field, which is why a summer map can come up buried in snow. The
+   * precipitation mask goes the same way, since it maps the texture onto a world
+   * rect that just changed size.
+   *
+   * A caller-supplied climate is left alone — it's theirs, and silently
+   * replacing it would throw away campaign snow. If it no longer fits the map,
+   * say so rather than rendering nonsense.
+   */
+  private refreshClimateForMap(): void {
+    if (!this._seasons || !this._climate) return;
+
+    if (!this.ownsClimate) {
+      if (this._climate.width !== this._map.width || this._climate.height !== this._map.height) {
+        console.warn(
+          `HexWorld.setMap: the ClimateData you supplied is ${this._climate.width}×${this._climate.height} ` +
+          `but the new map is ${this._map.width}×${this._map.height}. Seasons will read the wrong cells ` +
+          `until you call setSeasons() with a climate built for this map.`,
+        );
+      }
+      return;
+    }
+
+    this.releaseClimate();
+    this._climate    = ClimateData.fromMap(this._map, this.seasonOptions.temperature ?? {});
+    this.ownsClimate = true;
+
+    this.applySeasonMaterials();
+    this.refreshPrecipitationMask();
+    // Paint the current phase straight away rather than leaving a bare map
+    // until the next apply interval elapses.
+    this._seasons.apply(this._climate);
+    this._climate.update();
+    this.seasonApplyAccum = 0;
   }
 
   /**
@@ -408,6 +756,8 @@ export class HexWorld {
     this.reapplyHexGrid();
     this._weather?.setTerrainMaterial(this.terrainMaterial);
     this.applyDayNight();
+    this.refreshSky();
+    this.applySeasonMaterials();
     if (!keepOldMaterial) oldMat.dispose();
   }
 
@@ -426,6 +776,8 @@ export class HexWorld {
     this.reapplyHexGrid();
     this._weather?.setTerrainMaterial(material);
     this.applyDayNight();
+    this.refreshSky();
+    this.applySeasonMaterials();
     return oldMat;
   }
 
@@ -465,8 +817,10 @@ export class HexWorld {
     this.sunShadows?.setDirection(dirTowardSun);
     // Future materials (setTerrainDescriptors / loadHexPack) pick it up too.
     this.terrainMaterialOptions.lightDir = dirTowardSun.clone();
-    const u = this.terrainMaterial.uniforms;
-    if (u && 'uLightDir' in u) u.uLightDir.value.copy(dirTowardSun).normalize();
+    for (const mat of [this.terrainMaterial, this.roadMaterial]) {
+      const u = mat.uniforms;
+      if (u && 'uLightDir' in u) u.uLightDir.value.copy(dirTowardSun).normalize();
+    }
   }
 
   /**
@@ -491,9 +845,312 @@ export class HexWorld {
       sunLight:        this.defaultSun ?? undefined,
       ambientLight:    this.defaultAmbient ?? undefined,
       terrainMaterial: this.terrainMaterial,
+      roadMaterial:    this.roadMaterial,
       liquidMaterials: this.liquidMaterials.values(),
       scene:           this.skyFollowsCycle ? this.scene : undefined,
+      sky:             this._sky ?? undefined,
     });
+  }
+
+  /**
+   * Every material the sky hazes into its horizon color: terrain, roads, each
+   * liquid layer, and the scatter materials (which {@link setSky} runs through
+   * `attachAtmosphere`, since stock three materials have no haze of their own).
+   * Hand it to a SkyDome you build yourself, or to `configureAtmosphere` for
+   * distance haze without a dome.
+   */
+  *hazeMaterials(): Generator<THREE.Material> {
+    yield this.terrainMaterial;
+    yield this.roadMaterial;
+    for (const set of this.liquidMaterials.values()) {
+      for (const mat of liquidMaterialList(set)) if (mat) yield mat;
+    }
+    for (const mat of this.scatterMaterials()) yield mat;
+  }
+
+  /** Distinct materials across every scatter definition's tiers. */
+  private *scatterMaterials(): Generator<THREE.Material> {
+    const seen = new Set<THREE.Material>();
+    for (const def of this.scatterDefinitions) {
+      for (const tier of def.tiers) {
+        for (const part of tier) {
+          if (!seen.has(part.material)) { seen.add(part.material); yield part.material; }
+        }
+      }
+    }
+  }
+
+  /**
+   * Enable, restyle, or (with `false`) remove the gradient sky dome and its
+   * matching distance haze. Options accumulate across calls, and the dome
+   * immediately picks up the current time of day and weather.
+   *
+   * `groundTint` defaults to the terrain palette's average color so the horizon
+   * haze matches the biome — pass it explicitly to override. Scatter materials
+   * are patched with the same shader haze so they recede with the terrain;
+   * do the same for your own unit and prop materials with `attachAtmosphere`.
+   *
+   * @example
+   * world.setSky(true);
+   * world.setSky({ fog: { near: 40, far: 120 }, stars: false });
+   * world.setSky(false);
+   */
+  setSky(options: SkyDomeOptions | boolean = true): SkyDome | null {
+    this._sky?.dispose();
+    this._sky = null;
+    if (options === false) {
+      this._weather?.setSky(null);
+      return null;
+    }
+    if (typeof options === 'object') this.skyOptions = { ...this.skyOptions, ...options };
+    else this.skyOptions ??= {};
+
+    // Stock three materials fog in a different color space than the library's
+    // shaders, so they get the library's haze injected instead of scene.fog.
+    for (const mat of this.scatterMaterials()) attachAtmosphere(mat);
+
+    this._sky = new SkyDome({
+      groundTint: averageTerrainColor(this._terrainDefinitions),
+      ...this.skyOptions,
+      materials:  this.skyOptions.materials ?? (() => this.hazeMaterials()),
+    }).addTo(this.scene);
+    this._sky.update(this.camera);
+    this._weather?.setSky(this._sky);
+    this.applyDayNight();
+    return this._sky;
+  }
+
+  /**
+   * Every material that renders seasonal snow or ice: terrain, each liquid
+   * layer, and the scatter materials (which {@link setSeasons} runs through
+   * {@link attachSnow}, since stock three materials have no snow of their own).
+   *
+   * Roads are deliberately absent — a road under snow is a road you can't see,
+   * and hiding the network the player routes on is worse than the realism is
+   * worth. Hand your own prop materials to `attachSnow` if you want them white.
+   *
+   * The seasonal *foliage tint* is not attached here either, and that is the
+   * point: whether a plant turns in autumn is what tells a broadleaf from a
+   * pine. Call `attachSeasonalTint` on the scatter materials that should turn —
+   * before or after `setSeasons`, since both effects share one climate binding.
+   */
+  *seasonMaterials(): Generator<THREE.Material> {
+    yield this.terrainMaterial;
+    for (const set of this.liquidMaterials.values()) {
+      for (const mat of liquidMaterialList(set)) if (mat) yield mat;
+    }
+    for (const mat of this.scatterMaterials()) yield mat;
+  }
+
+  /**
+   * Enable, restyle, or (with `false`) remove seasons: a year clock, snow that
+   * accumulates and melts, and liquids that freeze at their own
+   * `freezePoint`. Options accumulate across calls.
+   *
+   * Supply `climate` when the map was generated with a `climateData` sink —
+   * that field is the one the biomes were assigned from. Without it the base
+   * temperature is rebuilt via {@link ClimateData.fromMap}, which matches only
+   * if you pass the same `temperature` options the generator used.
+   *
+   * The cycle advances with the day clock and re-applies every
+   * {@link HexWorldSeasonOptions.applyInterval} seconds; scrub it directly with
+   * {@link setSeason}.
+   *
+   * @example
+   * // Generated map: hand over the field the biomes came from.
+   * const climate = new ClimateData(map.width, map.height);
+   * generateMap(map, { climateData: climate }, seed);
+   * world.setSeasons({ daysPerYear: 8 }, climate);
+   *
+   * @example
+   * world.setSeasons({ noise: 0.2, snowThreshold: 0.3 }); // restyle
+   * world.setSeasons(false);                              // off
+   *
+   * @example
+   * // Grass and any tinted scatter turn through the year; tune the palette.
+   * world.setSeasons({ foliage: { autumn: 0xd2601a, bareTemp: 0.3 } });
+   */
+  setSeasons(
+    options: HexWorldSeasonOptions | boolean = true,
+    climate?: ClimateData,
+  ): SeasonCycle | null {
+    if (options === false) {
+      this._seasons = null;
+      for (const mat of this.seasonMaterials()) configureSeason(mat, null);
+      this._weather?.setPrecipitationMask(null);
+      this.releaseClimate();
+      return null;
+    }
+    // Read before the merge: only a phase given in *this* call is an
+    // instruction to jump the year. One left over in the accumulated options
+    // from some earlier call is not.
+    const explicit = typeof options === 'object' ? options : {};
+    if (typeof options === 'object') this.seasonOptions = { ...this.seasonOptions, ...options };
+
+    if (climate && this._climate !== climate) {
+      // A caller-supplied climate is theirs to keep — only ours gets freed.
+      this.releaseClimate();
+      this._climate = climate;
+      this.ownsClimate = false;
+    }
+    if (!this._climate) {
+      this._climate = ClimateData.fromMap(this._map, this.seasonOptions.temperature ?? {});
+      this.ownsClimate = true;
+    }
+
+    // Restyling rebuilds the cycle, so carry its live state across. Where it is
+    // in the year and whether it's running are things the world is *doing*, not
+    // configuration — changing the snow colour or the map scope shouldn't rewind
+    // the calendar to spring or start a paused year moving.
+    const running = this._seasons;
+    // Match the day clock unless told otherwise, so one turn of the sun is one
+    // day of the year rather than two clocks drifting apart.
+    this._seasons = new SeasonCycle({
+      dayLength: this._dayNight?.dayLength,
+      ...this.seasonOptions,
+      phase:       explicit.phase       ?? running?.phase       ?? this.seasonOptions.phase,
+      paused:      explicit.paused      ?? running?.paused      ?? this.seasonOptions.paused,
+      // Mutable on the cycle, so the live value can have moved on from whatever
+      // the options last said.
+      daysPerYear: explicit.daysPerYear ?? running?.daysPerYear ?? this.seasonOptions.daysPerYear,
+    });
+
+    // Stock three materials have no snow path of their own, so inject one.
+    for (const mat of this.scatterMaterials()) attachSnow(mat);
+    this.applySeasonMaterials();
+    this.refreshPrecipitationMask();
+
+    // Paint the opening season immediately rather than showing a bare summer
+    // map until the first interval elapses.
+    this._seasons.apply(this._climate);
+    this._climate.update();
+    this.seasonApplyAccum = 0;
+    return this._seasons;
+  }
+
+  /**
+   * Jump the year clock and repaint immediately — the turn-based entry point
+   * ("day 214 of the migration"). Creates a paused cycle if the `seasons`
+   * option wasn't set, so a game that drives its own calendar never needs the
+   * real-time clock at all.
+   */
+  setSeason(phase: number): void {
+    if (!this._seasons) {
+      this.setSeasons({ paused: true });
+    }
+    this._seasons!.setPhase(phase);
+    if (this._climate) {
+      this._seasons!.apply(this._climate);
+      this._climate.update();
+    }
+    this.applySeasonPhase();
+    this.seasonApplyAccum = 0;
+  }
+
+  /**
+   * Advance the year and repaint the climate texture, throttled to
+   * `applyInterval`. The pass touches every cell, so running it per frame on a
+   * continent map would cost far more than snow that moves this slowly is
+   * worth; the accumulated dt is handed on so the melt rate stays wall-clock
+   * accurate regardless of the interval.
+   */
+  private advanceSeasons(dt: number): void {
+    if (!this._seasons || !this._climate) return;
+    if (!this._seasons.paused) this._seasons.advance(dt);
+
+    this.seasonApplyAccum += dt;
+    const interval = this.seasonOptions.applyInterval ?? 0.25;
+    if (this.seasonApplyAccum < interval) return;
+
+    this._seasons.apply(this._climate, this.seasonApplyAccum);
+    this._climate.update();
+    this.applySeasonPhase();
+    this.seasonApplyAccum = 0;
+  }
+
+  /** Drop the current climate, disposing it only if this world created it. */
+  private releaseClimate(): void {
+    if (this.ownsClimate) this._climate?.dispose();
+    this._climate = null;
+    this.ownsClimate = false;
+  }
+
+  /** Point every season-aware material at the current climate and styling. */
+  private applySeasonMaterials(): void {
+    if (!this._climate) return;
+    const snowTerrain = resolveSnowTerrain(this._terrainDefinitions);
+    // The foliage palette is applied relative to each surface's own summer
+    // green, so the terrain's reference comes from the pack while a scatter
+    // material keeps whatever `attachSeasonalTint` read off its own color. An
+    // explicit option still wins for both.
+    //
+    // Precedence runs material default → `foliage` (everything that turns) →
+    // `terrainFoliage` (the ground alone), so the terrain shader's straw autumn
+    // survives unless something actually asks otherwise.
+    const terrainFoliage = {
+      summer: resolveFoliageColor(this._terrainDefinitions),
+      ...this.seasonOptions.foliage,
+      ...this.seasonOptions.terrainFoliage,
+    };
+    for (const mat of this.seasonMaterials()) {
+      const foliage = mat === this.terrainMaterial ? terrainFoliage : this.seasonOptions.foliage;
+      configureSeason(mat, this._climate, { ...this.seasonOptions, snowTerrain, foliage });
+    }
+    this.applySeasonPhase();
+  }
+
+  /**
+   * Tell every seasonal material which way the year is going — the one input
+   * the foliage tint cannot read out of the climate texture, because spring and
+   * autumn pass through identical temperatures in opposite directions.
+   */
+  private applySeasonPhase(): void {
+    if (!this._seasons) return;
+    const phase = this._seasons.phase;
+    for (const mat of this.seasonMaterials()) setSeasonPhase(mat, phase);
+  }
+
+  /**
+   * Gate precipitation on the snow channel: snow falls where snow is lying,
+   * rain everywhere else. Complementary by construction, so no hex gets both.
+   */
+  private refreshPrecipitationMask(): void {
+    if (!this._weather || !this._climate) return;
+    this._weather.setPrecipitationMask(this._climate.texture, this.mapWorldRect());
+  }
+
+  /**
+   * World-space span of the whole map — the rect a map-sized data texture maps
+   * onto. Derived from the four corner cells and padded by a hex, so the odd-row
+   * stagger stays inside it.
+   */
+  private mapWorldRect(): { x: number; z: number; width: number; depth: number } {
+    const w = this._map.width, h = this._map.height;
+    let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+    for (const [col, row] of [[0, 0], [w - 1, 0], [0, h - 1], [w - 1, h - 1]] as const) {
+      const p = hexToWorld(this.layout, offsetToHex(col, row));
+      minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x);
+      minZ = Math.min(minZ, p.z); maxZ = Math.max(maxZ, p.z);
+    }
+    const pad = this.layout.size;
+    return {
+      x:     minX - pad,
+      z:     minZ - pad,
+      width: (maxX - minX) + pad * 2,
+      depth: (maxZ - minZ) + pad * 2,
+    };
+  }
+
+  /**
+   * Re-point the sky at swapped materials and re-derive its biome tint from
+   * the current terrain palette. Called for you on every terrain/liquid swap.
+   */
+  private refreshSky(): void {
+    if (!this._sky) return;
+    if (this.skyOptions?.groundTint === undefined) {
+      this._sky.setGroundTint(averageTerrainColor(this._terrainDefinitions));
+    }
+    this._sky.refresh();
   }
 
   /**
@@ -503,19 +1160,126 @@ export class HexWorld {
    * WeatherSystem on first use; returns it for fine-grained control
    * (intensity ramps, wind changes).
    *
+   * `'clear'` means no precipitation, not an empty sky: it keeps scattered
+   * fair-weather cloud shadows drifting over the ground. Pass
+   * `{ clouds: false }` for a cloudless one.
+   *
    * @example
    * world.setWeather('rain');
    * world.setWeather('snow', { intensity: 0.6 });
-   * world.setWeather('clear');
+   * world.setWeather('clear');                  // sun and drifting cloud shadows
+   * world.setWeather('clear', { clouds: false }); // nothing in the sky at all
    */
   setWeather(type: WeatherType, options: WeatherOptions = {}): WeatherSystem {
     this._weather ??= new WeatherSystem({
       scene:           this.scene,
       terrainMaterial: this.terrainMaterial,
+      roadMaterial:    this.roadMaterial,
       liquidMaterials: () => this.liquidMaterials.values(),
+      sky:             this._sky,
     });
+    // Re-pushed here, not just from setSeasons, so the order the two are
+    // enabled in doesn't matter — weather created after seasons still gets the
+    // climate gate, and setWeather's rebuilt particle layer keeps it.
+    this.refreshPrecipitationMask();
     this._weather.setWeather(type, options);
     return this._weather;
+  }
+
+  /**
+   * Set the faction roster and start drawing per-cell ownership: translucent
+   * faction tints with an outline around each faction's holdings. Creates the
+   * {@link TerritoryLayer} on first use and returns it for the claim/release
+   * calls; later calls just re-colour with the new roster.
+   *
+   * Ownership is stored in the map's metadata channel, so it serializes with
+   * the map — no companion file, and `world.map` round-trips through
+   * `serializeMapJSON` with the borders intact.
+   *
+   * @example
+   * const territory = world.setFactions([
+   *   { id: 'red',  name: 'Kelmar',  color: 0xdd4433 },
+   *   { id: 'blue', name: 'Ossiran', color: 0x3377dd },
+   * ]);
+   * territory.claim(10, 10, 'red');
+   */
+  setFactions(factions: FactionDescriptor[], options: Partial<TerritoryLayerOptions> = {}): TerritoryLayer {
+    if (this._territory) {
+      this._territory.setFactions(factions);
+      return this._territory;
+    }
+    this._territory = new TerritoryLayer({
+      overlays: this.overlays,
+      map:      () => this._map,
+      ...options,
+      factions,
+    });
+    return this._territory;
+  }
+
+  /**
+   * Set the resource types and start drawing per-cell deposits as instanced
+   * camera-facing icons — one draw call per type. Creates the
+   * {@link ResourceLayer} on first use and returns it for placement calls;
+   * later calls swap the type set.
+   *
+   * The world's fog (the `fogData` option) is wired in automatically, so icons
+   * hide on unexplored cells and dim on remembered ones along with the ground
+   * beneath them. Placement data lives in the map's metadata channel and
+   * serializes with the map.
+   *
+   * @example
+   * const resources = world.setResourceTypes(DEFAULT_RESOURCE_DESCRIPTORS);
+   * generateResources(world.map, DEFAULT_RESOURCE_DESCRIPTORS, seed, { isWater: world.isWater });
+   */
+  setResourceTypes(
+    descriptors: ResourceDescriptor[],
+    icons?: ResourceIconRegistry,
+    options: Partial<ResourceLayerOptions> = {},
+  ): ResourceLayer {
+    if (this._resources) {
+      this._resources.setDescriptors(descriptors, icons);
+      return this._resources;
+    }
+    this._resources = new ResourceLayer({
+      parent:  this.scene,
+      layout:  this.layout,
+      map:     () => this._map,
+      isWater: this.isWater,
+      fogData: this._fogData ?? undefined,
+      ...options,
+      descriptors,
+      ...(icons ? { icons } : {}),
+    });
+    return this._resources;
+  }
+
+  /**
+   * Attach or detach fog of war at runtime, across every layer that reads it —
+   * terrain, liquids, roads, scatter, and resource icons.
+   */
+  setFogData(fog: FogData | null): void {
+    this._fogData = fog;
+    this.chunks.setFogData(fog);
+    this._resources?.setFogData(fog);
+  }
+
+  /**
+   * Hide unexplored cells (the fog's memory tier boundary), across terrain and
+   * resource icons alike. Independent of {@link setDimExplored}.
+   */
+  setHideUnexplored(enabled: boolean): void {
+    this.chunks.setHideUnexplored(enabled);
+    this._resources?.setHideUnexplored(enabled);
+  }
+
+  /**
+   * Dim explored-but-not-currently-visible cells — the remembered tier's ghost
+   * look — across terrain and resource icons alike.
+   */
+  setDimExplored(enabled: boolean): void {
+    this.chunks.setDimExplored(enabled);
+    this._resources?.setDimExplored(enabled);
   }
 
   /**
@@ -538,22 +1302,39 @@ export class HexWorld {
     this.liquidMaterials    = newMats;
     this.chunks.setLiquids(descriptors, newMats);
     // Fresh materials default to an untinted, cloudless look — re-push the
-    // current time of day and weather so they match the scene.
+    // current time of day, weather, and sky haze so they match the scene.
     this.applyDayNight();
     this._weather?.refresh();
+    this.refreshSky();
   }
 
   /** Stop the loop and free everything this world created. */
   dispose(): void {
     this.stop();
+    // First: tearing down chunks fires `chunkUnloaded` for every loaded chunk,
+    // and a listener has no way to tell that from ordinary streaming. Nothing
+    // should be told about a world that is already half gone.
+    this.events.removeAllListeners();
+    for (const off of this.forwarders) off();
+    this.forwarders.length = 0;
+
     window.removeEventListener('pointermove', this.onPointerMove);
+    const canvas = this.renderer.domElement;
+    canvas.removeEventListener('pointerdown',   this.onPointerDown);
+    canvas.removeEventListener('pointerup',     this.onPointerUp);
+    canvas.removeEventListener('pointercancel', this.onPointerCancel);
     this.resizeObserver.disconnect();
+    this._resources?.dispose();
+    this._territory?.dispose();
     this.overlays.dispose();
     this.chunks.dispose();
     this.controls.dispose();
     this._weather?.dispose();
+    this._sky?.dispose();
+    this.releaseClimate();
     this.sunShadows?.dispose();
     this.terrainMaterial.dispose();
+    this.roadMaterial.dispose();
     for (const set of this.liquidMaterials.values()) {
       for (const m of liquidMaterialList(set)) m?.dispose();
     }

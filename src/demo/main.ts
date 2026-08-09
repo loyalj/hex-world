@@ -13,6 +13,10 @@ import type { TerrainColorMode } from '../geometry/ChunkManager.js';
 import { HexHashGrid } from '../geometry/HexHashGrid.js';
 import type { ScatterDefinition } from '../geometry/ScatterTypes.js';
 import { createRockMaterial } from '../geometry/RockMaterial.js';
+import {
+  createPineGeometry, createBroadleafGeometry, createBushGeometry,
+  BROADLEAF_CANOPY_COLOR, BUSH_COLOR,
+} from '../geometry/ScatterShapes.js';
 import type { MapGeneratorPlugin } from '../generators/MapGeneratorPlugin.js';
 import { FbmPlugin } from '../generators/FbmPlugin.js';
 import { ChunkPlugin } from '../generators/ChunkPlugin.js';
@@ -27,12 +31,27 @@ import { findPath, getMovementRange, getVisibleCells, hasLineOfSight, type MoveC
 import { smoothPath } from '../pathfinding/PathSmoothing.js';
 import { hexToOffset } from '../math/HexCoord.js';
 import { serializeMapJSON, deserializeMapJSON } from '../map/MapSerializer.js';
-import { renderMapImage, getMapWorldBounds, type MapWorldBounds } from '../map/MapImageRenderer.js';
+import { drawMapImage, getMapImageTransform, type MapImageTransform } from '../map/MapImageRenderer.js';
+import { cameraGroundFootprint } from '../camera/GroundProjection.js';
 import { HexUnit } from '../units/HexUnit.js';
 import { UnitManager } from '../units/UnitManager.js';
 import { SunShadowRig } from '../lighting/SunShadows.js';
 import { DayNightCycle, formatTimeOfDay } from '../lighting/DayNightCycle.js';
 import { WeatherSystem, type WeatherType } from '../weather/WeatherSystem.js';
+import { SkyDome, averageTerrainColor } from '../sky/SkyDome.js';
+import { attachAtmosphere } from '../sky/Atmosphere.js';
+import { ClimateData } from '../season/ClimateData.js';
+import { SeasonCycle, formatSeason, type SeasonScope } from '../season/SeasonCycle.js';
+import { configureSeason, resolveSnowTerrain, resolveFoliageColor, setSeasonPhase } from '../season/SeasonGLSL.js';
+import { attachSnow } from '../season/SnowAttach.js';
+import { attachSeasonalTint } from '../season/TintAttach.js';
+import { computeTemperature } from '../generators/TemperatureModel.js';
+import { CellOverlayLayer } from '../geometry/CellOverlayLayer.js';
+import { TerritoryLayer, type FactionDescriptor } from '../gameplay/TerritoryLayer.js';
+import { ResourceLayer } from '../gameplay/ResourceLayer.js';
+import { generateResources } from '../gameplay/ResourceGenerator.js';
+import { DEFAULT_RESOURCE_DESCRIPTORS } from '../gameplay/ResourceTypes.js';
+import { hexRange, hexDistance } from '../math/HexCoord.js';
 
 /** Change this one constant to switch terrain rendering mode. */
 const TERRAIN_COLOR_MODE: TerrainColorMode = 'splat';
@@ -79,7 +98,9 @@ let activeGenIndex = 0;
 let seed = Math.floor(Math.random() * 0xffffffff);
 
 // --- Map ---
-const map = new HexMap({ width: MAP_WIDTH, height: MAP_HEIGHT, featureLayerCount: 2 });
+// Four feature layers: conifers, rocks, broadleaf trees, bushes — the four the
+// generators fill (see assignBiomes / generateFbmTerrain).
+const map = new HexMap({ width: MAP_WIDTH, height: MAP_HEIGHT, featureLayerCount: 4 });
 
 function runGenerator(): void {
   const gen = GENERATORS[activeGenIndex];
@@ -147,6 +168,17 @@ let hoverCell: { col: number; row: number } | null = null;
 // --- Materials ---
 const roadMaterial    = createRoadMaterial();
 const liquidMaterials = new Map(DEFAULT_LIQUID_DESCRIPTORS.map(d => [d.id, resolveLiquidMaterials(d)]));
+// Scatter materials live up here with the rest so the sky can haze them before
+// the scatter definitions below are built.
+//
+// Three plant materials, and which seasonal patches each one gets is the whole
+// difference between them: the pine takes snow only and stays green all year,
+// the other two take the tint as well and turn. See the attach calls in start().
+const pineMat      = new THREE.MeshLambertMaterial({ color: 0x3f6b2c });
+const broadleafMat = new THREE.MeshLambertMaterial({ vertexColors: true });
+const bushMat      = new THREE.MeshLambertMaterial({ vertexColors: true });
+const rockMat      = createRockMaterial();
+const scatterMats  = [pineMat, broadleafMat, bushMat, rockMat];
 
 // --- HUD ---
 const hud = document.createElement('div');
@@ -191,8 +223,34 @@ async function start() {
     terrainMaterial = new THREE.MeshPhongMaterial({ vertexColors: true, side: THREE.DoubleSide });
   }
 
-  // --- Day/night + weather ---
+  // --- Sky, day/night + weather ---
   const shaderTerrainMat = terrainMaterial instanceof THREE.ShaderMaterial ? terrainMaterial : undefined;
+
+  // Scatter uses stock three materials, which have no haze of their own —
+  // scene.fog is the wrong tool (it mixes before tone mapping and encoding, so
+  // the same color lands far brighter on a tree than on the hill behind it).
+  for (const mat of scatterMats) attachAtmosphere(mat);
+
+  // Every material that carries the atmosphere uniforms, so the map edge and
+  // everything standing on it dissolve into the same horizon color.
+  function* hazeMaterials(): Generator<THREE.Material> {
+    if (shaderTerrainMat) yield shaderTerrainMat;
+    yield roadMaterial;
+    yield* scatterMats;
+    for (const set of liquidMaterials.values()) {
+      for (const mat of [set.surface, set.shore, set.estuary, set.river, set.waterfallFoam, set.waterfallSpray]) {
+        if (mat) yield mat;
+      }
+    }
+  }
+
+  const sky = new SkyDome({
+    // The demo palette runs grass → desert → rock → snow; its average is the
+    // dusty warm grey the horizon leans toward by day.
+    groundTint: averageTerrainColor(DEMO_TERRAIN_DEFINITIONS),
+    materials:  hazeMaterials,
+  }).addTo(scene);
+  let skyVisible = true;
 
   // Starts paused at noon (which reproduces the static default lighting);
   // [N] lets time flow, [,]/[.] scrub in 30-minute steps.
@@ -203,8 +261,10 @@ async function start() {
       sunRig,
       ambientLight: ambient,
       terrainMaterial: shaderTerrainMat,
+      roadMaterial,
       liquidMaterials: liquidMaterials.values(),
       scene,
+      sky,
     });
   }
   applyDayNight();
@@ -212,27 +272,138 @@ async function start() {
   const weather = new WeatherSystem({
     scene,
     terrainMaterial: shaderTerrainMat ?? null,
+    roadMaterial,
     liquidMaterials: () => liquidMaterials.values(),
+    sky,
   });
   const WEATHER_TYPES: WeatherType[] = ['clear', 'rain', 'snow'];
   let weatherIndex = 0;
 
+  // --- Seasons ---
+  // The demo generates through plugins rather than the full pipeline, so there
+  // is no temperature field lying around — recompute it from the map, which is
+  // the same fallback a loaded or hand-authored map takes.
+  const climate = new ClimateData(MAP_WIDTH, MAP_HEIGHT);
+  // Opens in late spring: peaks already white, everything below them bare, so
+  // there is somewhere for the snowline to descend from.
+  //
+  // Rebuildable rather than const because the scope is fixed at construction —
+  // it decides how a year is computed, not how far through one we are, so [J]
+  // makes a new cycle at the same point in the same year.
+  let seasonScope: SeasonScope = 'continental';
+  let seasons = new SeasonCycle({ dayLength: 90, daysPerYear: 6, phase: 0.38, paused: true });
+
+  function* snowMaterials(): Generator<THREE.Material> {
+    if (shaderTerrainMat) yield shaderTerrainMat;
+    yield* scatterMats;
+    for (const set of liquidMaterials.values()) {
+      for (const mat of [set.surface, set.shore, set.estuary, set.river, set.waterfallFoam, set.waterfallSpray]) {
+        if (mat) yield mat;
+      }
+    }
+  }
+
+  // Stock scatter materials need a snow path injected, exactly as they needed
+  // a haze one above. Everything standing on the ground catches snow…
+  for (const mat of scatterMats) attachSnow(mat);
+
+  // …but only the deciduous plants turn with the year. That the pine does not
+  // get this call is the entire reason it reads as a conifer in October.
+  //
+  // Both take an explicit `summer` reference because a vertexColors material's
+  // own `color` is white, which would make a useless one — the palette is
+  // applied relative to the surface's authored green (see FOLIAGE_GLSL).
+  //
+  // Blossom comes with the tint. Rather more than half the wood flowers, and
+  // each tree lands somewhere between the two petal colors, so a spring hillside
+  // reads as pinks and blues among the green rather than one repeated tree.
+  attachSeasonalTint(broadleafMat, { summer: BROADLEAF_CANOPY_COLOR, blossomShare: 0.6 });
+  // A bush is foliage all the way down, so skip the green test that keeps the
+  // tint off a broadleaf's trunk. Scrub flowers more sparsely than the wood.
+  attachSeasonalTint(bushMat, {
+    summer: BUSH_COLOR, select: 0, variance: 0.35, blossomShare: 0.3,
+  });
+
+  for (const mat of snowMaterials()) {
+    configureSeason(mat, climate, {
+      snowTerrain: resolveSnowTerrain(DEMO_TERRAIN_DEFINITIONS),
+      // Only the terrain takes a summer reference from here — the scatter
+      // materials already carry their own, set at attach time.
+      foliage: mat === shaderTerrainMat
+        ? { summer: resolveFoliageColor(DEMO_TERRAIN_DEFINITIONS) }
+        : undefined,
+    });
+  }
+
+  // World rect the map-sized climate texture spans, so precipitation can look
+  // up the cell under each falling particle.
+  const c00 = hexToWorld(layout, offsetToHex(0, 0));
+  const c11 = hexToWorld(layout, offsetToHex(MAP_WIDTH - 1, MAP_HEIGHT - 1));
+  weather.setPrecipitationMask(climate.texture, {
+    x:     Math.min(c00.x, c11.x) - HEX_SIZE,
+    z:     Math.min(c00.z, c11.z) - HEX_SIZE,
+    width: Math.abs(c11.x - c00.x) + HEX_SIZE * 2,
+    depth: Math.abs(c11.z - c00.z) + HEX_SIZE * 2,
+  });
+
+  /** Repaint snow, ice and foliage for the current phase (scrubbing, or after a regenerate). */
+  function refreshSeason(): void {
+    seasons.apply(climate);
+    climate.update();
+    // The one seasonal input that isn't in the climate texture: which way the
+    // year is going, which is all that separates spring green from autumn gold.
+    for (const mat of snowMaterials()) setSeasonPhase(mat, seasons.phase);
+  }
+
+  /** Rebuild the base climate after a regenerate, then repaint. */
+  function refreshClimate(): void {
+    climate.setTemperature(computeTemperature(map, { elevationMax: 12 }));
+    refreshSeason();
+  }
+  refreshClimate();
+
   // --- Scatter ---
   const hashGrid = new HexHashGrid(1234);
 
-  const treeMat = new THREE.MeshLambertMaterial({ color: 0x5e8c2a });
+  // Four scatter layers, one per feature slot the generators fill: conifers,
+  // rocks, broadleaf woods, and scrub. Every slot on the map is competed for by
+  // whichever layers are eligible there, so the biome densities the generator
+  // wrote come out as mixed woodland rather than four separate stands.
   const pineDefinition: ScatterDefinition = {
     id:         'pine-tree',
     name:       'Pine Tree',
     layerIndex: 0,
     tiers: [
-      [{ geometry: new THREE.ConeGeometry(0.42, 2.0, 7), material: treeMat, yOffset: 1.0 }],
-      [{ geometry: new THREE.ConeGeometry(0.33, 1.5, 7), material: treeMat, yOffset: 0.75 }],
-      [{ geometry: new THREE.ConeGeometry(0.24, 1.0, 7), material: treeMat, yOffset: 0.5 }],
+      [{ geometry: createPineGeometry(2.0), material: pineMat, yOffset: 0 }],
+      [{ geometry: createPineGeometry(1.5), material: pineMat, yOffset: 0 }],
+      [{ geometry: createPineGeometry(1.0), material: pineMat, yOffset: 0 }],
     ],
   };
 
-  const rockMat = createRockMaterial();
+  const broadleafDefinition: ScatterDefinition = {
+    id:           'broadleaf-tree',
+    name:         'Broadleaf Tree',
+    layerIndex:   2,
+    tiltStrength: 0.05,
+    tiers: [
+      [{ geometry: createBroadleafGeometry(1.9), material: broadleafMat, yOffset: 0 }],
+      [{ geometry: createBroadleafGeometry(1.4), material: broadleafMat, yOffset: 0 }],
+      [{ geometry: createBroadleafGeometry(1.0), material: broadleafMat, yOffset: 0 }],
+    ],
+  };
+
+  const bushDefinition: ScatterDefinition = {
+    id:           'bush',
+    name:         'Bush',
+    layerIndex:   3,
+    tiltStrength: 0.12,
+    tiers: [
+      [{ geometry: createBushGeometry(0.85), material: bushMat, yOffset: 0 }],
+      [{ geometry: createBushGeometry(0.65), material: bushMat, yOffset: 0 }],
+      [{ geometry: createBushGeometry(0.45), material: bushMat, yOffset: 0 }],
+    ],
+  };
+
   const rockDefinition: ScatterDefinition = {
     id:             'rock',
     name:           'Rock',
@@ -339,79 +510,84 @@ async function start() {
   `;
   document.body.appendChild(minimapContainer);
 
-  const minimapImg = document.createElement('img');
-  minimapImg.style.cssText = `display: block; width: 100%; height: auto; image-rendering: pixelated;`;
-  minimapContainer.appendChild(minimapImg);
+  // Two stacked canvases: the terrain redraws only when the map changes, the
+  // viewport outline redraws every frame. Drawing straight into a canvas keeps
+  // the whole thing off the Blob/object-URL path renderMapImage needs.
+  const minimapCanvas = document.createElement('canvas');
+  minimapCanvas.style.cssText = `display: block; width: 100%; height: auto; image-rendering: pixelated;`;
+  minimapContainer.appendChild(minimapCanvas);
 
   const viewportCanvas = document.createElement('canvas');
   viewportCanvas.style.cssText = `position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none;`;
   minimapContainer.appendChild(viewportCanvas);
 
-  let minimapUrl  = '';
-  let mapBounds: MapWorldBounds | null = null;
+  let minimapTransform: MapImageTransform | null = null;
   let minimapDimExplored    = true;
   let minimapHideUnexplored = true;
 
   function updateMinimap(): void {
-    mapBounds = getMapWorldBounds(map, layout);
+    const t = getMapImageTransform(map, layout, { scale: MINIMAP_SCALE, padding: MINIMAP_PADDING });
+    if (minimapCanvas.width !== t.width || minimapCanvas.height !== t.height) {
+      minimapCanvas.width  = viewportCanvas.width  = t.width;
+      minimapCanvas.height = viewportCanvas.height = t.height;
+    }
 
-    // Size the canvas buffer to match the image pixels so world→canvas coords are 1:1.
-    const imgW = Math.ceil((mapBounds.maxX - mapBounds.minX) * MINIMAP_SCALE) + MINIMAP_PADDING * 2;
-    const imgH = Math.ceil((mapBounds.maxZ - mapBounds.minZ) * MINIMAP_SCALE) + MINIMAP_PADDING * 2;
-    viewportCanvas.width  = imgW;
-    viewportCanvas.height = imgH;
-
-    renderMapImage(map, layout, DEMO_TERRAIN_DEFINITIONS, {
+    minimapTransform = drawMapImage(minimapCanvas.getContext('2d')!, map, layout, DEMO_TERRAIN_DEFINITIONS, {
       scale:              MINIMAP_SCALE,
       padding:            MINIMAP_PADDING,
       elevationShading:   0.05,
+      rivers:             true,
+      roads:              true,
       fog:                fogData,
       fogDimOpacity:      minimapDimExplored    ? 0.55 : 0,
       fogHideUnexplored:  minimapHideUnexplored,
-    }).then(blob => {
-      const url = URL.createObjectURL(blob);
-      minimapImg.src = url;
-      if (minimapUrl) URL.revokeObjectURL(minimapUrl);
-      minimapUrl = url;
     });
   }
 
+  const footprint: THREE.Vector3[] = [
+    new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3(),
+  ];
+  const imagePoint = { x: 0, y: 0 };
+
   function drawViewportOverlay(): void {
-    if (!mapBounds || viewportCanvas.width === 0) return;
+    const t = minimapTransform;
+    if (!t) return;
     const ctx = viewportCanvas.getContext('2d')!;
-    ctx.clearRect(0, 0, viewportCanvas.width, viewportCanvas.height);
+    ctx.clearRect(0, 0, t.width, t.height);
 
-    // Project each screen corner through the camera onto the Y=0 ground plane.
-    const ndcCorners: [number, number][] = [[-1, 1], [1, 1], [1, -1], [-1, -1]];
-    const pts: { cx: number; cy: number }[] = [];
-    const _near = new THREE.Vector3();
-    const _far  = new THREE.Vector3();
-    const _dir  = new THREE.Vector3();
-
-    for (const [nx, ny] of ndcCorners) {
-      _near.set(nx, ny, -1).unproject(camera);
-      _far .set(nx, ny,  1).unproject(camera);
-      _dir .copy(_far).sub(_near);
-      if (Math.abs(_dir.y) < 1e-6) return; // parallel to ground — skip
-      const t = -_near.y / _dir.y;
-      if (t < 0) return; // corner points above the horizon — skip
-      pts.push({
-        cx: (_near.x + _dir.x * t - mapBounds.minX) * MINIMAP_SCALE + MINIMAP_PADDING,
-        cy: (_near.z + _dir.z * t - mapBounds.minZ) * MINIMAP_SCALE + MINIMAP_PADDING,
-      });
-    }
+    const quad = cameraGroundFootprint(camera, { maxDistance: controls.maxDist * 3 }, footprint);
+    if (!quad) return;
 
     ctx.beginPath();
-    ctx.moveTo(pts[0].cx, pts[0].cy);
-    for (let i = 1; i < 4; i++) ctx.lineTo(pts[i].cx, pts[i].cy);
+    for (let i = 0; i < 4; i++) {
+      t.worldToImage(quad[i].x, quad[i].z, imagePoint);
+      if (i === 0) ctx.moveTo(imagePoint.x, imagePoint.y);
+      else         ctx.lineTo(imagePoint.x, imagePoint.y);
+    }
     ctx.closePath();
     ctx.strokeStyle = 'rgba(255,255,255,0.85)';
     ctx.lineWidth   = 2;
     ctx.stroke();
   }
 
+  // Click anywhere on the minimap to send the camera there.
+  minimapCanvas.addEventListener('pointerdown', e => {
+    const t = minimapTransform;
+    if (!t) return;
+    const rect = minimapCanvas.getBoundingClientRect();
+    const { x, z } = t.imageToWorld(
+      ((e.clientX - rect.left) / rect.width)  * t.width,
+      ((e.clientY - rect.top)  / rect.height) * t.height,
+    );
+    controls.panTo(x, z);
+  });
+
   // --- Save / Load ---
   const SAVE_KEY = 'hexworld-save';
+  // Exploration is per-player state, not map data, so it saves as its own blob
+  // alongside the map. Territory and resources need no such key — they live in
+  // the map's metadata channel and travel inside the map JSON.
+  const FOG_KEY  = 'hexworld-fog';
   let saveStatus = localStorage.getItem(SAVE_KEY)
     ? 'Saved map available  [L] load'
     : 'No saved map';
@@ -423,8 +599,12 @@ async function start() {
         name:        `${gen.name} — ${seed >>> 0}`,
         seed,
         generatorId: gen.id,
+      }, {
+        factions:            FACTIONS,
+        resourceDescriptors: DEFAULT_RESOURCE_DESCRIPTORS,
       });
       localStorage.setItem(SAVE_KEY, json);
+      localStorage.setItem(FOG_KEY, fogData.toBase64());
       const t = new Date();
       saveStatus = `Saved at ${t.toLocaleTimeString()}  [L] load`;
     } catch (e) {
@@ -444,13 +624,28 @@ async function start() {
       }
       map.uint8.set(loaded.uint8);
       map.roadBits.set(loaded.roadBits);
+      map.riverInBits.set(loaded.riverInBits);
       if (map.featureData && loaded.featureData) map.featureData.set(loaded.featureData);
+      // Territory and resources came back inside the map's metadata channel.
+      map.cellData.clear();
+      for (const [ci, record] of loaded.cellData) map.cellData.set(ci, record);
       if (metadata.seed !== undefined) seed = metadata.seed;
       if (metadata.generatorId) {
         const idx = GENERATORS.findIndex(g => g.id === metadata.generatorId);
         if (idx >= 0) activeGenIndex = idx;
       }
-      resetFog();
+
+      // Restore the remembered world if a fog blob was saved with it; otherwise
+      // start this map unexplored.
+      const fogBlob = localStorage.getItem(FOG_KEY);
+      if (fogBlob) {
+        fogData.loadBase64(fogBlob);
+        unitManager.reapplyFog();
+      } else {
+        resetFog();
+      }
+      territory.refresh();
+      resources.refresh();
       pathOverlay.geometry.dispose();
       pathOverlay.geometry = new THREE.BufferGeometry();
       pathOverlay.visible = false;
@@ -483,7 +678,7 @@ async function start() {
     waterGeometryOptions: waterGeoOptions,
     roadMaterial,
     hashGrid,
-    scatterDefinitions:  [pineDefinition, rockDefinition],
+    scatterDefinitions:  [pineDefinition, rockDefinition, broadleafDefinition, bushDefinition],
     terrainDefinitions:  DEMO_TERRAIN_DEFINITIONS,
     fogData,
   });
@@ -521,27 +716,115 @@ async function start() {
     const spawn = findSpawnCell(def.col, def.row);
     const u = new HexUnit({ col: spawn.col, row: spawn.row, travelSpeed: 4, heightOffset: 0.6, fogRevealRange: FOG_REVEAL_RANGE });
 
-    // Callbacks: real consumers toggle GLTF AnimationMixer clips here.
+    // Per-unit callbacks are for per-unit state — this one closes over the
+    // unit's own material. Real consumers toggle GLTF AnimationMixer clips here.
     const idleColor = def.color;
     u.onMoveStart = () => mat.color.setHex(0xffffff);
-    u.onMoveEnd   = () => {
-      mat.color.setHex(idleColor);
-      if (selectedUnit === u) { rangeNeedsUpdate = true; lastHoveredForPath = null; }
-      updateMinimap();
-    };
-    u.onCellEnter = () => {
-      if (selectedUnit === u) { rangeNeedsUpdate = true; lastHoveredForPath = null; }
-      updateMinimap();
-    };
+    u.onMoveEnd   = () => mat.color.setHex(idleColor);
 
     units.push(u);
     unitMeshes.push(mesh);
     unitManager.addUnit(u, mesh);
   }
 
+  // Everything that reacts the same way whichever unit moved subscribes once
+  // on the manager instead of being re-wired onto every unit.
+  const unitMoved = ({ unit }: { unit: HexUnit }): void => {
+    if (selectedUnit === unit) { rangeNeedsUpdate = true; lastHoveredForPath = null; }
+    updateMinimap();
+  };
+  unitManager.events.on('unitCellEnter', unitMoved);
+  unitManager.events.on('unitMoveEnd',   unitMoved);
+
   // Focus camera on the first unit's actual spawn position so the first frame
   // renders on terrain rather than empty sky.
   controls.snapTo(units[0].worldX, units[0].worldZ);
+
+  // --- Territory + resources ---
+  // Both live in the map's metadata channel, so they ride through [S]/[L]
+  // saves with no companion file of their own.
+  const overlays = new CellOverlayLayer({
+    parent:  scene,
+    layout,
+    map,
+    isWater: t => DEMO_WATER_TERRAINS.has(t),
+  });
+
+  // One faction per unit, sharing its color, so it's obvious who holds what.
+  const FACTIONS: FactionDescriptor[] = UNIT_DEFS.map((def, i) => ({
+    id:    `faction-${i}`,
+    name:  ['Kelmar', 'Ossiran', 'Vashti', 'Tal Meren'][i] ?? `Faction ${i}`,
+    color: def.color,
+  }));
+
+  const territory = new TerritoryLayer({ overlays, map, factions: FACTIONS });
+  let territoryVisible = true;
+
+  const TERRITORY_RADIUS = 4;
+
+  /**
+   * Claim a falloff-weighted region around each unit. Where two claims overlap
+   * the cell ends up contested and the fill blends between both faction colors —
+   * which is the point of the influence model.
+   */
+  function seedTerritory(): void {
+    territory.clear();
+    const weights = new Map<number, Record<string, number>>();
+    units.forEach((unit, i) => {
+      const center = offsetToHex(unit.col, unit.row);
+      for (const hex of hexRange(center, TERRITORY_RADIUS)) {
+        const { col, row } = hexToOffset(hex);
+        if (!map.inBounds(col, row)) continue;
+        if (DEMO_WATER_TERRAINS.has(map.getTerrain(col, row))) continue;
+        const weight = TERRITORY_RADIUS + 1 - hexDistance(center, hex);
+        const ci = row * MAP_WIDTH + col;
+        const record = weights.get(ci) ?? {};
+        record[FACTIONS[i].id] = (record[FACTIONS[i].id] ?? 0) + weight;
+        weights.set(ci, record);
+      }
+    });
+    for (const [ci, record] of weights) {
+      territory.setInfluence(ci % MAP_WIDTH, (ci / MAP_WIDTH) | 0, record);
+    }
+    territory.refresh();
+  }
+
+  const resources = new ResourceLayer({
+    parent:  scene,
+    layout,
+    map,
+    descriptors: DEFAULT_RESOURCE_DESCRIPTORS,
+    isWater: t => DEMO_WATER_TERRAINS.has(t),
+    fogData,
+  });
+  let resourcesVisible = true;
+
+  function seedResources(): void {
+    generateResources(map, DEFAULT_RESOURCE_DESCRIPTORS, seed, {
+      isWater: t => DEMO_WATER_TERRAINS.has(t),
+    });
+    resources.refresh();
+  }
+
+  /** "Kelmar 37, Ossiran 34, …" — cell counts per faction. */
+  function territorySummary(): string {
+    const counts = territory.cellCounts();
+    const parts = FACTIONS
+      .map(f => ({ name: f.name, n: counts.get(f.id) ?? 0 }))
+      .filter(e => e.n > 0)
+      .map(e => `${e.name} ${e.n}`);
+    return parts.length > 0 ? parts.join(', ') : 'unclaimed';
+  }
+
+  /** "ore 21, fish 14, …" — deposit counts per resource type. */
+  function resourceSummary(): string {
+    const counts = resources.counts();
+    const parts = DEFAULT_RESOURCE_DESCRIPTORS
+      .map(d => ({ id: d.id, n: counts.get(d.id) ?? 0 }))
+      .filter(e => e.n > 0)
+      .map(e => `${e.id} ${e.n}`);
+    return parts.length > 0 ? parts.join(', ') : 'none';
+  }
 
   let rangeNeedsUpdate = true;
   let selectedUnit: HexUnit | null = null;
@@ -590,6 +873,10 @@ async function start() {
       runGenerator();
       resetUnits();
       resetFog();
+      seedResources();
+      seedTerritory();
+      // New terrain means new latitudes and elevations under the snowline.
+      refreshClimate();
       chunkManager.dispose();
       updateMinimap();
     } else if (e.key === 'g' || e.key === 'G') {
@@ -597,14 +884,26 @@ async function start() {
       runGenerator();
       resetUnits();
       resetFog();
+      seedResources();
+      seedTerritory();
+      // New terrain means new latitudes and elevations under the snowline.
+      refreshClimate();
       chunkManager.dispose();
       updateMinimap();
     } else if (e.key === 'e' || e.key === 'E') {
       hideUnexplored = !hideUnexplored;
       chunkManager.setHideUnexplored(hideUnexplored);
+      resources.setHideUnexplored(hideUnexplored);
     } else if (e.key === 'f' || e.key === 'F') {
       dimExplored = !dimExplored;
       chunkManager.setDimExplored(dimExplored);
+      resources.setDimExplored(dimExplored);
+    } else if (e.key === 't' || e.key === 'T') {
+      territoryVisible = !territoryVisible;
+      territory.setVisible(territoryVisible);
+    } else if (e.key === 'u' || e.key === 'U') {
+      resourcesVisible = !resourcesVisible;
+      resources.setVisible(resourcesVisible);
     } else if (e.key === 'c' || e.key === 'C') {
       if (selectedUnit) controls.panTo(selectedUnit.worldX, selectedUnit.worldZ);
     } else if (e.key === 's' || e.key === 'S') {
@@ -618,6 +917,9 @@ async function start() {
       }
     } else if (e.key === 'o' || e.key === 'O') {
       sunRig.setEnabled(!sunRig.enabled);
+    } else if (e.key === 'k' || e.key === 'K') {
+      skyVisible = !skyVisible;
+      sky.setEnabled(skyVisible);
     } else if (e.key === 'n' || e.key === 'N') {
       dayNight.paused = !dayNight.paused;
     } else if (e.key === ',') {
@@ -629,6 +931,23 @@ async function start() {
     } else if (e.key === 'm' || e.key === 'M') {
       weatherIndex = (weatherIndex + 1) % WEATHER_TYPES.length;
       weather.setWeather(WEATHER_TYPES[weatherIndex]);
+    } else if (e.key === 'v' || e.key === 'V') {
+      seasons.paused = !seasons.paused;
+    } else if (e.key === 'j' || e.key === 'J') {
+      // Same year, same moment in it — only the question of whether this map is
+      // a subcontinent or one valley.
+      seasonScope = seasonScope === 'continental' ? 'local' : 'continental';
+      seasons = new SeasonCycle({
+        dayLength: 90, daysPerYear: 6, scope: seasonScope,
+        phase: seasons.phase, paused: seasons.paused,
+      });
+      refreshSeason();
+    } else if (e.key === '[') {
+      seasons.setPhase(seasons.phase - 1 / 24);
+      refreshSeason();
+    } else if (e.key === ']') {
+      seasons.setPhase(seasons.phase + 1 / 24);
+      refreshSeason();
     } else if (e.key === '1') {
       minimapDimExplored = !minimapDimExplored;
       updateMinimap();
@@ -675,6 +994,8 @@ async function start() {
     }
   });
 
+  seedResources();
+  seedTerritory();
   updateMinimap();
 
   // --- Render loop ---
@@ -692,10 +1013,21 @@ async function start() {
       dayNight.advance(dt);
       applyDayNight();
     }
+    if (!seasons.paused) {
+      seasons.advance(dt);
+      // Eased rather than snapped, so snow visibly creeps down the slopes.
+      seasons.apply(climate, dt);
+      climate.update();
+      for (const mat of snowMaterials()) setSeasonPhase(mat, seasons.phase);
+    }
     weather.update(dt, controls.targetPosition);
+    sky.update(camera, dt);
     sunRig.update(camera);
     unitManager.update(dt);
     chunkManager.update(camera, dt);
+    // No-ops unless a claim or placement changed since the last frame.
+    territory.update();
+    resources.update();
 
     frameCount++;
     const elapsed = now - lastFpsTime;
@@ -755,9 +1087,15 @@ async function start() {
       `Hex grid:  ${gridVisible ? 'ON  [H] toggle' : 'OFF  [H] toggle'}\n` +
       `Shadows:   ${sunRig.enabled ? 'ON  [O] toggle' : 'OFF [O] toggle'}\n` +
       `Time:      ${formatTimeOfDay(dayNight.time)}  ${dayNight.paused ? 'paused' : 'running'}  [N] play/pause  [,][.] scrub\n` +
-      `Weather:   ${weather.type}  [M] cycle\n` +
+      `Weather:   ${weather.type}  [M] cycle  (overcast ${weather.overcast.toFixed(2)})\n` +
+      `Season:    ${formatSeason(seasons.phase)}  ${seasons.paused ? 'paused' : 'running'}  [V] play/pause  [ [ ][ ] ] scrub\n` +
+      `Scope:     ${seasonScope === 'local' ? 'whole map' : 'continental'}  [J] toggle\n` +
+      `Sky:       ${skyVisible ? 'ON  [K] toggle' : 'OFF [K] toggle'}\n` +
       `Hide unexplored: ${hideUnexplored ? 'ON  [E] toggle' : 'OFF  [E] toggle'}\n` +
       `Dim explored:    ${dimExplored    ? 'ON  [F] toggle' : 'OFF  [F] toggle'}\n` +
+      `Explored:  ${fogData.exploredCount} / ${MAP_WIDTH * MAP_HEIGHT} cells\n` +
+      `Territory: ${territoryVisible ? 'ON  [T] toggle' : 'OFF [T] toggle'}  ${territorySummary()}\n` +
+      `Resources: ${resourcesVisible ? 'ON  [U] toggle' : 'OFF [U] toggle'}  ${resourceSummary()}\n` +
       `Save: [S]  Load: [L]  ${saveStatus}\n` +
       `Minimap fog dim: ${minimapDimExplored    ? 'ON  [1] toggle' : 'OFF  [1] toggle'}\n` +
       `Minimap unexplored: ${minimapHideUnexplored ? 'ON  [2] toggle' : 'OFF  [2] toggle'}\n` +

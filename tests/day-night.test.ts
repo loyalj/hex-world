@@ -3,6 +3,7 @@ import * as THREE from 'three';
 import { DayNightCycle, formatTimeOfDay } from '../src/lighting/DayNightCycle.js';
 import { SunShadowRig } from '../src/lighting/SunShadows.js';
 import { createTerrainMaterial } from '../src/geometry/TerrainMaterial.js';
+import { createRoadMaterial } from '../src/geometry/RoadMaterial.js';
 import { resolveLiquidMaterials, DEFAULT_LIQUID_DESCRIPTORS } from '../src/geometry/LiquidTypes.js';
 
 function makeTerrainMaterial(): THREE.ShaderMaterial {
@@ -124,6 +125,20 @@ describe('DayNightCycle.applyTo', () => {
     expect((scene.background as THREE.Color).getHex()).toBe(s.skyColor.getHex());
     // Ambient light dimmed below the daytime default.
     expect(ambient.intensity).toBeLessThan(0.5);
+  });
+
+  it('roads take the same light uniforms as the terrain, so they go dark at night', () => {
+    const road = createRoadMaterial();
+    const noon = new DayNightCycle({ time: 0.5 }).applyTo({ roadMaterial: road });
+    const dayAmbient = (road.uniforms.uAmbient.value as THREE.Color).clone();
+    expect((road.uniforms.uLightColor.value as THREE.Color).r).toBeCloseTo(noon.terrainLightColor.r, 5);
+
+    const midnight = new DayNightCycle({ time: 0 }).applyTo({ roadMaterial: road });
+    expect(road.uniforms.uLightDir.value.y).toBeCloseTo(midnight.lightDir.y, 5);
+    // Night light is a fraction of the day's — the road can no longer read
+    // near-white while everything around it is moonlit.
+    expect((road.uniforms.uLightColor.value as THREE.Color).r).toBeLessThan(noon.terrainLightColor.r * 0.5);
+    expect((road.uniforms.uAmbient.value as THREE.Color).r).toBeLessThan(dayAmbient.r);
   });
 
   it('liquid tint is white by default, so scenes without a cycle look unchanged', () => {

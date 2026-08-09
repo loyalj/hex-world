@@ -4,21 +4,25 @@ import {
   type LiquidColorOptions,
 } from './WaterMaterial.js';
 import { FOG_VERT_DECL, FOG_VERT_BODY, FOG_FRAG_DECL, fogUniforms } from './FogGLSL.js';
+import { SEASON_VERT_DECL, SEASON_VERT_BODY, SEASON_FRAG_DECL } from '../season/SeasonGLSL.js';
 
 const vertexShader = /* glsl */`
   ${FOG_VERT_DECL}
+  ${SEASON_VERT_DECL}
   varying vec2 vUv;
   varying vec2 vWorldXZ;
   void main() {
     vUv = uv;
     vWorldXZ = (modelMatrix * vec4(position, 1.0)).xz;
     ${FOG_VERT_BODY}
+    ${SEASON_VERT_BODY}
     gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
   }
 `;
 
 const fragmentShader = /* glsl */`
   ${FOG_FRAG_DECL}
+  ${SEASON_FRAG_DECL}
   uniform float uTime;
   uniform vec3  uDeep;
   uniform vec3  uShallow;
@@ -30,8 +34,10 @@ const fragmentShader = /* glsl */`
 
   void main() {
     float r    = River(vUv, uTime * uFlowSpeed);
-    vec3 color = mix(uDeep, uShallow, r);
-    gl_FragColor = liquidOutput(color, vVisibility, vExplored, vWorldXZ);
+    // A frozen river holds one still pattern instead of a current: collapse
+    // the flow variation toward its midpoint as the ice takes hold.
+    vec3 color = mix(uDeep, uShallow, mix(r, 0.5, vIce));
+    gl_FragColor = liquidOutput(color, vVisibility, vExplored, vWorldXZ, vIce);
   }
 `;
 

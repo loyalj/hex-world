@@ -41,6 +41,16 @@ export class HexHashGrid {
     };
   }
 
+  /**
+   * One named channel of the hash at a position, for callers that need more
+   * than the five {@link sample} returns. Channels 0–4 are exactly `a`–`e`;
+   * anything above is a fresh independent stream (scatter layers past the third
+   * take theirs from here).
+   */
+  channel(worldX: number, worldZ: number, channel: number): number {
+    return this._hash(Math.floor(worldX * 8) | 0, Math.floor(worldZ * 8) | 0, channel);
+  }
+
   private _hash(x: number, z: number, channel: number): number {
     let h = (Math.imul(x, 374761393) + Math.imul(z, 668265263) + Math.imul(this.seed ^ (channel * 2246822519 | 0), 2654435761)) | 0;
     h = Math.imul(h ^ (h >>> 13), 1274126177);

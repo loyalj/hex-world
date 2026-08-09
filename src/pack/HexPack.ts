@@ -28,6 +28,8 @@ import {
   serializeMapJSON,
   type MapMetadata,
 } from '../map/MapSerializer.js';
+import type { ResourceDescriptor } from '../gameplay/ResourceTypes.js';
+import type { FactionDescriptor } from '../gameplay/TerritoryLayer.js';
 import type { HexMap } from '../map/HexMap.js';
 
 const PACK_VERSION = 1;
@@ -53,6 +55,10 @@ export interface HexPackManifest {
   terrainDescriptors: TerrainDescriptor[];
   liquidDescriptors?: LiquidTypeDescriptor[];
   scatterDescriptors?: ScatterDescriptor[];
+  /** Resource types the packed maps' `cellData` resource entries refer to. */
+  resourceDescriptors?: ResourceDescriptor[];
+  /** Faction roster the packed maps' `cellData` ownership entries refer to. */
+  factions?: FactionDescriptor[];
   /** assetId → relative path inside the zip. */
   assets?: Record<string, string>;
   maps?: HexPackMapEntry[];
@@ -93,6 +99,10 @@ export interface HexPackage {
   scatterDescriptors:  ScatterDescriptor[];
   /** Populated only when a gltfLoader is supplied and the pack contains model assets. */
   scatterDefinitions:  ScatterDefinition[];
+  /** Resource types carried by the pack — hand to a `ResourceLayer`. Empty when the pack defines none. */
+  resourceDescriptors: ResourceDescriptor[];
+  /** Faction roster carried by the pack — hand to a `TerritoryLayer`. Empty when the pack defines none. */
+  factions:            FactionDescriptor[];
   /** Loaded maps keyed by HexPackMapEntry.id. */
   maps:                Map<string, HexMap>;
 }
@@ -128,10 +138,12 @@ export async function loadHexPack(
     throw new Error(`loadHexPack: unsupported version ${manifest.version} (expected ${PACK_VERSION})`);
   }
 
-  const terrainDescriptors = manifest.terrainDescriptors;
-  const liquidDescriptors  = manifest.liquidDescriptors  ?? DEFAULT_LIQUID_DESCRIPTORS;
-  const scatterDescriptors = manifest.scatterDescriptors ?? [];
-  const assetPaths         = manifest.assets ?? {};
+  const terrainDescriptors  = manifest.terrainDescriptors;
+  const liquidDescriptors   = manifest.liquidDescriptors   ?? DEFAULT_LIQUID_DESCRIPTORS;
+  const scatterDescriptors  = manifest.scatterDescriptors  ?? [];
+  const resourceDescriptors = manifest.resourceDescriptors ?? [];
+  const factions            = manifest.factions            ?? [];
+  const assetPaths          = manifest.assets ?? {};
 
   // 4. Load terrain image assets into registry
   const terrainRegistry: TerrainAssetRegistry = new Map();
@@ -207,6 +219,7 @@ export async function loadHexPack(
     terrainDescriptors, terrainDefinitions, terrainTexture, terrainMaterial,
     liquidDescriptors, liquidMaterials,
     scatterDescriptors, scatterDefinitions,
+    resourceDescriptors, factions,
     maps,
   };
 }
@@ -234,6 +247,10 @@ export interface ExportHexPackOptions {
   terrainDescriptors: TerrainDescriptor[];
   liquidDescriptors?: LiquidTypeDescriptor[];
   scatterDescriptors?: ScatterDescriptor[];
+  /** Resource types the packed maps use. Travels in the manifest and in each JSON map. */
+  resourceDescriptors?: ResourceDescriptor[];
+  /** Faction roster the packed maps' ownership refers to. Travels in the manifest and in each JSON map. */
+  factions?: FactionDescriptor[];
   /**
    * Image assets keyed by assetId (matching TerrainDescriptor.texture.assetId).
    * Only needed for descriptors with texture.type === 'image'.
@@ -281,10 +298,13 @@ export async function exportHexPack(opts: ExportHexPackOptions): Promise<Blob> {
     let data: Uint8Array;
     let path: string;
     if (format === 'json') {
-      const json = serializeMapJSON(
-        map, metadata ?? {},
-        opts.scatterDescriptors, opts.terrainDescriptors, opts.liquidDescriptors,
-      );
+      const json = serializeMapJSON(map, metadata ?? {}, {
+        scatterDescriptors:  opts.scatterDescriptors,
+        terrainDescriptors:  opts.terrainDescriptors,
+        liquidDescriptors:   opts.liquidDescriptors,
+        resourceDescriptors: opts.resourceDescriptors,
+        factions:            opts.factions,
+      });
       data = new TextEncoder().encode(json);
       path = `maps/${sanitizeName(id)}.json`;
     } else {
@@ -302,6 +322,8 @@ export async function exportHexPack(opts: ExportHexPackOptions): Promise<Blob> {
     terrainDescriptors: opts.terrainDescriptors,
     ...(opts.liquidDescriptors?.length ? { liquidDescriptors:  opts.liquidDescriptors  } : {}),
     ...(opts.scatterDescriptors?.length? { scatterDescriptors: opts.scatterDescriptors } : {}),
+    ...(opts.resourceDescriptors?.length?{ resourceDescriptors: opts.resourceDescriptors } : {}),
+    ...(opts.factions?.length          ? { factions:           opts.factions            } : {}),
     ...(Object.keys(assetPaths).length ? { assets:             assetPaths              } : {}),
     ...(mapEntries.length              ? { maps:               mapEntries              } : {}),
   };

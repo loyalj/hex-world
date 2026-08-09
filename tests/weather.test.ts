@@ -6,6 +6,7 @@ import {
 import { PrecipitationLayer } from '../src/weather/Precipitation.js';
 import { WeatherSystem } from '../src/weather/WeatherSystem.js';
 import { createTerrainMaterial } from '../src/geometry/TerrainMaterial.js';
+import { createRoadMaterial } from '../src/geometry/RoadMaterial.js';
 import { resolveLiquidMaterials, DEFAULT_LIQUID_DESCRIPTORS } from '../src/geometry/LiquidTypes.js';
 
 function makeTerrainMaterial(): THREE.ShaderMaterial {
@@ -116,6 +117,19 @@ describe('PrecipitationLayer', () => {
 });
 
 describe('WeatherSystem', () => {
+  it('starts on a fair day: cloud shadows are live before any setWeather call', () => {
+    const scene = new THREE.Scene();
+    const mat   = makeTerrainMaterial();
+    const weather = new WeatherSystem({ scene, terrainMaterial: mat });
+
+    expect(weather.type).toBe('clear');
+    expect(weather.precipitation).toBeNull();
+    expect(mat.uniforms.uCloudsEnabled.value).toBe(1);
+    // Fair weather, so the sky stays blue even though shadows drift.
+    expect(weather.overcast).toBe(0);
+    weather.dispose();
+  });
+
   it('rain adds a gated particle layer and enables terrain cloud shadows', () => {
     const scene = new THREE.Scene();
     const mat = makeTerrainMaterial();
@@ -132,9 +146,17 @@ describe('WeatherSystem', () => {
     expect(layerMat.uniforms.uCloudGate.value).toBe(1);
     expect(layerMat.uniforms.uCloudCoverage.value).toBeLessThan(mat.uniforms.uCloudCoverage.value);
 
+    // Clear drops the particles but keeps drifting fair-weather shadows: a
+    // clear day is not a cloudless one. Lighter cover than the storm it left.
+    const stormCoverage = mat.uniforms.uCloudCoverage.value;
     weather.setWeather('clear');
     expect(weather.precipitation).toBeNull();
     expect(scene.children.some(c => c instanceof THREE.LineSegments)).toBe(false);
+    expect(mat.uniforms.uCloudsEnabled.value).toBe(1);
+    expect(mat.uniforms.uCloudCoverage.value).toBeLessThan(stormCoverage);
+
+    // An empty sky is opt-in.
+    weather.setWeather('clear', { clouds: false });
     expect(mat.uniforms.uCloudsEnabled.value).toBe(0);
     weather.dispose();
   });
@@ -198,7 +220,37 @@ describe('WeatherSystem', () => {
     expect(riverMat.uniforms.uCloudsEnabled.value).toBe(1);
 
     weather.setWeather('clear');
+    expect(waterMat.uniforms.uCloudsEnabled.value).toBe(1); // fair weather still shades the water
+    weather.setWeather('clear', { clouds: false });
     expect(waterMat.uniforms.uCloudsEnabled.value).toBe(0);
+    weather.dispose();
+  });
+
+  it('cloud shadows reach the road overlay with the same field parameters', () => {
+    const scene = new THREE.Scene();
+    const terrain = makeTerrainMaterial();
+    const road = createRoadMaterial();
+    const weather = new WeatherSystem({ scene, terrainMaterial: terrain, roadMaterial: road });
+
+    weather.setWeather('rain');
+    weather.update(0.5, { x: 0, z: 0 });
+    expect(road.uniforms.uCloudsEnabled.value).toBe(1);
+    expect(road.uniforms.uCloudCoverage.value).toBe(terrain.uniforms.uCloudCoverage.value);
+    expect(road.uniforms.uCloudScale.value).toBe(terrain.uniforms.uCloudScale.value);
+    expect(road.uniforms.uCloudOpacity.value).toBe(terrain.uniforms.uCloudOpacity.value);
+    // Same drift, so a cloud crosses the road and the ground as one shadow.
+    const terrOff = terrain.uniforms.uCloudOffset.value as THREE.Vector2;
+    const roadOff = road.uniforms.uCloudOffset.value as THREE.Vector2;
+    expect(roadOff.x).toBeCloseTo(terrOff.x);
+    expect(roadOff.y).toBeCloseTo(terrOff.y);
+    // The road shader samples that field rather than just carrying the uniforms.
+    expect(road.fragmentShader).toContain('cloudField');
+    expect(road.fragmentShader).toContain('cloudMask');
+
+    weather.setWeather('clear');
+    expect(road.uniforms.uCloudsEnabled.value).toBe(1); // fair weather still shades the road
+    weather.setWeather('clear', { clouds: false });
+    expect(road.uniforms.uCloudsEnabled.value).toBe(0);
     weather.dispose();
   });
 

@@ -44,6 +44,22 @@ export interface ChunkBounds {
   rowEnd: number;
 }
 
+/** Tuning for the baked per-vertex ambient occlusion (see `ChunkGeometryOptions.ambientOcclusion`). */
+export interface AmbientOcclusionOptions {
+  /**
+   * How dark a fully occluded vertex gets, as a fraction of the ambient term
+   * removed. 0 disables, 1 sinks crevices to black under a shadowed sky.
+   * Default 0.4.
+   */
+  strength?: number;
+  /**
+   * Elevation difference (in elevation STEPS, not world units) at which
+   * occlusion saturates. Larger values make tall cliffs shade a deeper,
+   * longer gradient down their face. Default 4.
+   */
+  range?: number;
+}
+
 export interface ChunkGeometryOptions {
   elevationScale?: number;
   perturbStrength?: number;
@@ -97,6 +113,17 @@ export interface ChunkGeometryOptions {
    * fade linearly. Default 1.
    */
   riverbedBlend?: number;
+  /**
+   * Bake per-vertex ambient occlusion from the height field into an
+   * `occlusion` attribute: `true`/omitted for the tuned defaults, `false` to
+   * skip it, or an {@link AmbientOcclusionOptions} object. Terrain and road
+   * shaders attenuate only their AMBIENT term with it, the same split sun
+   * shadows use — so cliff bases and carved gorges sit in their own soft
+   * shade while lit surfaces keep their full brightness. Geometry built
+   * without the attribute renders exactly as before (a missing attribute
+   * reads as 0 = fully open). Default true.
+   */
+  ambientOcclusion?: boolean | AmbientOcclusionOptions;
 }
 
 /** Raw terrain attribute arrays for one chunk — `position`/`color`/`cellIndex` are vec3-per-vertex. */
@@ -107,6 +134,8 @@ export interface TerrainChunkArrays {
   terrainTypes: Float32Array | null;
   /** Flat per-face normals; null = not yet computed (compute on assembly). */
   normals:      Float32Array | null;
+  /** Per-vertex baked ambient occlusion, 0 (open) → 1 (fully enclosed). One float per vertex. */
+  occlusion:    Float32Array;
 }
 
 /** Raw road attribute arrays for one chunk. */
@@ -116,6 +145,8 @@ export interface RoadChunkArrays {
   colors:      Float32Array;
   cellIndices: Float32Array;
   normals:     Float32Array | null;
+  /** Per-vertex baked ambient occlusion, matching the terrain's so roads shade with the ground they lie on. */
+  occlusion:   Float32Array;
 }
 
 /** The transferable result of `buildChunkArrays` — everything a chunk mesh needs, no THREE objects. */
@@ -163,6 +194,13 @@ let scratchPositions    = new Float32Array(0);
 let scratchColors       = new Float32Array(0);
 let scratchTerrainTypes = new Float32Array(0);
 let scratchCellIndices  = new Float32Array(0);
+// Per-cell occluder heights for the AO bake. Stamped rather than cleared: a
+// build bumps the generation, so last build's entries are simply not current
+// and a map edit between builds can never leak a stale elevation through.
+let occluderCap   = 0;
+let occluderValue = new Float32Array(0);
+let occluderStamp = new Int32Array(0);
+let occluderGen   = 0;
 let scratchRoadCap = 0;
 let scratchRPos = new Float32Array(0);
 let scratchRUV  = new Float32Array(0);
@@ -183,6 +221,13 @@ export function buildChunkArrays(
   const colorMode           = opts.colorMode            ?? 'splat';
   const isSplat             = colorMode === 'splat';
   const bankFlare           = Math.min(1.4, Math.max(1, opts.riverBankFlare ?? 1.3));
+
+  const aoSetting  = opts.ambientOcclusion ?? true;
+  const aoEnabled  = aoSetting !== false;
+  const aoCfg      = typeof aoSetting === 'object' ? aoSetting : {};
+  const aoStrength = Math.max(0, aoCfg.strength ?? 0.4);
+  // Range is authored in elevation steps; occlusion compares world-space Y.
+  const aoRange    = Math.max(1e-4, (aoCfg.range ?? 4) * elevScale);
 
   // Build per-type color/road-color lookups from terrain definitions.
   const terrainLookup = new Map((opts.terrainDefinitions ?? []).map(d => [d.index, d]));
@@ -761,17 +806,6 @@ export function buildChunkArrays(
       const isJunction = riverEdgeCount >= 3 && !map.hasRiverBeginOrEnd(col, row);
       const junctionRing: Array<{ x: number; y: number; z: number }> = [];
 
-      const AO_STRENGTH = 0.4;
-      const faceAO: number[] = [];
-      for (let f = 0; f < 6; f++) {
-        const nf   = nbOffset(col, row, edgeDirs[f]);
-        const diff = map.inBounds(nf.col, nf.row)
-          ? map.getElevation(nf.col, nf.row) - ownElev
-          : 0;
-        faceAO.push(diff > 0 ? Math.min(1, diff / 4) * AO_STRENGTH : 0);
-      }
-      const centAO = (faceAO[0]+faceAO[1]+faceAO[2]+faceAO[3]+faceAO[4]+faceAO[5]) / 6;
-
       setCi(ownCi, ownCi, ownCi);
 
       for (let i = 0; i < 6; i++) {
@@ -787,17 +821,15 @@ export function buildChunkArrays(
         const tt = ownType, ot = ownType;
 
         if (!hasRiverCell) {
-          const aoE1 = (faceAO[(i+5)%6] + faceAO[i]) * 0.5;
-          const aoE5 = (faceAO[i] + faceAO[i1]) * 0.5;
-          const aoE2 = aoE1 * 0.75 + aoE5 * 0.25;
-          const aoE3 = (aoE1 + aoE5) * 0.5;
-          const aoE4 = aoE1 * 0.25 + aoE5 * 0.75;
-          const cC  = 1 - centAO;
-          const cE1 = 1 - aoE1, cE2 = 1 - aoE2, cE3 = 1 - aoE3, cE4 = 1 - aoE4, cE5 = 1 - aoE5;
-          addTri(center.x,ownY,center.z,sr*cC,sg*cC,sb*cC, e1x,ownY,e1z,sr*cE1,sg*cE1,sb*cE1, e2x,ownY,e2z,sr*cE2,sg*cE2,sb*cE2, tt,ot,ot);
-          addTri(center.x,ownY,center.z,sr*cC,sg*cC,sb*cC, e2x,ownY,e2z,sr*cE2,sg*cE2,sb*cE2, e3x,ownY,e3z,sr*cE3,sg*cE3,sb*cE3, tt,ot,ot);
-          addTri(center.x,ownY,center.z,sr*cC,sg*cC,sb*cC, e3x,ownY,e3z,sr*cE3,sg*cE3,sb*cE3, e4x,ownY,e4z,sr*cE4,sg*cE4,sb*cE4, tt,ot,ot);
-          addTri(center.x,ownY,center.z,sr*cC,sg*cC,sb*cC, e4x,ownY,e4z,sr*cE4,sg*cE4,sb*cE4, e5x,ownY,e5z,sr*cE5,sg*cE5,sb*cE5, tt,ot,ot);
+          // Occlusion is NOT folded into these vertex colors: in splat mode
+          // they are blend weights, and the fragment shader normalizes by
+          // their sum — any factor applied to all three divides straight back
+          // out. It rides the separate `occlusion` attribute instead, baked
+          // over the finished positions below.
+          addTri(center.x,ownY,center.z,sr,sg,sb, e1x,ownY,e1z,sr,sg,sb, e2x,ownY,e2z,sr,sg,sb, tt,ot,ot);
+          addTri(center.x,ownY,center.z,sr,sg,sb, e2x,ownY,e2z,sr,sg,sb, e3x,ownY,e3z,sr,sg,sb, tt,ot,ot);
+          addTri(center.x,ownY,center.z,sr,sg,sb, e3x,ownY,e3z,sr,sg,sb, e4x,ownY,e4z,sr,sg,sb, tt,ot,ot);
+          addTri(center.x,ownY,center.z,sr,sg,sb, e4x,ownY,e4z,sr,sg,sb, e5x,ownY,e5z,sr,sg,sb, tt,ot,ot);
 
           if (map.hasRoads(col, row)) {
             const interp = getRoadInterpolators(col, row, i);
@@ -1274,27 +1306,109 @@ export function buildChunkArrays(
     }
   }
 
+  // ---- ambient occlusion bake ----
+  //
+  // Run over the FINISHED positions rather than threaded through the vertex
+  // emitters: every branch above (flat fans, terrace steps, cliff walls,
+  // carved channels, junction basins, road strips) then gets occlusion from
+  // one code path, and the emitter signatures stay as they are. The height
+  // field is the only input, so the answer is exact for static terrain —
+  // there is nothing here a screen-space pass would know better.
+
+  // Tallest surface that can shadow a point standing in this cell: its own
+  // top or any of the six neighbours'. Memoized because a chunk's vertices
+  // revisit each cell hundreds of times, and because bridge quads reach past
+  // the chunk bounds into cells the main loop never visits. Stamped scratch
+  // rather than a Map — this runs once per vertex, where a hash lookup shows
+  // up in the streaming profile.
+  const cellCount = map.width * map.height;
+  if (cellCount > occluderCap) {
+    occluderCap   = cellCount;
+    occluderValue = new Float32Array(cellCount);
+    occluderStamp = new Int32Array(cellCount);
+  }
+  // |0 so the counter wraps exactly the way the Int32Array store does; without
+  // it, generations past 2^31 would stop matching and quietly disable the cache.
+  const stamp = (occluderGen = (occluderGen + 1) | 0);
+
+  const occluderY = (key: number, col: number, row: number): number => {
+    if (occluderStamp[key] === stamp) return occluderValue[key];
+    let top = map.getElevation(col, row);
+    for (let d = 0; d < 6; d++) {
+      const nb = nbOffset(col, row, d);
+      if (map.inBounds(nb.col, nb.row)) {
+        const e = map.getElevation(nb.col, nb.row);
+        if (e > top) top = e;
+      }
+    }
+    const y = top * elevScale;
+    occluderStamp[key] = stamp;
+    occluderValue[key] = y;
+    return y;
+  };
+
+  // worldToHex inlined and allocation-free: at ~265k vertices per chunk the
+  // per-call HexCoord object was a measurable share of the bake.
+  const { b0, b1, b2, b3 } = layout.orientation;
+  const mapW = map.width, mapH = map.height;
+
+  const bakeOcclusion = (out: Float32Array, pos: Float32Array, vertCount: number): void => {
+    if (!aoEnabled) return; // left zero-filled: fully open, shaders no-op
+    for (let i = 0; i < vertCount; i++) {
+      const i3 = i * 3;
+      const px = (pos[i3]     - layout.originX) / layout.size;
+      const pz = (pos[i3 + 2] - layout.originZ) / layout.size;
+      const fq = b0 * px + b1 * pz;
+      const fr = b2 * px + b3 * pz;
+      const fs = -fq - fr;
+
+      // Cube rounding (hexRound, inlined).
+      let rq = Math.round(fq), rr = Math.round(fr);
+      const rs = Math.round(fs);
+      const dq = Math.abs(rq - fq), dr = Math.abs(rr - fr), ds = Math.abs(rs - fs);
+      if (dq > dr && dq > ds) rq = -rr - rs;
+      else if (dr > ds)       rr = -rq - rs;
+
+      const col = rq + ((rr - (rr & 1)) >> 1);
+      if (col < 0 || col >= mapW || rr < 0 || rr >= mapH) continue;
+
+      // Subtracting the elevation jitter's amplitude gives flat ground a
+      // clean zero instead of a faint per-vertex mottle: on level cells the
+      // occluder and the vertex differ only by that noise.
+      const rise = occluderY(rr * mapW + col, col, rr) - pos[i3 + 1] - elevPerturbStrength;
+      if (rise > 0) out[i] = Math.min(1, rise / aoRange) * aoStrength;
+    }
+  };
+
   // .slice (not .subarray): a subarray view would pin the entire scratch
   // allocation in memory for the lifetime of the geometry AND alias the next
   // build's writes. slice copies exactly the used range.
   const n = vi / 3;
+  const terrainOcclusion = new Float32Array(n);
+  const terrainPositions = positions.slice(0, n * 3);
+  bakeOcclusion(terrainOcclusion, terrainPositions, n);
   const terrain: TerrainChunkArrays = {
-    positions:    positions.slice(0, n * 3),
+    positions:    terrainPositions,
     colors:       colors.slice(0, n * 3),
     cellIndices:  cellIndices.slice(0, n * 3),
     terrainTypes: isSplat && terrainTypes ? terrainTypes.slice(0, n * 3) : null,
     normals:      null,
+    occlusion:    terrainOcclusion,
   };
 
   let roads: RoadChunkArrays | null = null;
   if (rvi > 0) {
     const rn = rvi / 3;
+    const roadOcclusion = new Float32Array(rn);
+    const roadPositions = rPos.slice(0, rvi);
+    bakeOcclusion(roadOcclusion, roadPositions, rn);
     roads = {
-      positions:   rPos.slice(0, rvi),
+      positions:   roadPositions,
       uvs:         rUV.slice(0, rui),
       colors:      rCol.slice(0, rvi),
       cellIndices: rCi.slice(0, rn),
       normals:     null,
+      occlusion:   roadOcclusion,
     };
   }
 

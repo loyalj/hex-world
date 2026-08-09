@@ -56,6 +56,7 @@ export function chunkArraysToGeometries(arrays: ChunkArrays): ChunkGeometries {
   geo.setAttribute('position',  new THREE.BufferAttribute(t.positions, 3));
   geo.setAttribute('color',     new THREE.BufferAttribute(t.colors, 3));
   geo.setAttribute('cellIndex', new THREE.BufferAttribute(t.cellIndices, 3));
+  geo.setAttribute('occlusion', new THREE.BufferAttribute(t.occlusion, 1));
   if (t.terrainTypes) {
     geo.setAttribute('terrainType', new THREE.BufferAttribute(t.terrainTypes, 3));
   }
@@ -70,6 +71,7 @@ export function chunkArraysToGeometries(arrays: ChunkArrays): ChunkGeometries {
     roadsGeo.setAttribute('uv',        new THREE.BufferAttribute(r.uvs, 2));
     roadsGeo.setAttribute('color',     new THREE.BufferAttribute(r.colors, 3));
     roadsGeo.setAttribute('cellIndex', new THREE.BufferAttribute(r.cellIndices, 1));
+    roadsGeo.setAttribute('occlusion', new THREE.BufferAttribute(r.occlusion, 1));
     if (r.normals) roadsGeo.setAttribute('normal', new THREE.BufferAttribute(r.normals, 3));
     else roadsGeo.computeVertexNormals();
   }

@@ -75,6 +75,7 @@ describe('chunk worker protocol', () => {
     expect(response.arrays.terrain.positions).toEqual(reference.terrain.positions);
     expect(response.arrays.terrain.colors).toEqual(reference.terrain.colors);
     expect(response.arrays.terrain.cellIndices).toEqual(reference.terrain.cellIndices);
+    expect(response.arrays.terrain.occlusion).toEqual(reference.terrain.occlusion);
     expect(response.arrays.terrain.normals).not.toBeNull();
     expect(response.arrays.roads !== null).toBe(reference.roads !== null);
   });

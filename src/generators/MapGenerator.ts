@@ -16,6 +16,7 @@ import { generateClimateRivers } from './RiverGenerator.js';
 import type { ClimateRiverOptions } from './RiverGenerator.js';
 import { generateRoads } from './RoadGenerator.js';
 import type { RoadGeneratorOptions } from './RoadGenerator.js';
+import type { ClimateData } from '../season/ClimateData.js';
 
 /**
  * Single config object for the full procedural pipeline.
@@ -28,6 +29,16 @@ export interface MapGeneratorConfig
   biomes?:      BiomeAssignerOptions;
   rivers?:      ClimateRiverOptions;
   roads?:       RoadGeneratorOptions;
+  /**
+   * Optional sink for the temperature and moisture fields the pipeline computes
+   * on its way to biomes. Without it those fields are used and discarded; pass
+   * a {@link ClimateData} sized to the map and they land in its base channels,
+   * ready for a {@link SeasonCycle} to derive snow and ice from at render time.
+   *
+   * The pipeline fills the *base* tier only — it never writes snow or ice, so
+   * handing it a `ClimateData` mid-campaign will not thaw anything.
+   */
+  climateData?: ClimateData;
 }
 
 /**
@@ -121,11 +132,20 @@ export function* generateMapSteps(
   yield event(1); finishPass();
 
   // temperature
-  const temperature = computeTemperature(map, {
+  // Drawn before computeTemperature so the rng sequence — and therefore every
+  // map ever generated with a given seed — is unchanged by recording it.
+  const jitterChannel = Math.floor(rand() * 4);
+  const temperatureOptions: TemperatureModelOptions = {
     ...config.temperature,
     elevationMax: elevMax,
-    jitterChannel: Math.floor(rand() * 4),
-  });
+    jitterChannel,
+  };
+  const temperature = computeTemperature(map, temperatureOptions);
+  if (config.climateData) {
+    config.climateData.setTemperature(temperature);
+    config.climateData.setMoisture(moisture);
+    config.climateData.temperatureOptions = temperatureOptions;
+  }
   yield event(1); finishPass();
 
   // biomes

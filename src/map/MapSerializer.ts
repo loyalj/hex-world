@@ -2,6 +2,8 @@ import { HexMap } from './HexMap.js';
 import type { ScatterDescriptor } from '../geometry/ScatterTypes.js';
 import type { TerrainDescriptor } from '../geometry/TerrainTypes.js';
 import type { LiquidTypeDescriptor } from '../geometry/LiquidTypes.js';
+import type { ResourceDescriptor } from '../gameplay/ResourceTypes.js';
+import type { FactionDescriptor } from '../gameplay/TerritoryLayer.js';
 import { DEFAULT_WATER_TERRAIN_INDEX } from '../geometry/TerrainTypes.js';
 
 const MAGIC   = [0x48, 0x58, 0x4d, 0x50]; // "HXMP"
@@ -164,6 +166,21 @@ export interface MapMetadata {
   tags?:        string[];
 }
 
+/**
+ * The descriptor sets that can travel inside a JSON map, so a saved map is
+ * self-describing: whatever the cells reference — terrain indices, liquid ids,
+ * scatter assets, resource types, faction ids — is defined in the same file.
+ */
+export interface MapDescriptorSets {
+  scatterDescriptors?:  ScatterDescriptor[];
+  terrainDescriptors?:  TerrainDescriptor[];
+  liquidDescriptors?:   LiquidTypeDescriptor[];
+  /** Resource types the map's `cellData` resource entries refer to. */
+  resourceDescriptors?: ResourceDescriptor[];
+  /** Faction roster the map's `cellData` ownership entries refer to. */
+  factions?:            FactionDescriptor[];
+}
+
 /** Result of deserializing a JSON map — includes the map, metadata, and descriptor sets. */
 export interface DeserializedMap {
   map:                  HexMap;
@@ -171,6 +188,8 @@ export interface DeserializedMap {
   scatterDescriptors:   ScatterDescriptor[];
   terrainDescriptors:   TerrainDescriptor[];
   liquidDescriptors:    LiquidTypeDescriptor[];
+  resourceDescriptors:  ResourceDescriptor[];
+  factions:             FactionDescriptor[];
 }
 
 // --- Binary ---
@@ -322,6 +341,8 @@ interface MapJSON {
   scatterDescriptors?:   ScatterDescriptor[];
   terrainDescriptors?:   TerrainDescriptor[];
   liquidDescriptors?:    LiquidTypeDescriptor[];
+  resourceDescriptors?:  ResourceDescriptor[];
+  factions?:             FactionDescriptor[];
 }
 
 function uint8ToBase64(data: Uint8Array): string {
@@ -344,14 +365,44 @@ function base64ToUint8(b64: string): Uint8Array {
  * Serializes a HexMap to a JSON string with base64-encoded cell data.
  * Suitable for clipboard, editor state, or human-readable export.
  * Pair with `deserializeMapJSON`.
+ *
+ * Descriptor sets can be passed either as a single {@link MapDescriptorSets}
+ * object (which is the only way to include resource and faction sets) or, for
+ * backwards compatibility, positionally as scatter, terrain, and liquid arrays.
+ *
+ * @example
+ * serializeMapJSON(map, { name: 'Kelmar Basin' }, {
+ *   terrainDescriptors, liquidDescriptors, resourceDescriptors, factions,
+ * });
  */
 export function serializeMapJSON(
   map: HexMap,
-  metadata: MapMetadata = {},
+  metadata?: MapMetadata,
+  descriptors?: MapDescriptorSets,
+): string;
+export function serializeMapJSON(
+  map: HexMap,
+  metadata?: MapMetadata,
   scatterDescriptors?: ScatterDescriptor[],
   terrainDescriptors?: TerrainDescriptor[],
   liquidDescriptors?: LiquidTypeDescriptor[],
+): string;
+export function serializeMapJSON(
+  map: HexMap,
+  metadata: MapMetadata = {},
+  scatterOrSets?: ScatterDescriptor[] | MapDescriptorSets,
+  terrainDescriptorsArg?: TerrainDescriptor[],
+  liquidDescriptorsArg?: LiquidTypeDescriptor[],
 ): string {
+  const sets: MapDescriptorSets = Array.isArray(scatterOrSets) || scatterOrSets === undefined
+    ? {
+        scatterDescriptors: scatterOrSets,
+        terrainDescriptors: terrainDescriptorsArg,
+        liquidDescriptors:  liquidDescriptorsArg,
+      }
+    : scatterOrSets;
+  const { scatterDescriptors, terrainDescriptors, liquidDescriptors, resourceDescriptors, factions } = sets;
+
   const payload: MapJSON = {
     version:           VERSION,
     width:             map.width,
@@ -364,9 +415,11 @@ export function serializeMapJSON(
     ...(map.cellData.size > 0 ? { cellData: cellDataToObject(map)! } : {}),
     ...metadata,
     createdAt: metadata.createdAt ?? new Date().toISOString(),
-    ...(scatterDescriptors && scatterDescriptors.length > 0 ? { scatterDescriptors } : {}),
-    ...(terrainDescriptors && terrainDescriptors.length > 0 ? { terrainDescriptors } : {}),
-    ...(liquidDescriptors  && liquidDescriptors.length  > 0 ? { liquidDescriptors }  : {}),
+    ...(scatterDescriptors  && scatterDescriptors.length  > 0 ? { scatterDescriptors }  : {}),
+    ...(terrainDescriptors  && terrainDescriptors.length  > 0 ? { terrainDescriptors }  : {}),
+    ...(liquidDescriptors   && liquidDescriptors.length   > 0 ? { liquidDescriptors }   : {}),
+    ...(resourceDescriptors && resourceDescriptors.length > 0 ? { resourceDescriptors } : {}),
+    ...(factions            && factions.length            > 0 ? { factions }            : {}),
   };
   return JSON.stringify(payload);
 }
@@ -457,8 +510,10 @@ export function deserializeMapJSON(json: string): DeserializedMap {
       playerCount: p.playerCount,
       tags:        p.tags,
     },
-    scatterDescriptors: p.scatterDescriptors ?? [],
-    terrainDescriptors: p.terrainDescriptors ?? [],
-    liquidDescriptors:  p.liquidDescriptors  ?? [],
+    scatterDescriptors:  p.scatterDescriptors  ?? [],
+    terrainDescriptors:  p.terrainDescriptors  ?? [],
+    liquidDescriptors:   p.liquidDescriptors   ?? [],
+    resourceDescriptors: p.resourceDescriptors ?? [],
+    factions:            p.factions            ?? [],
   };
 }

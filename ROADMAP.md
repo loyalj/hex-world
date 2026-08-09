@@ -41,12 +41,28 @@ features from actual need.
   fading with camera distance and on cliff faces. Toggle and restyle are
   uniform flips — no geometry rebuild. Demo: `[H]`. The editor can drop its
   line meshes.
-- [ ] **Sky system** — gradient dome or skybox with horizon fog color-matched to
-  the biome palette, so map edges dissolve into atmosphere instead of a hard void.
-  Should consume DayNightCycle's sky color (currently a flat background) AND a
-  weather input — during rain/snow the sky stays clear blue today, which reads
-  wrong over an overcast scene; WeatherSystem should contribute a grey/overcast
-  factor.
+- [x] **Sky system** *(2026-08-03)* — `SkyDome` draws a zenith→horizon→ground
+  gradient with a sun/moon glow and a hash-based night star field, and pairs it
+  with matching distance haze (`ATMOSPHERE_GLSL` / `configureAtmosphere`) in the
+  terrain, road, and all six liquid shaders, so the map edge dissolves into the
+  same color the sky shows at the horizon. Haze is measured in *ground* (XZ)
+  distance, one measure for every material, so there is no seam at a shoreline
+  and a far peak hazes as much as the valley beside it. `DayNightCycle` now
+  splits its sky into `skyHorizon`/`skyZenith` (`skyColor` stays the horizon,
+  so background-only scenes are unchanged) and drives the dome via a new `sky`
+  target; `WeatherSystem` exposes an `overcast` factor (0 clear / 0.85 rain /
+  0.7 snow, scaled by intensity) that flattens the gradient toward grey, dims
+  the haze with it, and puts out the sun and stars. The horizon leans toward
+  `averageTerrainColor` of the terrain palette for the biome match, faded out
+  by daylight so a midnight horizon stays dark. Stock three materials (scatter,
+  unit models) get the identical haze via `attachAtmosphere`, **not**
+  `scene.fog` — three fogs before tone mapping and the output-colorspace
+  conversion while this library's shaders write raw, so the same haze color
+  lands far brighter on a tree than on the hill behind it (tried it; distant
+  trees glowed pale white over a dark hillside). The injected mix runs after
+  `<colorspace_fragment>` so both sides reach exactly `uAtmoColor`. HexWorld:
+  `sky: true` / `setSky(...)`, re-derived on terrain swaps, scatter materials
+  auto-attached. Demo: `[K]`.
 - [x] **River channel polish** *(2026-08-03, from visual review)* — waterfall
   water now actually renders on the cliff face (notched backstop wall +
   groove-hugging sheet welded to the downstream channel); channel walls flare
@@ -70,10 +86,110 @@ features from actual need.
   on turbulence, swells and thins, never falls back), 1 is spatter (ballistic
   arc that peaks and lands, flying outward, holding size and opacity). Water
   and acid mist; the built-in lava throws sparse ember-lit droplets.
-- [ ] **Seasons and snow accumulation** — gradual snowline descent and river
-  freeze driven by the temperature model the climate generator already computes,
-  blended in the terrain shader. Needs a world-time input and per-cell temperature
-  available at render time. *The Long Migration's antagonist mechanic.*
+- [x] **Seasons and snow accumulation** *(2026-08-05)* — `ClimateData` +
+  `SeasonCycle`. The generator's temperature field is no longer discarded
+  (`MapGeneratorConfig.climateData`); it lands in a map-sized RGBA `DataTexture`
+  (R base temperature, G moisture, B snow depth, A season-adjusted temperature)
+  that every material samples through the `cellIndex` attribute the fog of war
+  already put on all geometry. `SeasonCycle` is a 0–1 year clock shaped like
+  `DayNightCycle` (0 = midwinter, 0.5 = midsummer; `advance`/`advanceDays`/
+  `setPhase`), whose per-cell pass biases temperature by a latitude-scaled
+  seasonal swing — poles swing hard, the equator barely moves, so the snowline
+  *descends the map* instead of the world fading white at once. Elevation
+  cooling is already in the field, so peaks keep year-round caps for free.
+  Snow is CPU-owned and eased (`accumulationRate`/`meltRate`), which is what
+  keeps `climate.snowDepth(col, row)` and the white pixels the same number —
+  gameplay and rendering cannot drift. Ice is *not* stored: each liquid derives
+  it in-shader from its own `LiquidTypeDescriptor.freezePoint` (water 0.12;
+  lava and acid never freeze), so one map can hold liquids that freeze at
+  different colds. Renders across terrain (slope-masked, noise-frayed snowline
+  sampling the pack's `snow` terrain slice), all six liquid layers (still
+  water, dead surf, ice color and opacity via `liquidOutput`), frozen
+  waterfalls whose spray *hangs* as suspended crystals rather than vanishing,
+  and scatter (`attachSnow` patches stock materials at `<color_fragment>` so
+  caps are lit and shadowed, composing with `attachAtmosphere` either way).
+  Precipitation is gated on the snow channel and its inverse, so snow falls
+  exactly where snow lies and rain everywhere else. Persistence stores the
+  ~50-byte `temperatureOptions` and rebuilds the dense field on load, RLE-ing
+  only the seasonal tier. `HexWorld`: `seasons` option, `world.seasons` /
+  `world.climate`, `setSeasons` / `setSeason`, re-derived on terrain swaps.
+  Demo: `[V]` play/pause, `[[` / `]]` scrub. *The Long Migration's antagonist
+  mechanic.*
+- [x] **Season scope — continental vs. whole-map** *(2026-08-08)* —
+  `SeasonOptions.scope`. The latitude-and-elevation model is what makes a
+  subcontinent feel like one, but on a valley a snowline creeping across the
+  view reads as a bug rather than as scale. `'local'` inverts which term
+  dominates: `effective = localSummer − localAmplitude · winter + (base − 0.5) ·
+  localVariation`, so the map's own temperature field stops being *the* climate
+  and becomes a small stagger on when each cell turns. Every cell crosses every
+  threshold within a few days of the rest — by midwinter all foliage is bare and
+  the whole map is under snow, by spring all of it blooms — while the high
+  ground still leads by a little, because elevation cooling survives in the
+  stagger. Defaults are chosen so the swing clears every threshold downstream
+  (`bareTemp` 0.26, `snowThreshold` 0.22, water's `freezePoint` 0.12) and the
+  stagger stays narrower than the swing, or "a hard winter strips every tree"
+  stops being true. Nothing downstream changed: scope only decides what gets
+  written into the two seasonal bytes every material already samples — it even
+  works on a map with no temperature field at all, which continental scope
+  cannot. Fixed alongside: `setSeasons` rebuilds the cycle, and was resetting
+  the year to spring on every restyle; phase, paused and daysPerYear now carry
+  across unless the call names them. Demo: `[J]`. Editor: a Continental /
+  Whole map control in the Environment panel.
+- [x] **Seasonal foliage colour, and two new scatter types** *(2026-08-08)* —
+  the climate texture's A channel was already sampled by every material for the
+  freeze test; `attachSeasonalTint` reads the same byte to swing grass and
+  deciduous plants through spring green → summer → autumn gold → bare. Per cell,
+  not globally: cold uplands turn while the valley below is still green and the
+  tropics never turn at all, for the same reason the snowline descends the map.
+  Temperature alone can't tell spring from autumn — they pass through identical
+  values in opposite directions — so a single global `uFoliageWarming`
+  (`seasonWarming(phase)`, a sine so nothing pops at the solstices) picks which
+  mid-season colour the turn passes through, and it is the only non-per-cell
+  input. The palette names four absolute colours but applies them as a *ratio*
+  against the surface's own authored green, which makes midsummer exactly a
+  no-op instead of a wash and carries every texel's variation through the turn.
+  Which parts of a mesh are foliage is read off its own colours (the green ones)
+  rather than demanded as a second material or a vertex mask, so one merged
+  trunk-and-canopy tree works, and so does a terrain shader over grass, rock and
+  sand — the mask is measured on the *summer* colour so it holds all year.
+  Individual plants stray from the shared autumn hue by a hash seeded from the
+  instance origin, so a wood doesn't read as one decal; ground cover doesn't,
+  because it would only mottle. **Spring blossom** rides the same seed: a
+  configurable share of plants flower somewhere between two petal colors (pink
+  and blue by default) as the turn passes back through the middle, gated on
+  `uFoliageWarming` so autumn's identical temperatures stay flowerless. It
+  mixes *over* the turned canopy rather than joining the palette — petals cover
+  a tree, they don't recolor it, and green can't reach pink through a ratio
+  without running past its clamp. Blossom defaults on in `attachSeasonalTint`
+  and off in the shared uniforms, which is what keeps hillsides from flowering.
+  Tuned from screenshots afterwards: petals stop at 0.7 coverage so canopy shows
+  through and a bloom reads as petals *on* a tree; the cool end of the range
+  moved from blue to lilac, since a pure blue blossom sits too close in value to
+  pale rock and hazy distance and reads as stone. Ground cover took its own
+  palette — straw then dun, against the canopy's gold then bare — because a
+  hillside going as orange as a wood reads as the map being recolored rather
+  than as a season; `HexWorldSeasonOptions.terrainFoliage` layers over `foliage`
+  to tune the two apart. Rock scatter got two densities instead of one in both
+  generators: a single level draws a single tier, so every boulder on a map came
+  out the same size at the same spacing, and the editor's rocks moved to
+  `createRockMaterial` for per-instance squash. Which plants turn is one call per material, and
+  that call *is* the difference between species: a broadleaf gets the tint and a
+  pine doesn't. Snow and tint compose in a fixed order (tint, then snow —
+  frost lies on gold leaves, not under them) however they were attached, via a
+  shared `SEASON_COLOR_SLOT` marker, and share one climate binding by identity
+  so `configureSeason` reaches both and neither ends up bound to nothing.
+  New scatter: `createBroadleafGeometry` (vertex-coloured trunk + crown in one
+  instanced draw) and `createBushGeometry` (low scrub, `select: 0` since it's
+  foliage all the way down), alongside `createPineGeometry`. Generators fill two
+  more feature layers when the map has them — broadleaf woods in the warm wet
+  bands, scrub where the canopy gives out — and two-layer maps are untouched.
+  Fixed on the way: scatter layers past the third took their spawn hash as an
+  *offset* of channel A, which stays ordered against it, so layer 3 beat layer 0
+  for 85% of slots instead of mixing; they now take a fresh stream from
+  `HexHashGrid.channel`. Editor: four scatter brushes (Pines / Broadleaf /
+  Bushes / Rocks), four inspector rows, and new maps built with four feature
+  layers. Maps saved with the old two-layer count simply don't carry the new
+  brushes — deliberately not migrated, since nothing shipped depends on them.
 - [x] **Day/night cycle** *(2026-08-03)* — `DayNightCycle`: a 0–1 world clock
   mapped to a tilted sun/moon arc (one directional light plays both roles,
   swapping at the horizon where both intensities are zero), warm dawn/dusk
@@ -93,7 +209,14 @@ features from actual need.
   line-segment streaks along the fall velocity, snow as swaying soft points;
   intensity ramps via drawRange. A per-cell mask hook (`setMask`) awaits the
   seasons/temperature layer. `HexWorld.setWeather('rain' | 'snow' | 'clear')`.
-  Demo: `[M]` cycle.
+  Demo: `[M]` cycle. *(2026-08-08)* `clear` used to mean *cloudless*, which read
+  as a bug in practice: scenes opened under a flat, shadowless sun and only
+  gained drifting shadows once someone cycled through rain and back. It now
+  means *no precipitation* — scattered fair-weather cover (lighter and slower
+  than a storm deck, overcast still 0 so the sky stays blue), with
+  `clouds: false` as the opt-in for an empty sky. The constructor pushes that
+  initial state to the materials too, so a `WeatherSystem` looks like the
+  `clear` it already reported before anyone calls `setWeather`.
 - [x] **Shadow support** *(2026-08-03)* — `SunShadowRig`: a shadow-casting
   directional sun whose ortho frustum re-fits the camera's ground footprint
   every frame (clamped to `maxDistance`, texel-snapped in light space so
@@ -103,35 +226,197 @@ features from actual need.
   terrain and scatter cast + receive, units cast. `HexWorld` opt-in via
   `shadows: true | SunShadowOptions`; `setSunDirection` updates rig + terrain
   light in one call (ready to track day/night). Demo: `[O]`.
-- [ ] **Post-processing integration** — an optional composer wiring in `HexWorld`:
-  bloom (lava/emissive liquids), selection outline pass for units, SSAO for cliff
-  definition. Keep it opt-in so the à-la-carte path stays composer-free.
+- [x] **Roads join the lighting model** *(2026-08-05, from visual review)* — the
+  road overlay was unlit: it stayed bright at midnight and cloud shadows slid
+  over it without dimming it. `createRoadMaterial` now runs the terrain's
+  lighting model under the terrain's own uniform names (`uLightDir` /
+  `uLightColor` / `uAmbient`, plus `RoadMaterialOptions` so à-la-carte scenes
+  can match the ground), samples the shared cloud field, and consumes three's
+  shadow chunks (road meshes receive but don't cast — they lie flush on the
+  ground). `DayNightTargets.roadMaterial` and `WeatherSystem`'s `roadMaterial`
+  option carry the state; `HexWorld` wires both automatically and builds the
+  road material from `terrainMaterialOptions`. Roads use the terrain normal
+  flipped to the upper hemisphere rather than `gl_FrontFacing`, since a decal
+  never lies on an overhang.
+- [x] **Baked ambient occlusion for cliff definition** *(2026-08-08)* — cliff
+  shading is static-geometry AO, so it is computed where the height field
+  already lives rather than in a screen-space pass: `buildChunkArrays` bakes a
+  per-vertex `occlusion` attribute from each vertex's drop below the tallest
+  surface in its cell's 7-cell neighbourhood, and terrain + road shaders
+  attenuate **only their ambient term** with it — the same direct/ambient split
+  sun shadows use, so a lit cliff face keeps its full sun term and the effect
+  reaches full strength in shade, where ambient is all the light there is.
+  Running it as a post-pass over finished positions (rather than threading it
+  through the vertex emitters) means every branch — flat fans, terrace steps,
+  cliff walls, carved channels, junction basins, road strips — gets occlusion
+  from one code path. `ChunkGeometryOptions.ambientOcclusion` takes
+  `false | true | { strength, range }`, defaults on, and travels to the chunk
+  worker; geometry built without the attribute reads 0 = fully open, so
+  à-la-carte scenes are unaffected. Costs ~9% of chunk build time (off-thread
+  with `chunkWorker: true`) and nothing per frame.
+  This **replaced** a pre-existing AO term that folded occlusion into the vertex
+  colors: in the default `splat` color mode those colors *are* the blend
+  weights, and the fragment shader normalizes by their sum, so the factor
+  divided straight back out — the map had been rendering with no AO at all. It
+  also only ever ran on flat interior fans, never the cliff faces it was for.
+- [ ] **Post-processing integration** — an optional composer in `HexWorld` for
+  **selective bloom on emissive liquids** (lava, acid). Threshold bloom is the
+  wrong tool: the library's shaders write final LDR color straight to
+  `gl_FragColor` with no HDR stage, so nothing exceeds 1.0 and a luminance
+  threshold would bloom sunlit snow and water specular as eagerly as lava.
+  Instead put emissive liquid meshes (plus their waterfall foam and spray) on a
+  dedicated `THREE.Layers` channel, render that channel alone to a half-res
+  target, blur, and additive-composite — which also sidesteps the color-space
+  problem entirely, since no `OutputPass` is involved and nothing re-encodes an
+  already-final image. `emissiveStrength > 0` on the liquid descriptor is the
+  trigger. Needs `WebGLRenderTarget({ samples: 4 })` or routing through a
+  composer silently loses the renderer's MSAA, and
+  `external: [/^three(\/|$)/]` in the vite config so `three/addons` stays a peer
+  import instead of being bundled. Keep it opt-in so the à-la-carte path stays
+  composer-free.
+  *Dropped from the original scope:* SSAO (superseded by the baked AO above —
+  screen-space cannot beat exact knowledge of a static height field) and the
+  unit selection outline pass (deferred with the selection API it would need).
 
 ### Gameplay layers
 
-- [ ] **Fog-of-war memory tiers** — split "visible" from "explored": explored
-  cells show remembered terrain and buildings but hide current unit positions
-  (the classic Civ/AoE ghost state). The reference-counted visibility system is
-  the right substrate; needs a persistence story so explored state saves with
-  the map or a companion blob.
-- [ ] **Territory/ownership layer** — per-cell owner IDs with blended fill tints
-  and border outlines. `CellOverlayLayer` already draws outline-of-set; this adds
-  persistence (via the metadata channel), serialization, and multi-faction color
-  blending.
-- [ ] **Resource layer** — per-cell resource types (ore, fish, forest yield) with
-  billboard/instanced icons and a biome-aware generation pass. Descriptor-driven
-  like terrain/liquid/scatter so packs carry custom resources.
+- [x] **Fog-of-war memory tiers** *(2026-08-05)* — the two tiers are now split at
+  the API, not just in the texture channels: `isVisible` / `isExplored` /
+  `visibilityCount` / `exploredCount` read them apart, and `markExplored` adds
+  memory without granting sight (scripted reveals, map fragments). Units are the
+  ghost state's payoff — `UnitManager` hides any unit standing on an explored but
+  currently-unseen cell (`hideUnitsInFog`, default on), which only ever hides
+  units that grant no vision, since anything with `fogRevealRange > 0` sees its
+  own hex. Persistence is a **companion blob**, not a map field: exploration is
+  per-player, not per-map, so `serialize()` / `toBase64()` write a run-length
+  encoded explored set (a 256×256 map costs under 32 bytes at either extreme) and
+  `load()` restores it with the reveal animation already finished. Visibility is
+  deliberately *not* saved — it is derived state, rebuilt by
+  `UnitManager.reapplyFog()` once the units are back in place. Demo: [S]/[L] now
+  save and restore the remembered world. *(2026-08-08)* `unexplore(col, row)`
+  completes the pair — the memory tier only ever grows during play, but
+  authoring tools and scripted amnesia need to take a cell back to never-seen;
+  it clears exploration, the in-flight reveal animation, and the visibility
+  count that would otherwise re-reveal the cell on the next frame.
+- [x] **Territory/ownership layer** *(2026-08-05)* — `TerritoryLayer`: owner ids
+  in the metadata channel (so ownership serializes with the map through binary,
+  JSON, and `.hexpack` with no companion file), translucent faction tints, and an
+  outline around each faction's holdings. A cell is either held outright
+  (`claim`) or **contested** (`setInfluence`), where several factions carry
+  fractional weights and the fill is their weighted blend — which is what drove
+  the one substrate addition: `CellOverlayLayer` fills take a `cellColor`
+  callback and switch to vertex colors, so a whole multi-faction map is one draw
+  call instead of one per faction. Blending happens in the renderer's working
+  color space, so a 50/50 cell lands on the perceptual midpoint rather than a
+  muddy average of sRGB bytes. Rebuilds walk the sparse metadata store, so cost
+  scales with owned cells, not map size; mutations only mark dirty and `update()`
+  coalesces a whole flood fill into one rebuild. `HexWorld.setFactions`. Demo: [T].
+- [x] **Resource layer** *(2026-08-05)* — `ResourceLayer` + `generateResources`:
+  per-cell resource types stored in the metadata channel and drawn as instanced
+  camera-facing billboards, one draw call per type, billboarded in the vertex
+  shader so no per-frame CPU work. Icons read the same `FogData` texture the
+  terrain does through a per-instance `cellIndex` attribute, so a deposit follows
+  the memory tiers of the ground it sits on — hidden while unexplored, dimmed
+  once remembered, full strength while watched. Descriptor-driven like
+  terrain/liquid/scatter (`ResourceDescriptor` rides in the `.hexpack` manifest
+  and in saved JSON maps), with optional per-cell amounts for deposits that
+  deplete. The generation pass is biome-aware: terrain, elevation, river, coast,
+  and scatter-density rules, plus optional temperature/moisture windows against
+  the `ClimateSimulator` fields. Each type draws from its own seeded sub-stream,
+  so adding a resource never reshuffles the others' placements, and `minSpacing`
+  breaks up the clumps pure per-cell chance produces. `HexWorld.setResourceTypes`.
+  Demo: [U].
 - [ ] **Naval support** — embark/disembark transitions, ships constrained to
   liquid cells, port designation on shore cells. Liquids are first-class; units
   on them aren't yet. Movement costs and pathfinding need liquid-aware modes.
 
 ### Developer experience
 
-- [ ] **HexWorld event emitter** — typed events (`cellClick`, `cellHover`,
-  `cellEnter`/`cellLeave`, `unitArrived`, `chunkLoaded`) so consumers stop wiring
-  raycasts and callbacks by hand. Plus a live minimap component built on
-  `MapImageRenderer` with a viewport rectangle and click-to-jump, which dogfoods
-  the events immediately.
+- [x] **Editor caught up to engine HEAD** *(2026-08-08)* — the reference
+  consumer (`hex-world-editor`) had drifted: every subsystem added since the
+  0.3.0 rebuild is opt-in, and the editor opted into none of them, so sky,
+  seasons, fog, territory, and resources were invisible there. It now enables
+  `sky: true` and `chunkWorker: true` at construction (streaming builds go
+  off-thread; dirty-chunk rebuilds stay synchronous in the library, so painting
+  still lands on the next frame), and adds three authoring tools alongside the
+  existing five: **Territory** (faction claim/release brush), **Resources**
+  (place/erase, honouring each type's placement rule or ignoring it), and **Fog
+  of war** (reveal/hide brush, bulk reveal, hide-unexplored and dim-remembered
+  toggles). Seasons got an Environment group — enable, phase scrub with
+  solstice presets, animate, days-per-year — and View gained sky, territory,
+  and resource visibility toggles.
+  Ownership and resources are metadata-channel writes made **through the map
+  transaction** rather than through `TerritoryLayer.claim` / `setResource`, so
+  the existing `MapEditCommand` undoes them with everything else — the snapshot
+  already deep-clones the metadata record. The catch is that both layers redraw
+  off their own dirty flags and never see a snapshot restore, so
+  `MapEditCommand` gained an `afterApply` hook and every commit carries a layer
+  refresh: those overlays are built at each cell's surface height, so an
+  elevation undo would otherwise strand borders and icons at the old altitude.
+  Fog deliberately stays **out** of the undo stack and out of the saved map —
+  it is per-player state, not map data.
+- [x] **Live minimap primitives** *(2026-08-08)* — `MapImageRenderer` could only
+  produce a `Blob`, which is the wrong shape for a minimap that has to redraw on
+  every brush stroke: encode, object URL, decode, and revoke, per edit. It now
+  splits into `drawMapImage(ctx, …)`, a synchronous draw into a canvas the caller
+  owns, and `renderMapImage`, the same pass wrapped for PNG export. The awkward
+  part of a minimap was never the picture but the arithmetic around it, so the
+  draw returns a `MapImageTransform` (`width`/`height`/`bounds` plus
+  `worldToImage`/`imageToWorld`), and `getMapImageTransform` hands you the same
+  object without drawing — size a canvas, place a viewport rectangle, convert a
+  click back to world XZ, with no duplicated `(x - minX) * scale + padding` at
+  the call site. Content gained rivers, roads, and a `cellTint(col, row)` hook —
+  the escape hatch for anything the map itself doesn't describe (ownership,
+  selection, brush footprint) — all drawn per cell inside the fog pass, so a
+  tinted river in a remembered cell dims with the ground it sits on. Completing
+  the loop, `cameraGroundFootprint(camera)` returns the ground quad the view
+  covers, clamping corners near the horizon along their own ray instead of
+  dropping the rectangle at shallow pitches, which is what the old demo did.
+  `getMapWorldBounds` stopped allocating six corner objects per cell (the corner
+  offsets are identical for every hex), making it safe to call per frame. Demo
+  and editor both drive minimaps off this — the editor's is a right-rail panel
+  with the viewport box and click-to-jump.
+- [x] **HexWorld event emitter** *(2026-08-08)* — a small typed `Emitter<EventMap>`
+  (`on` returning an unsubscribe, `once`, `off`, `emit`, `listenerCount`) plus
+  emitters on the three places that have lifecycle to report:
+  `ChunkManager.events` (`chunkLoaded`/`chunkUnloaded` with the chunk's cell
+  bounds), `UnitManager.events` (`unitAdded`/`unitRemoved`/`unitMoveStart`/
+  `unitCellEnter`/`unitArrived`/`unitMoveEnd`), and `HexWorld.events`, which
+  re-emits both plus `frame`, `mapChanged`, and the cell interaction set
+  (`cellHover`, `cellEnter`, `cellLeave`, `cellClick`, `cellPointerDown`).
+  Each layer keeps its own emitter so the à-la-carte path gets the same events;
+  `HexWorld.trackUnits(manager)` forwards a manager the consumer owns, since
+  the world does not create one.
+  The parts that took thought:
+  **Clicks are drag-filtered** — press and release must land within
+  `clickTolerance` (default 5 px), which is what stops a right-button camera pan
+  from firing a `cellClick` when the button comes up, and it means right-click
+  can be the cancel gesture it reads as. The press picks at the event's own
+  coordinates rather than reusing the frame loop's hover cell, because a touch
+  tap arrives with no preceding `pointermove` and the cached cell would be stale
+  or null. `cellPointerDown` fires synchronously from the DOM handler so
+  `pointer.preventDefault()` still works.
+  **Hover diffs by value** — `HexPicker` returns a fresh object per pick, so
+  identity comparison would report a change every frame; `cellLeave` fires
+  before the matching `cellEnter` so a highlight handler can clear then paint
+  without tracking the previous cell itself.
+  **Dispatch is snapshotted and fault-isolated** — `emit` iterates a copy, so a
+  listener that unsubscribes mid-dispatch doesn't make the iterator skip the
+  next one, and a throwing listener can't halt chunk streaming or rob the
+  remaining subscribers. The error is surfaced, not swallowed: rethrown from a
+  microtask (reaching `window.onerror` with its stack) unless `onError` is set.
+  **`dispose()` drops listeners first**, because tearing chunks down fires
+  `chunkUnloaded` for every loaded chunk and a listener has no way to tell that
+  from ordinary streaming.
+  Two things fell out of it: `HexUnit.onMoveEnd` now takes `completed`, so
+  `unitArrived` (path finished) is distinguishable from `unitMoveEnd` after a
+  `stop()` — the distinction turn logic needs; and `UnitManager` now *restores*
+  the callbacks it wraps on `removeUnit`, fixing a latent bug where removing and
+  re-adding a unit double-wrapped `onCellEnter` and left its fog reveal stuck on.
+  The demo shows the ergonomic payoff: the selection/minimap refresh that was
+  copy-pasted onto every unit's `onCellEnter` and `onMoveEnd` is now two
+  subscriptions on the manager, with per-unit callbacks kept only for the per-unit
+  material swap.
 
 ---
 
@@ -185,7 +470,10 @@ settlements as trading posts, scatter, save/load, and the minimap renderer.
 - [ ] **M2 — Survival layer** — food/water/herd condition, grazing from moisture
   data, day counter and season drift.
 - [ ] **M3 — Rivers and winter** — crossing mechanics scaled by flow, snowline
-  descent, frozen rivers (crossable, risky).
+  descent, frozen rivers (crossable, risky). *The engine side is done: drive
+  `SeasonCycle.advanceDays(1)` per turn and read `climate.snowDepth` for
+  movement cost and `climate.isFrozen(col, row, freezePoint)` for whether the
+  ford is ice. Both are the exact values the player can see.*
 - [ ] **M4 — Oregon Trail dressing** — event cards, trading posts, the
   journey-map screen, end-of-run summary.
 

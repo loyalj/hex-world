@@ -11,18 +11,24 @@ A Three.js library for building hex-grid strategy and exploration games. Handles
 - **Terrain system** — six built-in types with vertex color blending and texture splatting; fully extensible with custom types, procedural noise, or image textures; shader-based hex grid overlay with distance fading
 - **Liquid types** — modular system supporting multiple liquid types on one map (water, lava, acid, or custom); each type has its own surface, shore, estuary, and river materials; correct foam boundaries where liquid types meet; rivers classified by which pool they drain into, widened by accumulated flow, joined at confluences, and carved into flared channels with rendered waterfalls at cliffs — each fall throwing GPU-animated spray and churning a foam plunge pool where it lands, tunable per liquid (a lava fall throws sparse heavy ash, an acid fall a fine fume cloud)
 - **Sun shadows** — a shadow-casting directional sun whose frustum re-fits the camera view every frame (texel-snapped, so panning doesn't shimmer) — built to pair with chunk streaming
-- **Day/night cycle** — animated sun/moon arc with warm dawn/dusk tinting, cool moonlight, sky color tracking, and liquid darkening that leaves emissive lava glowing after dark
-- **Weather** — drifting cloud shadows across terrain *and* water, plus world-anchored rain streaks and snow that fall under the denser clouds and follow the camera without sticking to it
-- **Roads** — geometry strips rendered above terrain
+- **Day/night cycle** — animated sun/moon arc with warm dawn/dusk tinting, cool moonlight, sky color tracking, and liquid darkening that leaves emissive lava glowing after dark; terrain and roads share one light state, so a road never glows after dark
+- **Weather** — drifting cloud shadows across terrain, roads, *and* water, plus world-anchored rain streaks and snow that fall under the denser clouds and follow the camera without sticking to it. Clear weather is a *fair* day, not an empty sky: scattered cumulus shadows keep moving over the ground unless you ask for `clouds: false`
+- **Seasons and snow** — a year clock that drives a snowline *down the map* as winter deepens (the seasonal swing scales with latitude, so poles turn first and the equator barely moves) and back up as it thaws. Snow accumulates and melts per cell, breaks up along a noisy edge, sheds off cliff faces, and settles on trees and rocks as well as ground. Liquids freeze at their own `freezePoint` — water skins over while lava never does — stilling waves, surf, and river flow, and leaving waterfall spray hanging as suspended crystals. Snow falls where snow lies and rain everywhere else. Crucially the snow depth the shader draws *is* the number `climate.snowDepth(col, row)` returns, so "is this hex snowed in" and what the player sees can never disagree
+- **Seasonal foliage** — grass and deciduous plants swing spring green → summer → autumn gold → bare on the same clock, per cell rather than globally, so cold uplands turn while the valley below is still green and the tropics never turn at all. Plants also *bloom*: a share of them flower pink or blue as spring reaches them, then go green for the summer. Which plants turn is one call per material: a broadleaf gets `attachSeasonalTint` and a pine doesn't, and that is the entire difference. Individual trees stray from the shared autumn colour so a wood doesn't read as one decal, and on a merged trunk-and-canopy mesh the tint finds the leaves by their colour — no second material, no vertex mask. Built-in low-poly `createPineGeometry` / `createBroadleafGeometry` / `createBushGeometry` give the scatter system something to draw before there's art
+- **Sky system** — gradient dome with a sun/moon glow and a night star field, plus matching distance haze on terrain, roads, and every liquid layer, so the map edge dissolves into the horizon instead of ending against a void; the horizon leans toward the terrain palette's own color, follows the day/night cycle, and greys over under rain and snow. `attachAtmosphere` gives your own scatter, unit, and prop materials the identical haze — matched in color space and distance measure, which `scene.fog` cannot do
+- **Roads** — geometry strips rendered above terrain, lit and shadowed with the ground they sit on (day/night, cloud shadows, and sun shadows all reach them)
 - **Scatter features** — instanced meshes (trees, rocks, buildings) placed deterministically from per-cell density levels; modular definitions with terrain filters and density tiers
-- **Fog of war** — reference-counted per-cell visibility with smooth reveal animation; integrated with units
-- **Per-cell metadata** — a sparse, serialized data channel (`getCellData`/`setCellData`) with undo/redo, for territory, resources, or any game-specific state
+- **Fog of war** — reference-counted per-cell visibility with smooth reveal animation, split into two memory tiers: *visible* (live) and *explored* (remembered). Explored cells keep showing their terrain, scatter, and resources, dimmed, while units standing on them are hidden — the classic ghost state. Exploration saves and restores as a compact run-length blob, independent of the map
+- **Territory** — per-cell ownership with translucent faction tints and per-faction border outlines; cells can be held outright or contested between factions, blending their colors; stored in the metadata channel, so borders serialize with the map
+- **Resources** — per-cell resource types (ore, fish, game) drawn as instanced camera-facing icons that follow the fog's memory tiers, with a biome-aware generation pass driven by terrain, elevation, rivers, coastline, scatter density, and climate; descriptor-driven, so packs carry custom resources
+- **Per-cell metadata** — a sparse, serialized data channel (`getCellData`/`setCellData`) with undo/redo, backing territory, resources, and any game-specific state
 - **Procedural generation** — full climate-driven pipeline (BFS landmass → erosion → moisture simulation → temperature model → biome assignment → rivers → roads), plus a fast FBM alternative; composable raw passes for custom generators; async time-sliced variants with progress events and cancellation for loading bars
-- **Minimap rendering** — `renderMapImage` draws any map to an image with elevation shading and fog for minimaps and journey screens
+- **Minimap rendering** — `drawMapImage` paints a top-down map straight into a canvas (terrain, elevation shading, rivers, roads, fog, plus a per-cell tint hook for ownership or highlights) and hands back the world↔pixel transform, so a camera-viewport rectangle, click-to-jump, and unit pins all line up without extra math; `renderMapImage` wraps it for PNG thumbnails, and `cameraGroundFootprint` gives you the exact ground quad the camera is looking at
 - **Pathfinding** — A\*, flood-fill movement range, BFS visibility radius, elevation-aware line of sight, Catmull-Rom path smoothing
 - **Units** — position, smooth path-following, facing, fog reveal; wire your own `Object3D` and animation callbacks
+- **Typed events** — `world.events.on('cellClick' | 'cellHover' | 'cellEnter' | 'cellLeave' | 'chunkLoaded' | 'unitArrived' | …)` instead of wiring raycasts, pointer listeners, and per-unit callbacks by hand. Clicks are drag-filtered, so releasing a right-button camera pan never reads as a click, and taps work without a preceding pointer move. Any number of systems can subscribe to the same event — the single-slot `onFrame` and `unit.onMoveEnd` hooks still work alongside it
 - **RTS camera** — pan, zoom, tilt with smooth damping
-- **Save/load** — binary and JSON formats; scatter, terrain, and liquid descriptors travel with the map; water surfaces recomputed correctly for all liquid types on load
+- **Save/load** — binary and JSON formats; scatter, terrain, liquid, resource, and faction descriptors travel with the map; water surfaces recomputed correctly for all liquid types on load
 - **Asset packages** — `.hexpack` zip bundles terrain, liquid, scatter, image textures, 3D models, and maps into one file; `loadHexPack` resolves everything to render-ready objects in one call
 
 Your game owns the UI, unit models, game rules, and render loop. The library owns the hex geometry, shaders, and algorithms.
@@ -58,11 +64,147 @@ const world = await HexWorld.create({
   map,
   shadows: true,          // camera-fitted sun shadows
   dayNight: true,         // animated day/night cycle (see also world.setTimeOfDay)
+  sky: true,              // gradient sky dome + horizon haze on the map edges
+  seasons: true,          // snowline, freezing water (see also world.setSeason)
   chunkWorker: true,      // build streamed chunks off the main thread
 });
 
-world.setWeather('rain'); // drifting cloud shadows + rain under them
+world.setWeather('rain');  // cloud shadows, rain under them, and an overcast sky
+world.setWeather('clear'); // no precipitation, but fair-weather shadows still drift
 world.onFrame = () => { if (world.hoveredCell) { /* your game logic */ } };
+```
+
+### Seasons
+
+The year clock is shaped like the day clock — `0` is midwinter, `0.5` midsummer — and it can either run in real time or be scrubbed a day at a time by a turn-based game:
+
+```ts
+import { ClimateData, generateMap } from '@loyalj/hex-world';
+
+// Keep the temperature field the generator computes on its way to biomes.
+const climate = new ClimateData(map.width, map.height);
+generateMap(map, { climateData: climate }, seed);
+
+world.setSeasons({ daysPerYear: 120 }, climate);
+
+// One turn is one day; winter arrives on its own.
+world.seasons.advanceDays(1);
+world.setSeason(world.seasons.phase);
+
+// Gameplay reads the same bytes the shaders sample — these can't disagree
+// with what's on screen.
+if (world.climate.snowDepth(col, row) > 0.5) moveCost += 2;
+if (world.climate.isFrozen(col, row, waterDescriptor.freezePoint)) allowCrossing();
+```
+
+How much world the map covers decides what a season *is*, so that's a setting:
+
+```ts
+world.setSeasons({ scope: 'continental' }); // default — winter arrives up the map
+world.setSeasons({ scope: 'local' });       // one valley, one season, all at once
+```
+
+`'continental'` scales the swing by latitude and lets the generator's elevation cooling stand, so the snowline descends the map and peaks keep year-round caps — the model that makes a subcontinent feel like one. `'local'` inverts which term dominates: the whole map shares a season, and its own temperature field is demoted to a slight stagger on *when* each cell turns, so the high ground still leads by a little. By midwinter every tree is bare and every hex is under snow; by spring all of it blooms. Nothing downstream knows which model ran — snow, ice, foliage, blossom, precipitation and `climate.snowDepth` all read the same two bytes.
+
+Grass and foliage turn with the same clock. Which plants turn is decided by which materials get `attachSeasonalTint` — that one call is the whole difference between a broadleaf and a pine:
+
+```ts
+import { attachSnow, attachSeasonalTint, createBroadleafGeometry, BROADLEAF_CANOPY_COLOR } from '@loyalj/hex-world';
+
+const broadleaf = new THREE.MeshLambertMaterial({ vertexColors: true });
+attachSeasonalTint(broadleaf, { summer: BROADLEAF_CANOPY_COLOR, blossomShare: 0.6 });
+attachSnow(broadleaf);          // blooms, greens, turns gold, then takes a cap
+
+const pine = new THREE.MeshLambertMaterial({ color: 0x3f6b2c });
+attachSnow(pine);               // takes a cap, stays green
+
+world.setSeasons({ foliage: { autumn: 0xd2601a } });  // restyle the palette
+```
+
+The turn is per cell, not global: it's driven by the same season-adjusted temperature the ice is, so cold uplands go gold while the valley below is still green and the tropics never turn at all. On a merged trunk-and-canopy mesh the tint finds the leaves by their colour, so no second material or vertex mask is needed.
+
+Blossom comes with the tint. A share of the plants flower as spring passes through them — each somewhere between two petal colours, so a hillside reads as pinks and lilacs among the green rather than one repeated tree — then go green for the summer. Coverage stops short of full, so some canopy shows through and the bloom reads as petals *on* a tree. Because it rides the same per-cell turn, the bloom climbs the map the way the snowline retreats.
+
+Ground cover keeps its own palette, because it doesn't do what a canopy does: grass goes straw and then dun where a wood goes gold and then bare. Tune the two apart with `terrainFoliage`, which layers over `foliage`:
+
+```ts
+world.setSeasons({
+  foliage:        { autumn: 0xd2601a },  // every plant that turns
+  terrainFoliage: { autumn: 0xc9b070 },  // …but the ground stays straw
+});
+```
+
+Each liquid decides its own freeze point, so a map can hold water that ices over in autumn beside lava that never does:
+
+```ts
+{ id: 'water', name: 'Water', freezePoint: 0.12 }  // freezes across much of the map
+{ id: 'lava',  name: 'Lava'  }                     // no freezePoint — never freezes
+```
+
+### Events
+
+Cell interaction, the frame tick, chunk streaming, and unit movement all arrive on one typed emitter, so a consumer never has to own a raycast or a pointer listener:
+
+```ts
+world.events.on('cellClick', ({ col, row, button, pointer }) => {
+  if (button === 0) select(col, row);        // drag-filtered: a pan is not a click
+  if (button === 2) { deselect(); pointer.preventDefault(); }
+});
+
+// Fires on change only — including to null when the cursor leaves the map.
+world.events.on('cellHover', ({ cell, previous }) => highlight(cell, previous));
+
+world.events.on('chunkLoaded', ({ bounds }) => spawnPropsIn(bounds));
+
+// `on` returns an unsubscribe function.
+const off = world.events.on('frame', ({ dt }) => mixer.update(dt));
+off();
+```
+
+Units keep their own emitter, so the à-la-carte path gets the same events; `trackUnits` re-broadcasts them through the world so there is still only one place to listen:
+
+```ts
+const units = new UnitManager({ scene: world.scene, map: world.map, layout: world.layout });
+world.trackUnits(units);
+
+world.events.on('unitArrived', ({ unit, col, row }) => endTurn(unit, col, row));
+// `unitArrived` means the path finished; `unitMoveEnd` also fires for an
+// interrupted move and carries `completed` to tell them apart.
+```
+
+`ChunkManager` and `UnitManager` expose `.events` directly if you never build a `HexWorld`.
+
+### Gameplay layers
+
+Ownership and resources are per-cell game state, so they live in the map's metadata channel and serialize with the map — no companion file:
+
+```ts
+import { generateResources, DEFAULT_RESOURCE_DESCRIPTORS } from '@loyalj/hex-world';
+
+// Territory — outright claims, or contested cells that blend faction colors
+const territory = world.setFactions([
+  { id: 'red',  name: 'Kelmar',  color: 0xdd4433 },
+  { id: 'blue', name: 'Ossiran', color: 0x3377dd },
+]);
+territory.claim(10, 10, 'red');
+territory.setInfluence(11, 10, { red: 0.6, blue: 0.4 });  // contested border hex
+
+// Resources — instanced icons that respect fog, from a biome-aware pass
+world.setResourceTypes(DEFAULT_RESOURCE_DESCRIPTORS);
+generateResources(world.map, DEFAULT_RESOURCE_DESCRIPTORS, seed, { isWater: world.isWater });
+```
+
+Fog of war keeps two tiers — what you can see now, and what you remember. Exploration is per-player rather than per-map, so it saves as its own compact blob:
+
+```ts
+const fog = new FogData(map.width, map.height);   // pass via the `fogData` option
+
+fog.isVisible(col, row);    // in someone's sight right now
+fog.isExplored(col, row);   // seen at some point — terrain remembered, units hidden
+
+localStorage.setItem('fog', fog.toBase64());      // save
+fog.loadBase64(localStorage.getItem('fog')!);     // restore the remembered world
+unitManager.reapplyFog();                         // rebuild live sight from the units
 ```
 
 Every piece `HexWorld` wires is also available à la carte if you'd rather own the scene yourself:

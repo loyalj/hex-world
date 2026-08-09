@@ -55,6 +55,50 @@ describe('CellOverlayLayer fills', () => {
   });
 });
 
+describe('CellOverlayLayer per-cell colors', () => {
+  it('tints each cell independently and switches the material to vertex colors', () => {
+    const map = new HexMap({ width: 8, height: 8 });
+    const { parent, layer } = makeLayer(map);
+
+    layer.set('t', [{ col: 1, row: 1 }, { col: 2, row: 1 }], {
+      cellColor: (_c, i) => (i === 0 ? 0xff0000 : 0x0000ff),
+    });
+
+    const mesh   = parent.children[0] as THREE.Mesh;
+    const colors = mesh.geometry.getAttribute('color') as THREE.BufferAttribute;
+    expect(colors.count).toBe(2 * 18); // all 18 vertices of a cell share its tint
+    expect((mesh.material as THREE.MeshBasicMaterial).vertexColors).toBe(true);
+
+    expect(colors.getX(0)).toBeGreaterThan(0.5);  // first cell red
+    expect(colors.getZ(0)).toBeLessThan(0.01);
+    expect(colors.getZ(18)).toBeGreaterThan(0.5); // second cell blue
+    expect(colors.getX(18)).toBeLessThan(0.01);
+  });
+
+  it('falls back to the flat color for cells the callback skips', () => {
+    const map = new HexMap({ width: 8, height: 8 });
+    const { parent, layer } = makeLayer(map);
+
+    layer.set('t', [{ col: 1, row: 1 }], { color: 0x00ff00, cellColor: () => null });
+    const colors = (parent.children[0] as THREE.Mesh).geometry.getAttribute('color') as THREE.BufferAttribute;
+    expect(colors.getY(0)).toBeGreaterThan(0.5);
+    expect(colors.getX(0)).toBeLessThan(0.01);
+  });
+
+  it('reverts to a flat color when the callback goes away', () => {
+    const map = new HexMap({ width: 8, height: 8 });
+    const { parent, layer } = makeLayer(map);
+
+    layer.set('t', [{ col: 1, row: 1 }], { cellColor: () => 0xff0000 });
+    layer.set('t', [{ col: 1, row: 1 }], { color: 0x00ff00 });
+
+    const mesh = parent.children[0] as THREE.Mesh;
+    expect(mesh.geometry.getAttribute('color')).toBeUndefined();
+    expect((mesh.material as THREE.MeshBasicMaterial).vertexColors).toBe(false);
+    expect((mesh.material as THREE.MeshBasicMaterial).color.getHex()).toBe(0x00ff00);
+  });
+});
+
 describe('CellOverlayLayer outlines', () => {
   it('draws only boundary edges of the set', () => {
     const map = new HexMap({ width: 16, height: 16 });

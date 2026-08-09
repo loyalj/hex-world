@@ -4,9 +4,11 @@ import {
   type LiquidColorOptions,
 } from './WaterMaterial.js';
 import { FOG_VERT_DECL, FOG_VERT_BODY, FOG_FRAG_DECL, fogUniforms } from './FogGLSL.js';
+import { SEASON_VERT_DECL, SEASON_VERT_BODY, SEASON_FRAG_DECL } from '../season/SeasonGLSL.js';
 
 const vertexShader = /* glsl */`
   ${FOG_VERT_DECL}
+  ${SEASON_VERT_DECL}
   varying vec2 vUv;
   varying vec2 vWorldXZ;
   void main() {
@@ -14,12 +16,14 @@ const vertexShader = /* glsl */`
     vec4 worldPos = modelMatrix * vec4(position, 1.0);
     vWorldXZ = worldPos.xz;
     ${FOG_VERT_BODY}
+    ${SEASON_VERT_BODY}
     gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
   }
 `;
 
 const fragmentShader = /* glsl */`
   ${FOG_FRAG_DECL}
+  ${SEASON_FRAG_DECL}
   uniform float uTime;
   uniform vec3  uColor;
   uniform vec3  uFoamColor;
@@ -34,12 +38,15 @@ const fragmentShader = /* glsl */`
     float shore = vUv.y;
 
     float hl = waterNoise(vec3(vWorldXZ * 4.5 * uWaveScale, t * 0.1));
-    vec3 waterColor = uColor + hl * 0.2;
+    vec3 waterColor = uColor + hl * 0.2 * (1.0 - vIce);
 
-    float foam = clamp(Foam(shore, vWorldXZ, t) * uFoamIntensity, 0.0, 1.0);
+    // Surf is the first thing a freeze takes: no waves reaching the shore, no
+    // foam where they used to break. What's left is the pale rime the ice
+    // color supplies further down.
+    float foam = clamp(Foam(shore, vWorldXZ, t) * uFoamIntensity, 0.0, 1.0) * (1.0 - vIce);
     vec3 color = mix(waterColor, uFoamColor, foam);
 
-    gl_FragColor = liquidOutput(color, vVisibility, vExplored, vWorldXZ);
+    gl_FragColor = liquidOutput(color, vVisibility, vExplored, vWorldXZ, vIce);
   }
 `;
 

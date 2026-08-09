@@ -2,6 +2,8 @@ import * as THREE from 'three';
 import type { SunShadowRig } from './SunShadows.js';
 import type { LiquidMaterialSet } from '../geometry/LiquidTypes.js';
 import { setLiquidLightTint } from '../geometry/WaterMaterial.js';
+// Type-only (erased at compile) — SkyDome imports DayNightState back.
+import type { SkyDome } from '../sky/SkyDome.js';
 
 export interface DayNightOptions {
   /** Starting time of day, 0–1 with 0 = midnight and 0.5 = noon. Default 0.5. */
@@ -33,12 +35,16 @@ export interface DayNightOptions {
   nightAmbient?: THREE.ColorRepresentation;
   /** Night AmbientLight intensity. Default 0.3. */
   nightAmbientIntensity?: number;
-  /** Sky/background color at midday. Default 0x8fb2d9. */
+  /** Horizon sky/background color at midday. Default 0x8fb2d9. */
   daySky?: THREE.ColorRepresentation;
   /** Sky color blended in while the sun is near the horizon. Default 0xc97a4a. */
   dawnSky?: THREE.ColorRepresentation;
-  /** Sky color at night. Default 0x0b0e1c. */
+  /** Horizon sky color at night. Default 0x0b0e1c. */
   nightSky?: THREE.ColorRepresentation;
+  /** Color straight overhead at midday — deeper than the horizon. Default 0x3f74c0. */
+  dayZenith?: THREE.ColorRepresentation;
+  /** Color straight overhead at night. Default 0x05060f. */
+  nightZenith?: THREE.ColorRepresentation;
 }
 
 /** Everything a renderer needs to light one moment of the cycle. All objects are reused between evaluate() calls — copy, don't keep. */
@@ -57,8 +63,15 @@ export interface DayNightState {
   lightIntensity: number;
   ambientColor: THREE.Color;
   ambientIntensity: number;
-  /** Sky/background color for this moment. */
+  /** Sky/background color for this moment — the same value as {@link skyHorizon}. */
   skyColor: THREE.Color;
+  /**
+   * Sky color at the horizon. A {@link SkyDome} hazes the world into this, so
+   * the map edge and the sky meet in one value.
+   */
+  skyHorizon: THREE.Color;
+  /** Sky color straight overhead — the top of the dome's gradient. */
+  skyZenith: THREE.Color;
   /**
    * uLightColor value for the terrain shader (lightColor pre-scaled by
    * intensity, matching the material's static defaults at noon).
@@ -86,10 +99,30 @@ export interface DayNightTargets {
   ambientLight?: THREE.AmbientLight;
   /** Terrain shader material — uLightDir / uLightColor / uAmbient follow the cycle. */
   terrainMaterial?: THREE.ShaderMaterial;
+  /**
+   * Road overlay material — takes the same light uniforms as the terrain, so
+   * roads darken with the ground they sit on instead of glowing after dark.
+   */
+  roadMaterial?: THREE.ShaderMaterial;
   /** Liquid material sets to tint (water darkens at night; emissive is unaffected). */
   liquidMaterials?: Iterable<LiquidMaterialSet>;
   /** Scene whose background color tracks the sky. */
   scene?: THREE.Scene;
+  /** Gradient sky dome — takes the horizon/zenith colors and the luminary glow. */
+  sky?: SkyDome;
+}
+
+/**
+ * Push the cycle's light onto one hand-rolled-lighting shader material (terrain
+ * or roads — both use these uniform names). Materials without them are skipped,
+ * so a custom material can opt out simply by not declaring them.
+ */
+function applyLightUniforms(material: THREE.ShaderMaterial | undefined, s: DayNightState): void {
+  const u = material?.uniforms;
+  if (!u || !('uLightDir' in u)) return;
+  u.uLightDir.value.copy(s.lightDir);
+  u.uLightColor.value.copy(s.terrainLightColor);
+  u.uAmbient.value.copy(s.terrainAmbient);
 }
 
 function smoothstep(a: number, b: number, x: number): number {
@@ -135,6 +168,8 @@ export class DayNightCycle {
   private readonly daySky: THREE.Color;
   private readonly dawnSky: THREE.Color;
   private readonly nightSky: THREE.Color;
+  private readonly dayZenith: THREE.Color;
+  private readonly nightZenith: THREE.Color;
 
   // Reused output state (evaluate() is called per frame).
   private readonly state: DayNightState = {
@@ -147,6 +182,8 @@ export class DayNightCycle {
     ambientColor: new THREE.Color(),
     ambientIntensity: 0.5,
     skyColor: new THREE.Color(),
+    skyHorizon: new THREE.Color(),
+    skyZenith: new THREE.Color(),
     terrainLightColor: new THREE.Color(),
     terrainAmbient: new THREE.Color(),
     liquidTint: new THREE.Color(1, 1, 1),
@@ -172,6 +209,8 @@ export class DayNightCycle {
     this.daySky   = new THREE.Color(opts.daySky   ?? 0x8fb2d9);
     this.dawnSky  = new THREE.Color(opts.dawnSky  ?? 0xc97a4a);
     this.nightSky = new THREE.Color(opts.nightSky ?? 0x0b0e1c);
+    this.dayZenith   = new THREE.Color(opts.dayZenith   ?? 0x3f74c0);
+    this.nightZenith = new THREE.Color(opts.nightZenith ?? 0x05060f);
   }
 
   /** Current time of day, 0–1 (0 = midnight, 0.5 = noon). */
@@ -234,8 +273,15 @@ export class DayNightCycle {
     s.ambientIntensity = this.nightAmbientIntensity
       + (this.dayAmbientIntensity - this.nightAmbientIntensity) * s.daylight;
 
-    s.skyColor.copy(this.nightSky).lerp(this.daySky, s.daylight);
-    s.skyColor.lerp(this.dawnSky, horizonGlow * 0.85);
+    s.skyHorizon.copy(this.nightSky).lerp(this.daySky, s.daylight);
+    s.skyHorizon.lerp(this.dawnSky, horizonGlow * 0.85);
+    // The zenith takes only a third of the dawn wash — the warm band belongs
+    // near the ground, and keeping the top cool is what makes it read as depth.
+    s.skyZenith.copy(this.nightZenith).lerp(this.dayZenith, s.daylight);
+    s.skyZenith.lerp(this.dawnSky, horizonGlow * 0.3);
+    // The flat scene background stands in for the whole sky, so it stays the
+    // horizon value — that is what a sky-less scene's edges fade against.
+    s.skyColor.copy(s.skyHorizon);
 
     // Terrain shader values, scaled the same way the static defaults are
     // (uLightColor = color · intensity/2, uAmbient = ambient · intensity · 0.9),
@@ -257,8 +303,8 @@ export class DayNightCycle {
 
   /**
    * Evaluate and push the state onto scene objects: sun rig (or plain light),
-   * ambient light, terrain material uniforms, liquid tints, and scene
-   * background. Returns the applied state.
+   * ambient light, terrain material uniforms, liquid tints, scene background,
+   * and the sky dome. Returns the applied state.
    */
   applyTo(targets: DayNightTargets): DayNightState {
     const s = this.evaluate();
@@ -277,16 +323,13 @@ export class DayNightCycle {
       targets.ambientLight.color.copy(s.ambientColor);
       targets.ambientLight.intensity = s.ambientIntensity;
     }
-    const u = targets.terrainMaterial?.uniforms;
-    if (u && 'uLightDir' in u) {
-      u.uLightDir.value.copy(s.lightDir);
-      u.uLightColor.value.copy(s.terrainLightColor);
-      u.uAmbient.value.copy(s.terrainAmbient);
-    }
+    applyLightUniforms(targets.terrainMaterial, s);
+    applyLightUniforms(targets.roadMaterial, s);
     if (targets.liquidMaterials) setLiquidLightTint(targets.liquidMaterials, s.liquidTint);
     if (targets.scene?.background instanceof THREE.Color) {
       targets.scene.background.copy(s.skyColor);
     }
+    targets.sky?.setDayNight(s);
 
     return s;
   }

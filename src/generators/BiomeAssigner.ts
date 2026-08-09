@@ -14,8 +14,26 @@ export interface BiomeAssignerOptions {
    * Band 0 = coldest/driest, band 3 = hottest/wettest.
    */
   biomeMatrix?:       TerrainType[][];
-  /** 4×4 tree-density matrix (values 0–3) with the same indexing. */
+  /** 4×4 tree-density matrix (values 0–3) with the same indexing. Drives feature layer 0. */
   treeDensityMatrix?: number[][];
+  /**
+   * 4×4 broadleaf-density matrix (values 0–3), same indexing. Drives feature
+   * layer 2, and only on maps with at least three feature layers.
+   *
+   * Kept separate from {@link treeDensityMatrix} rather than folded into it
+   * because the two are the same wood seen by different species: conifers hold
+   * the cold and the heights, broadleaves the temperate middle. The scatter
+   * builder competes per slot between whichever layers are eligible, so
+   * overlapping densities read as mixed woodland, and the ratio shifting with
+   * latitude is what turns the treeline into a gradient.
+   */
+  broadleafDensityMatrix?: number[][];
+  /**
+   * 4×4 bush-density matrix (values 0–3), same indexing. Drives feature layer
+   * 3, on maps with at least four feature layers. Scrub is what stands where
+   * it is too dry for a canopy.
+   */
+  bushDensityMatrix?: number[][];
   /** Terrain index assigned to submerged (elevation < 0) cells. Default 5 (built-in Water). */
   waterTerrainIndex?: number;
 }
@@ -37,6 +55,24 @@ const DEFAULT_TREE_MATRIX: number[][] = [
   [0, 1, 2, 3],
 ];
 
+// Broadleaves want warmth as well as water, so the cold rows stay empty and the
+// hot wet corner is where they take over from the conifers above.
+const DEFAULT_BROADLEAF_MATRIX: number[][] = [
+  [0, 0, 0, 0],
+  [0, 0, 0, 1],
+  [0, 1, 2, 3],
+  [0, 1, 3, 3],
+];
+
+// Scrub is the opposite shape: strongest in the low-moisture bands where the
+// canopy gives out, thinning to understory where it doesn't.
+const DEFAULT_BUSH_MATRIX: number[][] = [
+  [0, 0, 0, 0],
+  [0, 1, 1, 1],
+  [1, 2, 2, 1],
+  [1, 3, 2, 1],
+];
+
 function bandIndex(value: number, thresholds: [number, number, number]): number {
   if (value < thresholds[0]) return 0;
   if (value < thresholds[1]) return 1;
@@ -45,8 +81,12 @@ function bandIndex(value: number, thresholds: [number, number, number]): number 
 }
 
 /**
- * Assigns terrain types and tree-density feature levels to every cell
+ * Assigns terrain types and plant-density feature levels to every cell
  * based on temperature × moisture biome matrices, with post-matrix elevation tweaks.
+ *
+ * Fills as many feature layers as the map has, up to four: 0 conifers,
+ * 1 rocks, 2 broadleaf trees, 3 bushes. A map built with fewer simply stops
+ * early, so the two-layer maps this used to write are unchanged.
  */
 export function assignBiomes(
   map: HexMap,
@@ -59,6 +99,8 @@ export function assignBiomes(
   const elevMax        = opts.elevationMax      ?? 12;
   const biomes         = opts.biomeMatrix       ?? DEFAULT_BIOME_MATRIX;
   const trees          = opts.treeDensityMatrix ?? DEFAULT_TREE_MATRIX;
+  const broadleaves    = opts.broadleafDensityMatrix ?? DEFAULT_BROADLEAF_MATRIX;
+  const bushes         = opts.bushDensityMatrix      ?? DEFAULT_BUSH_MATRIX;
   const waterIdx       = opts.waterTerrainIndex ?? DEFAULT_WATER_TERRAIN_INDEX;
 
   // High-elevation desert cells become rock desert above this line
@@ -71,7 +113,9 @@ export function assignBiomes(
     // ---- Underwater cells ----
     if (elev < 0) {
       map.setTerrain(col, row, waterIdx);
-      if (map.featureLayerCount > 0) map.setFeatureLevel(col, row, 0, 0);
+      for (let layer = 0; layer < Math.min(map.featureLayerCount, 4); layer++) {
+        map.setFeatureLevel(col, row, layer, 0);
+      }
       return;
     }
 
@@ -79,8 +123,10 @@ export function assignBiomes(
     const tb = bandIndex(temperature[i], tempBands);
     const mb = bandIndex(moisture[i],    moistBands);
 
-    let terrain  = biomes[tb][mb];
-    let treeLevel = trees[tb][mb];
+    let terrain        = biomes[tb][mb];
+    let treeLevel      = trees[tb][mb];
+    let broadleafLevel = broadleaves[tb][mb];
+    let bushLevel      = bushes[tb][mb];
 
     // Post-matrix tweak 1: high-elevation desert → rock desert
     if (terrain === TerrainType.Desert && elev >= rockDesertElevation) {
@@ -94,16 +140,28 @@ export function assignBiomes(
 
     // Plant tweaks: no plants on snow; river adjacency boosts density
     if (terrain === TerrainType.Snow) {
-      treeLevel = 0;
-    } else if (treeLevel < 3 && map.hasRiver(col, row)) {
-      treeLevel += 1;
+      treeLevel = broadleafLevel = bushLevel = 0;
+    } else if (map.hasRiver(col, row)) {
+      if (treeLevel      < 3) treeLevel      += 1;
+      // Broadleaves crowd a riverbank harder than conifers do, and scrub takes
+      // it hardest of all — which is what draws a green line down a dry map.
+      if (broadleafLevel < 3) broadleafLevel += 1;
+      if (bushLevel      < 3) bushLevel      += 1;
     }
+    // Rock is bare ground, not thin soil: it hosts the rock scatter instead.
+    if (terrain === TerrainType.Rock) broadleafLevel = bushLevel = 0;
 
     map.setTerrain(col, row, terrain);
     if (map.featureLayerCount > 0) map.setFeatureLevel(col, row, 0, treeLevel);
     if (map.featureLayerCount > 1) {
-      const rockLevel = terrain === TerrainType.Rock ? 1 : 0;
+      // Two densities, not one: a single level draws a single scatter tier, so
+      // every boulder would be the same size at the same spacing. The bare
+      // heights above the rock-desert line are the rockier.
+      const rockLevel = terrain !== TerrainType.Rock ? 0
+        : elev >= rockDesertElevation ? 2 : 1;
       map.setFeatureLevel(col, row, 1, rockLevel);
     }
+    if (map.featureLayerCount > 2) map.setFeatureLevel(col, row, 2, broadleafLevel);
+    if (map.featureLayerCount > 3) map.setFeatureLevel(col, row, 3, bushLevel);
   });
 }

@@ -22,6 +22,16 @@ export interface OverlaySetOptions {
   style?: OverlayStyle;
   /** Default white. */
   color?: THREE.ColorRepresentation;
+  /**
+   * Per-cell color for `'fill'` overlays, as a callback over the same cells you
+   * passed in. Returning a color for any cell switches the overlay to vertex
+   * colors, so one draw call can carry many tints — a whole multi-faction
+   * territory map, or a heat map of movement costs. Cells the callback returns
+   * `null`/`undefined` for fall back to `color`.
+   *
+   * Ignored for `'outline'` and path overlays, which are single-colored.
+   */
+  cellColor?: (cell: { col: number; row: number }, index: number) => THREE.ColorRepresentation | null | undefined;
   /** Default 0.4 for fills, 1 for outlines. */
   opacity?: number;
   /** Lift above the cell surface. Default 0.02 for fills, 0.03 for outlines. */
@@ -159,13 +169,25 @@ export class CellOverlayLayer {
     const entry   = this.entryFor(id, style, opts);
     const yOffset = opts.yOffset ?? (style === 'fill' ? 0.02 : 0.03);
     const verts: number[] = [];
+    // Per-cell tints, built only when a cellColor callback is supplied.
+    const useCellColors = style === 'fill' && !!opts.cellColor;
+    const colors: number[] = [];
+    const _color = new THREE.Color();
+    const fallback = new THREE.Color(opts.color ?? 0xffffff);
 
     if (style === 'fill') {
-      for (const { col, row } of list) {
+      for (let ci = 0; ci < list.length; ci++) {
+        const { col, row } = list[ci];
         const hex    = offsetToHex(col, row);
         const y      = this.surfaceY(map, col, row) + yOffset;
         const center = hexToWorld(this.layout, hex);
         const cs     = hexCorners(this.layout, hex);
+        if (useCellColors) {
+          const c = opts.cellColor!(list[ci], ci);
+          if (c === null || c === undefined) _color.copy(fallback); else _color.set(c);
+          // 18 vertices per cell (6 fan triangles), all the same tint.
+          for (let v = 0; v < 18; v++) colors.push(_color.r, _color.g, _color.b);
+        }
         for (let i = 0; i < 6; i++) {
           const c1 = cs[i], c2 = cs[(i + 1) % 6];
           verts.push(center.x, y, center.z, c1.x, y, c1.z, c2.x, y, c2.z);
@@ -191,6 +213,23 @@ export class CellOverlayLayer {
     }
 
     entry.object.geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(verts), 3));
+
+    // Vertex colors multiply against material.color, so the material goes white
+    // while they drive the tint — and back to the requested color when they go away.
+    if (useCellColors) {
+      entry.object.geometry.setAttribute('color', new THREE.BufferAttribute(new Float32Array(colors), 3));
+      entry.material.color.set(0xffffff);
+      if (!entry.material.vertexColors) {
+        entry.material.vertexColors = true;
+        entry.material.needsUpdate  = true;
+      }
+    } else if (entry.material.vertexColors) {
+      entry.object.geometry.deleteAttribute('color');
+      entry.material.vertexColors = false;
+      entry.material.color.set(opts.color ?? 0xffffff);
+      entry.material.needsUpdate  = true;
+    }
+
     entry.object.visible = true;
   }
 

@@ -73,6 +73,8 @@ export function serializeChunkGeometryOptions(opts: ChunkGeometryOptions): Chunk
     riverbedTerrain: resolved.riverbedTerrain,
     riverBankFlare:  resolved.riverBankFlare,
     riverbedBlend:   resolved.riverbedBlend,
+    // Plain boolean or a flat numeric object — structured-cloneable as-is.
+    ambientOcclusion: resolved.ambientOcclusion,
   };
 }
 

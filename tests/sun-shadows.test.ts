@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import * as THREE from 'three';
 import { SunShadowRig } from '../src/lighting/SunShadows.js';
 import { createTerrainMaterial } from '../src/geometry/TerrainMaterial.js';
+import { createRoadMaterial } from '../src/geometry/RoadMaterial.js';
 
 /** Straight-down camera hovering `height` above ground point (x, z). */
 function topDownCamera(x: number, z: number, height: number): THREE.PerspectiveCamera {
@@ -139,5 +140,28 @@ describe('terrain material shadow support', () => {
     for (const name of ['uLightDir', 'uLightColor', 'uAmbient', 'uTerrainTex']) {
       expect(mat.uniforms[name]).toBeDefined();
     }
+  });
+});
+
+describe('road material shadow support', () => {
+  it('runs the terrain lighting model so the decal shades with the ground', () => {
+    const mat = createRoadMaterial();
+    expect(mat.lights).toBe(true);
+    for (const name of ['uLightDir', 'uLightColor', 'uAmbient', 'directionalLightShadows']) {
+      expect(mat.uniforms[name]).toBeDefined();
+    }
+    expect(mat.vertexShader).toContain('#include <shadowmap_vertex>');
+    expect(mat.fragmentShader).toContain('getShadowMask()');
+  });
+
+  it('takes the terrain material options so both agree without a day/night cycle', () => {
+    const mat = createRoadMaterial({
+      lightDir:   new THREE.Vector3(0, 2, 0),
+      lightColor: new THREE.Color(0x804020),
+      ambient:    new THREE.Color(0x101010),
+    });
+    expect((mat.uniforms.uLightDir.value as THREE.Vector3).y).toBeCloseTo(1, 6); // normalized
+    expect((mat.uniforms.uLightColor.value as THREE.Color).getHex()).toBe(0x804020);
+    expect((mat.uniforms.uAmbient.value as THREE.Color).getHex()).toBe(0x101010);
   });
 });

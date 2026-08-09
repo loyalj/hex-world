@@ -4,9 +4,11 @@ import {
   type LiquidColorOptions,
 } from './WaterMaterial.js';
 import { FOG_VERT_DECL, FOG_VERT_BODY, FOG_FRAG_DECL, fogUniforms } from './FogGLSL.js';
+import { SEASON_VERT_DECL, SEASON_VERT_BODY, SEASON_FRAG_DECL } from '../season/SeasonGLSL.js';
 
 const vertexShader = /* glsl */`
   ${FOG_VERT_DECL}
+  ${SEASON_VERT_DECL}
   attribute vec2 uv2;
   varying vec2 vUv;
   varying vec2 vUv2;
@@ -17,12 +19,14 @@ const vertexShader = /* glsl */`
     vec4 worldPos = modelMatrix * vec4(position, 1.0);
     vWorldXZ = worldPos.xz;
     ${FOG_VERT_BODY}
+    ${SEASON_VERT_BODY}
     gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
   }
 `;
 
 const fragmentShader = /* glsl */`
   ${FOG_FRAG_DECL}
+  ${SEASON_FRAG_DECL}
   uniform float uTime;
   uniform vec3  uColor;
   uniform vec3  uFoamColor;
@@ -39,7 +43,7 @@ const fragmentShader = /* glsl */`
     float shore = vUv.y;  // 0 = water edge, 1 = land edge
 
     float hl = waterNoise(vec3(vWorldXZ * 4.5 * uWaveScale, t * 0.2));
-    vec3 waterColor = uColor + hl * 0.2;
+    vec3 waterColor = uColor + hl * 0.2 * (1.0 - vIce);
 
     // Tutorial Part 8 composition: the fan is filled by wave crests rolling
     // toward the shore, foam takes over at the land edge, and the river's
