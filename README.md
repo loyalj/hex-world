@@ -264,6 +264,62 @@ fog.loadBase64(localStorage.getItem('fog')!);     // restore the remembered worl
 unitManager.reapplyFog();                         // rebuild live sight from the units
 ```
 
+### Movement domains
+
+Liquids are terrain like any other to the pathfinder — the cost function decides who may enter them. `createDomainCost` writes that decision once per unit type, and the result is a plain `MoveCostFn` that drops into `findPath`, `getMovementRange`, and the flow field unchanged:
+
+```ts
+import { createDomainCost, setPort, hasBridge, TerrainType } from '@loyalj/hex-world';
+
+// Which terrains float a ship — a lava shore is not a harbour.
+const isLiquid = (t: number) => t === TerrainType.Water;
+
+const shipCost = createDomainCost({ map, isLiquid, domain: 'naval' });
+const armyCost = createDomainCost({
+  map, isLiquid, domain: 'land',
+  // Wading a river is slow — unless a road bridges it, in which case the
+  // chunk builder has spanned the cell with a deck and it is an ordinary step.
+  landCost: (col, row) => map.hasRiver(col, row) && !hasBridge(map, col, row) ? 3 : 1,
+});
+const raidersCost = createDomainCost({
+  map, isLiquid, domain: 'amphibious',
+  embarkCost: 1,        // added to every step that crosses the shoreline
+  embarkAt:   'ports',  // or 'shore' (the default): anywhere land meets water
+});
+
+setPort(map, col, row, true, isLiquid);  // a dock: ships may enter this shore cell
+```
+
+Ports live in the metadata channel and serialize with the map. A unit given a `domain` and the same predicate reports its own crossings through `onEmbark` / `onDisembark`, which is where a walker swaps its model for a hull.
+
+### Scatter as data
+
+Shapes and behaviour are JSON, so a plant composed in an editor survives a save and a `.hexpack` and comes back swaying. A **recipe** is a height and a list of primitive parts; a **material descriptor** says what the plant answers to:
+
+```ts
+import { resolveScatterAssets, resolveScatterDefinition, PALM_RECIPE } from '@loyalj/hex-world';
+import type { ScatterAssetDescriptor, ScatterDescriptor } from '@loyalj/hex-world';
+
+const assets: ScatterAssetDescriptor[] = [{
+  id: 'palm', type: 'shape',
+  recipe: PALM_RECIPE,                                        // or your own parts
+  material: { doubleSide: true, windSway: true, scatterTexture: 0.6 },
+}];
+const descriptors: ScatterDescriptor[] = [{
+  id: 'palms', name: 'Palms', layerIndex: 0, tiltStrength: 0.12,
+  placement: { shore: true, maxElevation: 2 },                // beaches only
+  tiers: [[{ assetId: 'palm', yOffset: 0 }],                  // dense cells
+          [{ assetId: 'palm', yOffset: 0, scale: 0.8 }],      // medium
+          [{ assetId: 'palm', yOffset: 0, scale: 0.6 }]],     // sparse
+}];
+
+const registry    = resolveScatterAssets(assets);
+const definitions = descriptors.map(d => resolveScatterDefinition(d, registry, { isLiquid: world.isWater }));
+world.setScatterDefinitions(definitions);   // rebuilds every loaded chunk's scatter in place
+```
+
+`PINE_RECIPE`, `BROADLEAF_RECIPE`, `BUSH_RECIPE`, `ROCK_RECIPE`, `SMOKE_RECIPE`, and `PALM_RECIPE` are the built-ins as data. A `type: 'model'` asset points at a GLB instead. See [Adding a Scatter Type](guides/adding-scatter-type.md) for the part primitives and the `repeat` modifier.
+
 Every piece `HexWorld` wires is also available à la carte if you'd rather own the scene yourself:
 
 ```ts
@@ -314,6 +370,12 @@ let last = performance.now();
 
 ---
 
+## Live demo
+
+[loyalj.github.io/hex-world](https://loyalj.github.io/hex-world/) runs `src/demo/main.ts` against a freshly generated map. Every subsystem above has a switch on the control panel down the left edge — sectioned into Map, Terrain, Sky & light, Weather & wind, Seasons, Fog of war, Layers, and Units — with its keyboard shortcut printed beside it, so a key and a click take the same path. The panel collapses to a pill and each section folds; both are remembered between visits. Two commands act on the hovered cell and stay keyboard-only: `D` toggles a dock on a shore cell, and `A` sends every unit to the cell under the cursor from one flow-field sweep. The readouts top-right (frame rate, camera, clock, exploration, territory, resources, hover) are just that — readouts. Click a unit to select it and a cell to move it; the minimap bottom-right jumps the camera.
+
+---
+
 ## Documentation
 
 | Guide | Description |
@@ -339,8 +401,6 @@ npm run test:visual:update  # re-bake the goldens after an intentional visual ch
 ```
 
 The visual suite renders `tests/visual/scenes.ts` in headless Chromium under software GL through a Vite server it starts itself, and compares each frame with `tests/visual/__snapshots__/<scene>.png`; on a mismatch it writes `<scene>.actual.png` and `<scene>.diff.png` beside the golden. It also loads the demo page and fails on any page error. Playwright's bundled Chromium is required (`npx playwright install chromium` once).
-
-Live demo: [loyalj.github.io/hex-world](https://loyalj.github.io/hex-world/)
 
 ---
 
