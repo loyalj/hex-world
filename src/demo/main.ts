@@ -28,6 +28,7 @@ import { offsetToHex } from '../math/HexCoord.js';
 import { TerrainType } from '../map/HexCell.js';
 import { FogData } from '../geometry/FogData.js';
 import { findPath, getMovementRange, getVisibleCells, hasLineOfSight, type MoveCostFn } from '../pathfinding/Pathfinding.js';
+import { FlowField } from '../pathfinding/FlowField.js';
 import { smoothPath } from '../pathfinding/PathSmoothing.js';
 import { hexToOffset } from '../math/HexCoord.js';
 import { serializeMapJSON, deserializeMapJSON } from '../map/MapSerializer.js';
@@ -796,6 +797,90 @@ async function start() {
   unitManager.events.on('unitCellEnter', unitMoved);
   unitManager.events.on('unitMoveEnd',   unitMoved);
 
+  // --- Flow field ---
+  // The counterpart to the per-unit A* above: one Dijkstra sweep outward from
+  // the destination, after which every unit reads its own route out of the same
+  // field for the price of an array lookup. Four units here, but the cost of
+  // the sweep is the same for four hundred.
+  const flowField = new FlowField(map);
+  let flowGoal: { col: number; row: number } | null = null;
+
+  // Deliberately not `moveCost`: that one treats unexplored cells as impassable
+  // while [E] is on, and the units spawn in four quadrants with only their own
+  // surroundings revealed — a fog-gated field would leave most of the army
+  // standing still and hide the thing this is here to show. A rally order is a
+  // reasonable place for a game to path on known-good ground anyway; the field
+  // takes whichever rules you hand it.
+  const flowCost: MoveCostFn = (_from, to) => {
+    const { col, row } = hexToOffset(to);
+    if (!map.inBounds(col, row)) return Infinity;
+    return DEMO_WATER_TERRAINS.has(map.getTerrain(col, row)) ? Infinity : 1;
+  };
+
+  // Arrows are drawn only near the goal — the field itself covers the whole
+  // map, but 20 000 arrows is a wall of blue, not a picture of a flow.
+  const FLOW_ARROW_RANGE = 18;
+
+  // Same recipe as the path preview line, which is the overlay in this demo
+  // that is known to read against every terrain: opaque, depth-tested off.
+  const flowArrowMat = new THREE.LineBasicMaterial({ color: 0x22ffff, depthTest: false });
+  const flowArrows = new THREE.LineSegments(new THREE.BufferGeometry(), flowArrowMat);
+  flowArrows.renderOrder = 6;
+  flowArrows.visible = false;
+  scene.add(flowArrows);
+
+  function clearFlowField(): void {
+    flowGoal = null;
+    flowArrows.geometry.dispose();
+    flowArrows.geometry = new THREE.BufferGeometry();
+    flowArrows.visible  = false;
+  }
+
+  function rebuildFlowArrows(): void {
+    const verts: number[] = [];
+    flowField.forEachReached((col, row, cost) => {
+      if (cost === 0 || cost > FLOW_ARROW_RANGE) return;
+      // flowVector, not the raw direction index: the blended bearing is what
+      // shows the field curving around an obstacle rather than snapping to one
+      // of six axes.
+      const v = flowField.flowVector(layout, offsetToHex(col, row));
+      if (!v) return;
+
+      const wp = hexToWorld(layout, offsetToHex(col, row));
+      const y  = map.getElevation(col, row) * 0.5 + 0.12;
+      const half = 0.42;
+      const tipX = wp.x + v.x * half, tipZ = wp.z + v.z * half;
+      const tailX = wp.x - v.x * half, tailZ = wp.z - v.z * half;
+      verts.push(tailX, y, tailZ, tipX, y, tipZ);
+
+      // Two barbs, the flow vector rotated ±150° about Y.
+      for (const a of [2.618, -2.618]) {
+        const bx = v.x * Math.cos(a) - v.z * Math.sin(a);
+        const bz = v.x * Math.sin(a) + v.z * Math.cos(a);
+        verts.push(tipX, y, tipZ, tipX + bx * 0.26, y, tipZ + bz * 0.26);
+      }
+    });
+
+    flowArrows.geometry.dispose();
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(verts), 3));
+    flowArrows.geometry = geo;
+    flowArrows.visible  = verts.length > 0;
+  }
+
+  /** Re-targets the field and marches every unit at once. */
+  function setFlowGoal(target: { col: number; row: number }): void {
+    flowGoal = target;
+    // compute() reuses the field's buffers, so re-targeting allocates nothing.
+    flowField.compute(offsetToHex(target.col, target.row), flowCost);
+    rebuildFlowArrows();
+
+    for (const u of units) {
+      const path = flowField.path(offsetToHex(u.col, u.row));
+      if (path && path.length > 1) u.travel(path);
+    }
+  }
+
   // Focus camera on the first unit's actual spawn position so the first frame
   // renders on terrain rather than empty sky.
   controls.snapTo(units[0].worldX, units[0].worldZ);
@@ -922,12 +1007,25 @@ async function start() {
       unitMeshes[i].position.set(u.worldX, u.worldY, u.worldZ);
     }
     deselectUnit();
+    clearFlowField();
   }
 
   // --- Keyboard shortcuts ---
   window.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
       deselectUnit();
+      clearFlowField();
+    } else if (e.key === 'a' || e.key === 'A') {
+      // Auto-repeat has to be dropped, not just tolerated: held for a moment
+      // this fires every ~30 ms, and each one re-issued the march and rebuilt
+      // the arrows. It used to toggle on a repeat press, which meant the second
+      // auto-repeat wiped the field a quarter-second after the first drew it —
+      // the units kept walking on the orders they already had, and the arrows
+      // vanished before anyone saw them. [A] now only ever re-targets; [Esc]
+      // clears.
+      if (!e.repeat && hoverCell && !DEMO_WATER_TERRAINS.has(map.getTerrain(hoverCell.col, hoverCell.row))) {
+        setFlowGoal(hoverCell);
+      }
     } else if (e.key === 'r' || e.key === 'R') {
       seed = Math.floor(Math.random() * 0xffffffff);
       runGenerator();
@@ -1168,6 +1266,10 @@ async function start() {
     const unitLine = selectedUnit
       ? `Unit:      [${selectedUnit.col}, ${selectedUnit.row}]  ${selectedUnit.isMoving ? 'moving' : 'selected — click to move'}  [Esc] deselect  [C] focus`
       : `Units:     ${units.length} on map — click one to select`;
+    const flowLine = flowGoal
+      ? `Flow field: goal [${flowGoal.col}, ${flowGoal.row}]  ${flowField.reachedCount} cells in one sweep  ` +
+        `— all ${units.length} units marching  [A] re-target  [Esc] clear`
+      : `Flow field: [A] send every unit to the hovered cell from one Dijkstra sweep`;
     hud.textContent =
       `FPS:       ${fps}\n` +
       `Generator: ${gen.name}  [G] cycle\n` +
@@ -1200,7 +1302,7 @@ async function start() {
       `Save: [S]  Load: [L]  ${saveStatus}\n` +
       `Minimap fog dim: ${minimapDimExplored    ? 'ON  [1] toggle' : 'OFF  [1] toggle'}\n` +
       `Minimap unexplored: ${minimapHideUnexplored ? 'ON  [2] toggle' : 'OFF  [2] toggle'}\n` +
-      `\n${unitLine}\n${hoverLine}`;
+      `\n${unitLine}\n${flowLine}\n${hoverLine}`;
 
     renderer.render(scene, camera);
     // After the frame, never through it — the canvas keeps its MSAA.

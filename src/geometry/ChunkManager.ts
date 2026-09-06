@@ -175,6 +175,19 @@ export class ChunkManager {
   private riverElevCache: Map<number, number> | null = null;
   /** The carved-elevation map behind the currently-rendered geometry (same diffing role as lastRiverFlow). */
   private lastRiverElev: Map<number, number> | null = null;
+  /**
+   * `map.riverRevision` the river caches were built against. The caches are
+   * dropped only when the map reports a river-relevant write, so a terrain
+   * stroke across dry land keeps them — three whole-map walks saved per
+   * dirty frame.
+   */
+  private riverCacheRevision = -1;
+  /**
+   * Bumped whenever terrain geometry in the scene changes: a chunk loaded,
+   * unloaded, or rebuilt. Picking caches key on it — the ground under a
+   * stationary cursor moves when the cell under it is raised.
+   */
+  private _geometryRevision = 0;
   /** True when the caller pinned geometryOptions.riverbedTerrain explicitly. */
   private readonly riverbedPinned: boolean;
   private readonly flowWidenedRivers: boolean;
@@ -196,6 +209,8 @@ export class ChunkManager {
   private readonly liquidSprayChunks   = new Map<string, THREE.Points>();
   private readonly roadChunks    = new Map<string, THREE.Mesh>();
   private readonly scatterChunks = new Map<string, THREE.InstancedMesh[]>();
+  /** Applied to every scatter mesh, current and future — see {@link setScatterVisible}. */
+  private scatterVisible         = true;
   private readonly dirty         = new Set<string>();
   private elapsedSeconds         = 0;
 
@@ -268,8 +283,19 @@ export class ChunkManager {
    * Lazily computes the map-wide accumulated flow used for flow-dependent
    * channel widths. Invalidated by markDirty alongside the ownership cache.
    */
+  /** Drop the river caches if the map's river data changed since they were built. */
+  private syncRiverCaches(): void {
+    const rev = this.map.riverRevision;
+    if (rev === this.riverCacheRevision) return;
+    this.riverCacheRevision = rev;
+    this.riverCellsByLiquid = null;
+    this.riverFlowCache     = null;
+    this.riverElevCache     = null;
+  }
+
   private riverFlow(): Map<number, number> | undefined {
     if (!this.flowWidenedRivers) return undefined;
+    this.syncRiverCaches();
     if (!this.riverFlowCache) {
       this.riverFlowCache = computeRiverFlow(this.map, this.layout.orientation.edgeDirections);
       this.lastRiverFlow  = this.riverFlowCache;
@@ -283,6 +309,7 @@ export class ChunkManager {
    * carve a gorge instead of climbing. Invalidated by markDirty.
    */
   private riverElevations(): Map<number, number> {
+    this.syncRiverCaches();
     if (!this.riverElevCache) {
       this.riverElevCache = computeRiverElevations(this.map, this.layout.orientation.edgeDirections);
       this.lastRiverElev  = this.riverElevCache;
@@ -318,7 +345,6 @@ export class ChunkManager {
     if (nextFlow) diffAndMark(nextFlow, this.lastRiverFlow);
     diffAndMark(nextElev, this.lastRiverElev);
 
-    // After the markDirty calls above (each nulls the cache fields).
     if (nextFlow) {
       this.riverFlowCache = nextFlow;
       this.lastRiverFlow  = nextFlow;
@@ -403,6 +429,7 @@ export class ChunkManager {
    * per chunk × per liquid.
    */
   private riverCellsFor(liquidId: string): Set<number> | undefined {
+    this.syncRiverCaches();
     if (!this.riverCellsByLiquid) {
       const ownership = computeRiverOwnership(
         this.map, this.layout.orientation.edgeDirections, this.liquidIdByTerrain,
@@ -548,6 +575,7 @@ export class ChunkManager {
     mesh.receiveShadow = true;
     this.scene.add(mesh);
     this.chunks.set(k, mesh);
+    this._geometryRevision++;
 
     for (const [liquidId, mats] of this.liquidMaterials) {
       const lk   = `${liquidId}|${k}`;
@@ -618,7 +646,7 @@ export class ChunkManager {
     if (this.hashGrid && this.scatterDefinitions && this.scatterDefinitions.length > 0) {
       const scMeshes = buildScatterMeshes(this.map, this.layout, b, this.hashGrid, this.scatterDefinitions, this.allWaterTerrains);
       if (scMeshes.length > 0) {
-        for (const m of scMeshes) this.scene.add(m);
+        for (const m of scMeshes) { m.visible = this.scatterVisible; this.scene.add(m); }
         this.scatterChunks.set(k, scMeshes);
         if (this.fogData) this.applyFogToScatterMeshes(scMeshes);
       }
@@ -710,6 +738,7 @@ export class ChunkManager {
     this.scene.remove(mesh);
     mesh.geometry.dispose();
     this.chunks.delete(k);
+    this._geometryRevision++;
 
     for (const liquidId of this.liquidMaterials.keys()) {
       const lk = `${liquidId}|${k}`;
@@ -784,7 +813,10 @@ export class ChunkManager {
 
     // Widen/narrow downstream channels whose accumulated flow changed, and
     // re-level ones whose carved elevation changed, BEFORE snapshotting dirty
-    // regions, so their chunks join this frame's rebuild.
+    // regions, so their chunks join this frame's rebuild. Only after a
+    // river-relevant write — syncRiverCaches leaves the caches alone (and
+    // this branch idle) for edits on dry land.
+    this.syncRiverCaches();
     if (this.dirty.size > 0 && (this.riverFlowCache === null || this.riverElevCache === null)) {
       this.refreshRiverCachesAndMarkChanged();
     }
@@ -813,6 +845,7 @@ export class ChunkManager {
       this.geoOptions.riverElevations = this.riverElevations();
       const { terrain: newGeo, roads: newRoadsGeo } = buildChunkGeometry(this.map, this.layout, b, this.geoOptions);
       mesh.geometry = newGeo;
+      this._geometryRevision++;
 
       for (const [liquidId, mats] of this.liquidMaterials) {
         const lk   = `${liquidId}|${k}`;
@@ -920,7 +953,7 @@ export class ChunkManager {
       if (this.hashGrid && this.scatterDefinitions && this.scatterDefinitions.length > 0) {
         const newScMeshes = buildScatterMeshes(this.map, this.layout, b, this.hashGrid, this.scatterDefinitions, this.allWaterTerrains);
         if (newScMeshes.length > 0) {
-          for (const m of newScMeshes) this.scene.add(m);
+          for (const m of newScMeshes) { m.visible = this.scatterVisible; this.scene.add(m); }
           this.scatterChunks.set(k, newScMeshes);
           if (this.fogData) this.applyFogToScatterMeshes(newScMeshes);
         }
@@ -972,9 +1005,8 @@ export class ChunkManager {
   markDirty(col: number, row: number): void {
     const cs = this.chunkSize;
     this.dirty.add(this.key(Math.floor(col / cs), Math.floor(row / cs)));
-    this.riverCellsByLiquid = null; // river ownership may have changed
-    this.riverFlowCache     = null; // accumulated flow may have changed
-    this.riverElevCache     = null; // carved river levels may have changed
+    // The river caches are not dropped here: `update()` compares the map's
+    // river revision and drops them only when a river-relevant write happened.
     this.invalidateAsyncBuilds();   // worker snapshot no longer matches the map
 
     // Interior cells can't affect another chunk's geometry.
@@ -1045,6 +1077,18 @@ export class ChunkManager {
     }
   }
 
+  /**
+   * Show or hide every scatter feature (trees, rocks, bushes) without touching
+   * the underlying feature layers. Streaming and dirty rebuilds keep honoring
+   * the flag, so chunks loaded while hidden come in hidden too.
+   */
+  setScatterVisible(visible: boolean): void {
+    this.scatterVisible = visible;
+    for (const meshes of this.scatterChunks.values()) {
+      for (const m of meshes) m.visible = visible;
+    }
+  }
+
   /** Toggle whether unexplored cells are hidden. Independent of dimming. */
   setHideUnexplored(enabled: boolean): void {
     this.hideUnexplored = enabled;
@@ -1087,6 +1131,8 @@ export class ChunkManager {
     this.lastRiverFlow      = null;
     this.riverElevCache     = null;
     this.lastRiverElev      = null;
+    // A replacement map starts its own revision count; force the first sync.
+    this.riverCacheRevision = -1;
     // Terminate the chunk worker; the next async request recreates it from
     // the factory, so dispose-and-reload keeps working with workers enabled.
     this.invalidateAsyncBuilds();
@@ -1189,5 +1235,10 @@ export class ChunkManager {
   /** Currently loaded terrain meshes — pass to pickHexFromMeshes for accurate raycasting. */
   get terrainMeshes(): THREE.Mesh[] {
     return [...this.chunks.values()];
+  }
+
+  /** Changes whenever a terrain chunk is loaded, unloaded, or rebuilt. */
+  get geometryRevision(): number {
+    return this._geometryRevision;
   }
 }

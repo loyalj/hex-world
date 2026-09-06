@@ -34,6 +34,34 @@ export interface OverlaySetOptions {
   cellColor?: (cell: { col: number; row: number }, index: number) => THREE.ColorRepresentation | null | undefined;
   /** Default 0.4 for fills, 1 for outlines. */
   opacity?: number;
+  /**
+   * World-unit width for `'outline'` overlays. GL lines are stuck at one pixel
+   * on most platforms, so any value > 0 switches the outline from line
+   * segments to flat ribbon quads centered on the boundary edges. Butt-capped:
+   * at a bend the centerline stays covered and the sliver missing from the
+   * outer corner is sub-pixel at sane widths, while capped ends would
+   * double-blend into bright dots on a translucent line. Ignored for fills
+   * and paths.
+   */
+  lineWidth?: number;
+  /**
+   * `'fill'` only: also drape vertical faces down each edge where the
+   * neighboring cell's surface sits lower, so the tint covers cliff walls
+   * instead of leaving a bare band between two caps at different heights.
+   * Walls take their cell's `cellColor` tint. Map-edge cliffs get no wall —
+   * that face belongs to the terrain skirt. Default false.
+   */
+  walls?: boolean;
+  /**
+   * Depth-test the overlay against the scene. Default false, and beware
+   * turning it on over standard terrain: chunk geometry perturbs its vertices
+   * (see CHUNK_GEOMETRY_DEFAULTS — ±0.8 XZ, ±0.2 Y, plus terraced blend
+   * bands), so these ideal-hexagon overlays sit *inside* the drawn surface in
+   * places and get clipped to shreds by a depth test. Only useful when the
+   * geometry the overlay must respect is unperturbed or the overlay is lifted
+   * clear above it.
+   */
+  depthTest?: boolean;
   /** Lift above the cell surface. Default 0.02 for fills, 0.03 for outlines. */
   yOffset?: number;
   /** three.js render order. Default 5 for fills, 6 for outlines. */
@@ -70,7 +98,8 @@ export interface CellOverlayLayerOptions {
 interface OverlayEntry {
   object: THREE.Mesh | THREE.LineSegments | THREE.Line;
   material: THREE.MeshBasicMaterial | THREE.LineBasicMaterial;
-  style: OverlayStyle | 'path';
+  /** `'ribbon'` is an outline with lineWidth > 0 — a Mesh, so width changes across zero recreate the object. */
+  style: OverlayStyle | 'path' | 'ribbon';
 }
 
 /**
@@ -81,7 +110,8 @@ interface OverlayEntry {
  * Each overlay is identified by a string id and replaced wholesale on update —
  * call {@link set} (cells) or {@link setPath} (a path line) each time the
  * highlighted set changes, and pass `null` to hide. Overlays render with depth
- * testing off so they stay visible over perturbed terrain and water.
+ * testing off by default so they stay visible over perturbed terrain and water;
+ * map-wide tints should opt into `depthTest` (see {@link OverlaySetOptions}).
  *
  * @example
  * const overlays = new CellOverlayLayer({ parent: scene, layout, map, isWater });
@@ -114,7 +144,7 @@ export class CellOverlayLayer {
       : map.getElevation(col, row)) * this.elevScale;
   }
 
-  private entryFor(id: string, style: OverlayStyle | 'path', opts: { color?: THREE.ColorRepresentation; opacity?: number; renderOrder?: number }): OverlayEntry {
+  private entryFor(id: string, style: OverlayStyle | 'path' | 'ribbon', opts: { color?: THREE.ColorRepresentation; opacity?: number; renderOrder?: number }): OverlayEntry {
     let entry = this.entries.get(id);
     if (entry && entry.style !== style) {
       this.remove(id);
@@ -125,7 +155,7 @@ export class CellOverlayLayer {
       geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(0), 3));
       let object: OverlayEntry['object'];
       let material: OverlayEntry['material'];
-      if (style === 'fill') {
+      if (style === 'fill' || style === 'ribbon') {
         material = new THREE.MeshBasicMaterial({
           transparent: true, depthWrite: false, depthTest: false, side: THREE.DoubleSide,
         });
@@ -165,8 +195,10 @@ export class CellOverlayLayer {
       return;
     }
 
+    const ribbonHalf = style === 'outline' ? (opts.lineWidth ?? 0) / 2 : 0;
     const map     = this.getMap();
-    const entry   = this.entryFor(id, style, opts);
+    const entry   = this.entryFor(id, ribbonHalf > 0 ? 'ribbon' : style, opts);
+    entry.material.depthTest = opts.depthTest ?? false;
     const yOffset = opts.yOffset ?? (style === 'fill' ? 0.02 : 0.03);
     const verts: number[] = [];
     // Per-cell tints, built only when a cellColor callback is supplied.
@@ -176,6 +208,7 @@ export class CellOverlayLayer {
     const fallback = new THREE.Color(opts.color ?? 0xffffff);
 
     if (style === 'fill') {
+      const edgeDirs = this.layout.orientation.edgeDirections;
       for (let ci = 0; ci < list.length; ci++) {
         const { col, row } = list[ci];
         const hex    = offsetToHex(col, row);
@@ -192,6 +225,21 @@ export class CellOverlayLayer {
           const c1 = cs[i], c2 = cs[(i + 1) % 6];
           verts.push(center.x, y, center.z, c1.x, y, c1.z, c2.x, y, c2.z);
         }
+        if (opts.walls) {
+          for (let i = 0; i < 6; i++) {
+            const n = hexToOffset(hexNeighbor(hex, edgeDirs[i]));
+            if (n.col < 0 || n.col >= map.width || n.row < 0 || n.row >= map.height) continue;
+            const nY = this.surfaceY(map, n.col, n.row) + yOffset;
+            if (nY >= y) continue; // the higher cell owns the wall between the two
+            const c1 = cs[i], c2 = cs[(i + 1) % 6];
+            verts.push(
+              c1.x, y, c1.z,  c2.x, y, c2.z,  c2.x, nY, c2.z,
+              c1.x, y, c1.z,  c2.x, nY, c2.z, c1.x, nY, c1.z,
+            );
+            // The wall wears its cell's tint, same as the cap above it.
+            if (useCellColors) for (let v = 0; v < 6; v++) colors.push(_color.r, _color.g, _color.b);
+          }
+        }
       }
     } else {
       // Outline: draw only edges whose neighbor is not part of the set.
@@ -207,7 +255,18 @@ export class CellOverlayLayer {
             && inSet.has(n.row * map.width + n.col);
           if (inside) continue;
           const c1 = cs[i], c2 = cs[(i + 1) % 6];
-          verts.push(c1.x, y, c1.z, c2.x, y, c2.z);
+          if (ribbonHalf > 0) {
+            // Two triangles centered on the edge, widened perpendicular to it.
+            const len = Math.hypot(c2.x - c1.x, c2.z - c1.z);
+            const px  = -((c2.z - c1.z) / len) * ribbonHalf;
+            const pz  =  ((c2.x - c1.x) / len) * ribbonHalf;
+            verts.push(
+              c1.x - px, y, c1.z - pz,  c2.x - px, y, c2.z - pz,  c2.x + px, y, c2.z + pz,
+              c1.x - px, y, c1.z - pz,  c2.x + px, y, c2.z + pz,  c1.x + px, y, c1.z + pz,
+            );
+          } else {
+            verts.push(c1.x, y, c1.z, c2.x, y, c2.z);
+          }
         }
       }
     }

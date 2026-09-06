@@ -78,12 +78,26 @@ export class MapEdit {
 
   /** Restore every touched cell to its pre-transaction state. */
   undo(): void {
-    for (const r of this.records) restoreCell(this.map, r.col, r.row, r.before);
+    this.replay(r => r.before);
   }
 
   /** Re-apply the transaction's final state to every touched cell. */
   redo(): void {
-    for (const r of this.records) restoreCell(this.map, r.col, r.row, r.after!);
+    this.replay(r => r.after!);
+  }
+
+  /**
+   * Restore one side of every record. The restores write the raw arrays, so
+   * the map's river revision is bumped here whenever a touched cell carries
+   * river data on either side — the only cells whose bytes can change how
+   * rivers render.
+   */
+  private replay(side: (r: CellRecord) => CellSnapshot): void {
+    let rivers = false;
+    for (const r of this.records) rivers ||= this.map.hasRiver(r.col, r.row);
+    for (const r of this.records) restoreCell(this.map, r.col, r.row, side(r));
+    for (const r of this.records) rivers ||= this.map.hasRiver(r.col, r.row);
+    if (rivers) this.map.bumpRiverRevision();
   }
 }
 

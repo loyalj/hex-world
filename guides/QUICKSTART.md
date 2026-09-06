@@ -458,7 +458,7 @@ The library provides the algorithms. Your game supplies a `MoveCostFn` that clos
 
 ```ts
 import {
-  findPath, getMovementRange, getVisibleCells, hasLineOfSight,
+  findPath, computeFlowField, getMovementRange, getVisibleCells, hasLineOfSight,
   smoothPath,
   offsetToHex, hexToOffset,
   type MoveCostFn,
@@ -479,6 +479,14 @@ const path = findPath(
   cost,
   map,
 );
+
+// Flow field — one Dijkstra sweep from the destination serves every unit.
+// Cheaper than one A* per unit as soon as several head to the same place.
+const field = computeFlowField(offsetToHex(goalCol, goalRow), cost, map);
+for (const unit of army) {
+  const route = field.path(offsetToHex(unit.col, unit.row));  // same shape as findPath
+  if (route && route.length > 1) unit.travel(route);
+}
 
 // Flood-fill — all cells reachable within a movement budget
 const reachable = getMovementRange(

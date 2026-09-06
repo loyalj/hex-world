@@ -98,6 +98,14 @@ export class HexPicker {
   /** The most recent valid pick, or null. Survives up to `holdFrames` misses. */
   get hoveredCell(): { col: number; row: number } | null { return this.last; }
 
+  /**
+   * True while the last result was a held-over cell rather than a hit — the
+   * pointer is off the terrain and the hold is counting down. A caller that
+   * skips picks while nothing moves must keep calling {@link pick} while this
+   * is set, or the hold never expires.
+   */
+  get holding(): boolean { return this.heldFrames > 0; }
+
   /** Clear held state (e.g. after swapping to a new map). */
   reset(): void {
     this.last = null;

@@ -145,6 +145,46 @@ describe('ResourceLayer rendering', () => {
     expect(y).toBeCloseTo(map.getWaterSurface(4, 4) * 0.5 + 0.8);
   });
 
+  it('occlusion modes: hidden depth-tests, visible skips the test, dimmed adds a ghost pass', () => {
+    const { parent, layer } = setup(); // default: 'hidden'
+    layer.setResource(1, 1, 'ore');
+    layer.refresh();
+    expect(parent.children).toHaveLength(1);
+    expect(((parent.children[0] as THREE.InstancedMesh).material as THREE.Material).depthTest).toBe(true);
+
+    const make = (occluded: 'visible' | 'dimmed') => {
+      const p = new THREE.Object3D();
+      const l = new ResourceLayer({
+        parent: p,
+        layout: createLayout(POINTY_TOP, 1),
+        map:    new HexMap({ width: 8, height: 8 }),
+        descriptors: DESCRIPTORS,
+        occluded,
+      });
+      l.setResource(1, 1, 'ore');
+      l.refresh();
+      return p.children as THREE.InstancedMesh[];
+    };
+
+    const visible = make('visible');
+    expect(visible).toHaveLength(1);
+    expect((visible[0].material as THREE.Material).depthTest).toBe(false);
+
+    // Dimmed: the normal pass plus a ghost that draws only behind occluders.
+    const dimmed = make('dimmed');
+    expect(dimmed).toHaveLength(2);
+    const mats  = dimmed.map(m => m.material as THREE.ShaderMaterial);
+    const ghost = mats.find(m => m.depthFunc === THREE.GreaterDepth)!;
+    const front = mats.find(m => m !== ghost)!;
+    expect(ghost.uniforms.uStrength.value).toBeCloseTo(0.3);
+    expect(front.depthTest).toBe(true);
+    expect(front.uniforms.uStrength.value).toBe(1);
+    // Both instances carry the same placement.
+    expect(dimmed[0].count).toBe(1);
+    expect(dimmed[1].count).toBe(1);
+    expect(mats.every(m => m.depthWrite === false)).toBe(true);
+  });
+
   it('skips deposits whose type has no descriptor', () => {
     const { parent, layer } = setup();
     layer.setResource(1, 1, 'ore');

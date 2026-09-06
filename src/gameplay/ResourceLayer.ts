@@ -45,15 +45,29 @@ function blankIcon(): THREE.DataTexture {
 export function createResourceIconMaterial(
   descriptor: ResourceDescriptor,
   icon?: THREE.Texture,
+  opts: {
+    /** Disable to draw over occluders instead of being clipped by them. Default true. */
+    depthTest?: boolean;
+    /**
+     * Build the ghost pass: reverse the depth test (`GreaterDepth`) so the
+     * material draws only where geometry occludes it. Pair with `strength`.
+     */
+    occludedPass?: boolean;
+    /** Alpha multiplier — the ghost pass's dimming. Default 1. */
+    strength?: number;
+  } = {},
 ): THREE.ShaderMaterial {
   const material = new THREE.ShaderMaterial({
     transparent: true,
     depthWrite:  false,
+    depthTest:   opts.depthTest ?? true,
+    ...(opts.occludedPass ? { depthFunc: THREE.GreaterDepth } : {}),
     uniforms: {
-      uColor:   { value: new THREE.Color(descriptor.color) },
-      uSize:    { value: descriptor.size ?? DEFAULT_SIZE },
-      uMap:     { value: icon ?? blankIcon() },
-      uUseMap:  { value: icon ? 1 : 0 },
+      uColor:    { value: new THREE.Color(descriptor.color) },
+      uSize:     { value: descriptor.size ?? DEFAULT_SIZE },
+      uMap:      { value: icon ?? blankIcon() },
+      uUseMap:   { value: icon ? 1 : 0 },
+      uStrength: { value: opts.strength ?? 1 },
       ...fogUniforms(),
     },
     vertexShader: /* glsl */`
@@ -75,6 +89,7 @@ export function createResourceIconMaterial(
       uniform vec3      uColor;
       uniform sampler2D uMap;
       uniform float     uUseMap;
+      uniform float     uStrength;
       varying vec2 vUv;
       ${FOG_FRAG_DECL}
 
@@ -96,7 +111,7 @@ export function createResourceIconMaterial(
         }
 
         if (icon.a < 0.01) discard;
-        gl_FragColor = vec4(icon.rgb * vVisibility, icon.a * vExplored);
+        gl_FragColor = vec4(icon.rgb * vVisibility, icon.a * vExplored * uStrength);
       }
     `,
   });
@@ -131,6 +146,18 @@ export interface ResourceLayerOptions {
   elevationScale?: number;
   /** three.js render order for the icon meshes. Default 7. */
   renderOrder?: number;
+  /**
+   * What happens to an icon behind occluding geometry — a tree, a ridge:
+   * - `'hidden'` (default): depth-tested like a prop; occluders clip it.
+   * - `'dimmed'`: two passes — full strength where visible, a faint ghost
+   *   where occluded, so a marker stays locatable without hiding what stands
+   *   in front of it.
+   * - `'visible'`: no depth test; icons draw at full strength everywhere.
+   * `renderOrder` still decides what they in turn sit under (weather draws at 10).
+   */
+  occluded?: 'hidden' | 'dimmed' | 'visible';
+  /** Ghost strength for `occluded: 'dimmed'`, 0–1. Default 0.3. */
+  occludedOpacity?: number;
 }
 
 /**
@@ -167,6 +194,8 @@ export class ResourceLayer {
   private readonly isWater?: (terrain: number) => boolean;
   private readonly elevScale: number;
   private readonly renderOrder: number;
+  private readonly occluded: 'hidden' | 'dimmed' | 'visible';
+  private readonly occludedOpacity: number;
 
   private _descriptors: ResourceDescriptor[];
   private descriptorsById = new Map<string, ResourceDescriptor>();
@@ -185,6 +214,8 @@ export class ResourceLayer {
     this.isWater     = options.isWater;
     this.elevScale   = options.elevationScale ?? ELEVATION_SCALE;
     this.renderOrder = options.renderOrder ?? 7;
+    this.occluded        = options.occluded ?? 'hidden';
+    this.occludedOpacity = options.occludedOpacity ?? 0.3;
     this.fogData     = options.fogData ?? null;
     this._descriptors = options.descriptors ?? [];
     this.rebuildDescriptorIndex();
@@ -381,12 +412,15 @@ export class ResourceLayer {
       : map.getElevation(col, row)) * this.elevScale;
   }
 
-  private materialFor(descriptor: ResourceDescriptor): THREE.ShaderMaterial {
-    let material = this.materials.get(descriptor.id);
+  private materialFor(descriptor: ResourceDescriptor, occludedPass = false): THREE.ShaderMaterial {
+    const key = occludedPass ? `${descriptor.id}#occluded` : descriptor.id;
+    let material = this.materials.get(key);
     if (!material) {
       const icon = descriptor.iconAssetId ? this.icons.get(descriptor.iconAssetId) : undefined;
-      material = createResourceIconMaterial(descriptor, icon);
-      this.materials.set(descriptor.id, material);
+      material = createResourceIconMaterial(descriptor, icon, occludedPass
+        ? { occludedPass: true, strength: this.occludedOpacity }
+        : { depthTest: this.occluded !== 'visible' });
+      this.materials.set(key, material);
       // A material built after setFogData still needs the current fog state.
       const map = this.getMap();
       if (this.fogData) {
@@ -417,30 +451,39 @@ export class ResourceLayer {
     const matrix = new THREE.Matrix4();
     for (const [type, placements] of byType) {
       const descriptor = this.descriptorsById.get(type)!;
-      const material   = this.materialFor(descriptor);
-      // Unit quad — the vertex shader scales it by uSize and faces it at the camera.
-      const geometry   = new THREE.PlaneGeometry(1, 1);
-      const mesh       = new THREE.InstancedMesh(geometry, material, placements.length);
-      const cellIndices = new Float32Array(placements.length);
       const yOffset    = descriptor.yOffset ?? DEFAULT_Y_OFFSET;
 
-      for (let i = 0; i < placements.length; i++) {
-        const { col, row } = placements[i];
-        const world = hexToWorld(this.layout, offsetToHex(col, row));
-        matrix.makeTranslation(world.x, this.surfaceY(map, col, row) + yOffset, world.z);
-        mesh.setMatrixAt(i, matrix);
-        cellIndices[i] = row * map.width + col;
-      }
-      mesh.instanceMatrix.needsUpdate = true;
-      // Per-instance fog lookup, the same channel the scatter meshes use.
-      geometry.setAttribute('cellIndex', new THREE.InstancedBufferAttribute(cellIndices, 1));
-      // Billboarding happens in view space, so three's world-space bounds are wrong.
-      mesh.frustumCulled = false;
-      mesh.renderOrder   = this.renderOrder;
-      mesh.visible       = this._visible;
+      const buildMesh = (occludedPass: boolean): void => {
+        const material = this.materialFor(descriptor, occludedPass);
+        // Unit quad — the vertex shader scales it by uSize and faces it at the camera.
+        const geometry = new THREE.PlaneGeometry(1, 1);
+        const mesh     = new THREE.InstancedMesh(geometry, material, placements.length);
+        const cellIndices = new Float32Array(placements.length);
 
-      this.parent.add(mesh);
-      this.meshes.set(type, mesh);
+        for (let i = 0; i < placements.length; i++) {
+          const { col, row } = placements[i];
+          const world = hexToWorld(this.layout, offsetToHex(col, row));
+          matrix.makeTranslation(world.x, this.surfaceY(map, col, row) + yOffset, world.z);
+          mesh.setMatrixAt(i, matrix);
+          cellIndices[i] = row * map.width + col;
+        }
+        mesh.instanceMatrix.needsUpdate = true;
+        // Per-instance fog lookup, the same channel the scatter meshes use.
+        geometry.setAttribute('cellIndex', new THREE.InstancedBufferAttribute(cellIndices, 1));
+        // Billboarding happens in view space, so three's world-space bounds are wrong.
+        mesh.frustumCulled = false;
+        mesh.renderOrder   = this.renderOrder;
+        mesh.visible       = this._visible;
+
+        this.parent.add(mesh);
+        this.meshes.set(occludedPass ? `${type}#occluded` : type, mesh);
+      };
+
+      buildMesh(false);
+      // The ghost: the same instances again with the depth test reversed, so it
+      // fills in exactly the fragments the pass above lost to an occluder. The
+      // regions are disjoint, so draw order between the two doesn't matter.
+      if (this.occluded === 'dimmed') buildMesh(true);
     }
   }
 

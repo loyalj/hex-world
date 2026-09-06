@@ -8,6 +8,7 @@ import {
 import { createLayout } from '../src/math/HexLayout.js';
 import { POINTY_TOP } from '../src/math/HexOrientation.js';
 import { resolveLiquidMaterials, DEFAULT_LIQUID_DESCRIPTORS } from '../src/geometry/LiquidTypes.js';
+import { HexHashGrid } from '../src/geometry/HexHashGrid.js';
 import { resolveTerrainDefinitions } from '../src/geometry/TerrainTypes.js';
 
 const EDGE_DIRS = POINTY_TOP.edgeDirections;
@@ -198,5 +199,59 @@ describe('ChunkManager transparent layering', () => {
     expect(orders.has(RENDER_ORDER_RIVER)).toBe(true);
     expect(RENDER_ORDER_SHORE).toBeGreaterThan(0);
     expect(RENDER_ORDER_ESTUARY).toBeGreaterThan(RENDER_ORDER_SHORE);
+  });
+});
+
+describe('ChunkManager scatter visibility', () => {
+  const tier = () => [{
+    geometry: new THREE.BoxGeometry(0.2, 0.5, 0.2),
+    material: new THREE.MeshBasicMaterial(),
+    yOffset: 0,
+  }];
+
+  function makeScattered() {
+    const scene  = new THREE.Scene();
+    const map    = new HexMap({ width: 16, height: 16, featureLayerCount: 1 });
+    const layout = createLayout(POINTY_TOP, 1);
+    const cm = new ChunkManager({
+      map, layout, scene,
+      material: new THREE.MeshBasicMaterial(),
+      liquidMaterials: new Map([['water', resolveLiquidMaterials(DEFAULT_LIQUID_DESCRIPTORS[0])]]),
+      chunkSize: 16,
+      hashGrid: new HexHashGrid(42),
+      scatterDefinitions: [{ id: 'tree', name: 'Tree', layerIndex: 0, tiers: [tier(), tier(), tier()] }],
+    });
+    for (let c = 2; c < 10; c++) map.setFeatureLevel(c, 4, 0, 3);
+    cm.loadAll();
+    const scatter = () => scene.children.filter((o): o is THREE.InstancedMesh => o instanceof THREE.InstancedMesh);
+    return { map, cm, scatter };
+  }
+
+  it('hides and re-shows every scatter mesh', () => {
+    const { cm, scatter } = makeScattered();
+    expect(scatter().length).toBeGreaterThan(0);
+    expect(scatter().every(m => m.visible)).toBe(true);
+
+    cm.setScatterVisible(false);
+    expect(scatter().every(m => !m.visible)).toBe(true);
+
+    cm.setScatterVisible(true);
+    expect(scatter().every(m => m.visible)).toBe(true);
+  });
+
+  it('chunks rebuilt while hidden come back hidden', () => {
+    const { map, cm, scatter } = makeScattered();
+    cm.setScatterVisible(false);
+
+    // A dirty rebuild replaces the chunk's scatter meshes wholesale — the new
+    // meshes must inherit the flag, not reset to visible.
+    map.setFeatureLevel(12, 4, 0, 2);
+    cm.markDirty(12, 4);
+    const camera = new THREE.PerspectiveCamera();
+    camera.position.set(8, 20, 4);
+    cm.update(camera);
+
+    expect(scatter().length).toBeGreaterThan(0);
+    expect(scatter().every(m => !m.visible)).toBe(true);
   });
 });

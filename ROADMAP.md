@@ -649,6 +649,50 @@ features from actual need.
   so adding a resource never reshuffles the others' placements, and `minSpacing`
   breaks up the clumps pure per-cell chance produces. `HexWorld.setResourceTypes`.
   Demo: [U].
+- [x] **Flow-field pathfinding** *(2026-08-09)* — `FlowField` / `computeFlowField`.
+  `findPath` is one A* per unit, which is the wrong shape the moment an army
+  converges on one point: every search re-derives the same facts about the same
+  terrain. One Dijkstra sweep *outward from the destination* records, for every
+  cell, the cost to the goal and which neighbour to step to; after that each
+  unit's next move is an array read. `field.path(from)` returns exactly what
+  `findPath` returns — start first, goal last, `null` if unreachable — so it
+  drops into `HexUnit.travel()` unchanged and the two are interchangeable at the
+  call site. A single unit clicking a destination should still use A*, which
+  stops at the goal instead of exploring everything; the crossover is a handful
+  of units sharing one target.
+  The parts that took thought:
+  **The cost function has to run backwards.** The sweep expands goal-outward,
+  but the move a unit makes runs inward, so when the search reaches `X` from a
+  settled `Y` it asks `costFn(X, Y)` — the direction of travel, not the
+  direction of expansion. Symmetric cost functions never notice; asymmetric ones
+  (uphill dearer than down, one-way fords) come out right with nothing special
+  at the call site, and there is a test that pins it with a cost function that is
+  1 one way and 20 the other, cross-checked against A* from all 100 cells.
+  A consequence worth stating: a cell the cost function refuses to *admit*
+  anyone into still gets a direction if it has a passable way *out*, so a unit
+  spawned or shoved onto a wall is handed a route off it rather than being
+  stranded — nothing routes *through* it, since the step in is still rejected.
+  **`flowVector` is not `next()` in world space.** The discrete step snaps to
+  one of six axes, and a crowd following it files through a single hex in a
+  single line, which is the tell that gives a shared field away. The steering
+  vector instead blends every neighbour the field descends into, weighted by the
+  cost each one saves, so units on open ground aim at the true bearing and a
+  column meeting an obstacle splits around both sides. It re-checks each edge
+  against the stored `costFn` rather than trusting the cost gradient alone —
+  otherwise a cell whose cheap-looking neighbour sits across an impassable
+  cliff edge steers straight off it, which is a visible bug and not a subtle
+  one. Six cost calls per unit per frame, not per cell.
+  **Storage is dense and reused.** Three typed arrays, 13 bytes a cell,
+  allocated once; `compute` re-targets in place so a field that follows a moving
+  quarry allocates nothing per frame. Invalidation is a monotonic pass stamp
+  rather than a `fill()` — a 500k-cell field is dropped in one assignment. The
+  heap is an index heap over parallel `Int32Array`/`Float64Array` rather than
+  the object-per-node `MinHeap` A* uses, which is most of the constant-factor
+  win. `maxCost` bounds the sweep for the common "only units within N will ever
+  ask" case.
+  Demo: hover a cell and press `[A]` — all four units march from one sweep, and
+  the field is drawn as arrows (built from `flowVector`, so the curve around
+  water is visible rather than hexagonal).
 - [ ] **Naval support** — embark/disembark transitions, ships constrained to
   liquid cells, port designation on shore cells. Liquids are first-class; units
   on them aren't yet. Movement costs and pathfinding need liquid-aware modes.

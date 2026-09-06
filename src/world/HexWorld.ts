@@ -400,6 +400,18 @@ export class HexWorld {
   private rafId: number | null = null;
   private lastFrameTime = 0;
   private hovered: { col: number; row: number } | null = null;
+  /**
+   * What the last hover pick was computed from. A pick raycasts every loaded
+   * terrain chunk — several milliseconds against dense geometry — so it runs
+   * only when one of these has changed: the pointer, the camera, the terrain
+   * meshes, or the map itself.
+   */
+  private readonly hoverInputs = {
+    mouseX: NaN, mouseY: NaN,
+    camera: new THREE.Matrix4(), projection: new THREE.Matrix4(),
+    geometry: -1,
+    map: null as HexMap | null,
+  };
   private _dayNight: DayNightCycle | null = null;
   private _weather: WeatherSystem | null = null;
   private _sky: SkyDome | null = null;
@@ -730,6 +742,23 @@ export class HexWorld {
    * would report a change every frame.
    */
   private updateHover(): void {
+    const inputs = this.hoverInputs;
+    const changed =
+      inputs.mouseX !== this.mouseX || inputs.mouseY !== this.mouseY ||
+      inputs.geometry !== this.chunks.geometryRevision ||
+      inputs.map !== this._map ||
+      !inputs.camera.equals(this.camera.matrixWorld) ||
+      !inputs.projection.equals(this.camera.projectionMatrix);
+    // While the picker is holding a cell over a miss, keep picking so the
+    // hold runs out on schedule instead of freezing until the next move.
+    if (!changed && !this.picker.holding) return;
+    inputs.mouseX = this.mouseX;
+    inputs.mouseY = this.mouseY;
+    inputs.geometry = this.chunks.geometryRevision;
+    inputs.map = this._map;
+    inputs.camera.copy(this.camera.matrixWorld);
+    inputs.projection.copy(this.camera.projectionMatrix);
+
     const previous = this.hovered;
     const cell = this.picker.pick(this.mouseX, this.mouseY);
     this.hovered = cell;

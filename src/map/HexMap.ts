@@ -64,6 +64,16 @@ export class HexMap {
    * the raw map is exposed for serializers and bulk iteration.
    */
   readonly cellData: Map<number, Record<string, unknown>>;
+  /**
+   * Bumped by every write that can change how rivers render map-wide: any
+   * river edge write, and terrain or elevation writes on a cell that carries
+   * a river (ownership follows the terrain a river drains into; carved levels
+   * follow elevation along the flow). `ChunkManager` keys its river caches on
+   * it, so a terrain stroke across dry land never triggers the whole-map
+   * river walks. Raw-array writers (undo/redo, generators) must call
+   * {@link bumpRiverRevision} themselves.
+   */
+  private _riverRevision = 0;
 
   constructor(options: HexMapOptions) {
     this.width = options.width;
@@ -183,7 +193,9 @@ export class HexMap {
   }
 
   setTerrain(col: number, row: number, terrain: TerrainType): void {
-    this.uint8[this.index(col, row) + OFFSET_TERRAIN] = terrain;
+    const idx = this.index(col, row) + OFFSET_TERRAIN;
+    if (this.uint8[idx] !== terrain && this.hasRiver(col, row)) this._riverRevision++;
+    this.uint8[idx] = terrain;
   }
 
   // --- Elevation ---
@@ -193,7 +205,21 @@ export class HexMap {
   }
 
   setElevation(col: number, row: number, elevation: number): void {
-    this.int8[this.index(col, row) + OFFSET_ELEVATION] = elevation;
+    const idx = this.index(col, row) + OFFSET_ELEVATION;
+    if (this.int8[idx] !== elevation && this.hasRiver(col, row)) this._riverRevision++;
+    this.int8[idx] = elevation;
+  }
+
+  // --- River revision ---
+
+  /** See the field doc: changes whenever map-wide river rendering could. */
+  get riverRevision(): number {
+    return this._riverRevision;
+  }
+
+  /** Call after writing river, terrain, or elevation data through the raw arrays. */
+  bumpRiverRevision(): void {
+    this._riverRevision++;
   }
 
   // --- Flags ---
@@ -295,6 +321,7 @@ export class HexMap {
   setRiverOutgoing(col: number, row: number, edgeIndex: number): void {
     const idx = this.index(col, row) + OFFSET_RIVER_DIR;
     this.uint8[idx] = (this.uint8[idx] & 0x07) | ((edgeIndex + 1) << 3);
+    this._riverRevision++;
   }
 
   /**
@@ -306,23 +333,27 @@ export class HexMap {
   setRiverIncoming(col: number, row: number, edgeIndex: number): void {
     this.riverInBits[row * this.width + col] |= (1 << edgeIndex);
     this.syncPrimaryIncoming(col, row);
+    this._riverRevision++;
   }
 
   /** Remove one incoming river edge, keeping any others (does NOT update the neighbour). */
   removeRiverIncoming(col: number, row: number, edgeIndex: number): void {
     this.riverInBits[row * this.width + col] &= ~(1 << edgeIndex);
     this.syncPrimaryIncoming(col, row);
+    this._riverRevision++;
   }
 
   /** Clear the outgoing river direction, keeping incoming tributaries (does NOT update the neighbour). */
   removeRiverOutgoing(col: number, row: number): void {
     this.uint8[this.index(col, row) + OFFSET_RIVER_DIR] &= 0x07;
+    this._riverRevision++;
   }
 
   /** Clear all river data for this cell. */
   clearRiver(col: number, row: number): void {
     this.uint8[this.index(col, row) + OFFSET_RIVER_DIR] = 0;
     this.riverInBits[row * this.width + col] = 0;
+    this._riverRevision++;
   }
 
   // --- Roads ---
@@ -446,6 +477,7 @@ export class HexMap {
     this.waterSurfaces.fill(0);
     this.shoreDistances.fill(0);
     this.cellData.clear();
+    this._riverRevision++;
   }
 
   // --- Water surfaces ---

@@ -28,7 +28,7 @@ A Three.js library for building hex-grid strategy and exploration games. Handles
 - **Per-cell metadata** — a sparse, serialized data channel (`getCellData`/`setCellData`) with undo/redo, backing territory, resources, and any game-specific state
 - **Procedural generation** — full climate-driven pipeline (BFS landmass → erosion → moisture simulation → temperature model → biome assignment → rivers → roads), plus a fast FBM alternative; composable raw passes for custom generators; async time-sliced variants with progress events and cancellation for loading bars
 - **Minimap rendering** — `drawMapImage` paints a top-down map straight into a canvas (terrain, elevation shading, rivers, roads, fog, plus a per-cell tint hook for ownership or highlights) and hands back the world↔pixel transform, so a camera-viewport rectangle, click-to-jump, and unit pins all line up without extra math; `renderMapImage` wraps it for PNG thumbnails, and `cameraGroundFootprint` gives you the exact ground quad the camera is looking at
-- **Pathfinding** — A\*, flood-fill movement range, BFS visibility radius, elevation-aware line of sight, Catmull-Rom path smoothing
+- **Pathfinding** — A\*, flow fields (one Dijkstra sweep from the destination serves a whole army, with blended steering vectors so a crowd spreads instead of filing through one hex), flood-fill movement range, BFS visibility radius, elevation-aware line of sight, Catmull-Rom path smoothing
 - **Units** — position, smooth path-following, facing, fog reveal; wire your own `Object3D` and animation callbacks
 - **Typed events** — `world.events.on('cellClick' | 'cellHover' | 'cellEnter' | 'cellLeave' | 'chunkLoaded' | 'unitArrived' | …)` instead of wiring raycasts, pointer listeners, and per-unit callbacks by hand. Clicks are drag-filtered, so releasing a right-button camera pan never reads as a click, and taps work without a preceding pointer move. Any number of systems can subscribe to the same event — the single-slot `onFrame` and `unit.onMoveEnd` hooks still work alongside it
 - **RTS camera** — pan, zoom, tilt, and swing around the target, all with smooth damping. Middle-drag does both angles at once (up/down tilts, left/right turns), or drive them from code with `rotateTo` / `tiltTo`. The tilt floor is deliberately low enough to put the horizon on screen — a strictly top-down camera can never look at the sky, which quietly makes the dome, sunsets, and god rays invisible. `setPitchLimits` and `setYawEnabled` change both at runtime, so a game can offer a constrained classic-RTS view and a free-look one as selectable modes; locking the heading swings it back to rest rather than freezing it wherever it happened to be
@@ -326,7 +326,7 @@ let last = performance.now();
 | [Custom Map Generator](guides/custom-map-generator.md) | Plugin interface and composing raw generation passes |
 | [Runtime Map Editing](guides/runtime-map-editing.md) | Painting terrain, rivers, and roads at runtime; the markDirty loop |
 | [Fog of War](guides/fog-of-war.md) | Reference-counted visibility, reveal animation, multi-unit integration |
-| [Pathfinding and Movement](guides/pathfinding-and-movement.md) | A\*, movement range, LOS, path smoothing, MoveCostFn design |
+| [Pathfinding and Movement](guides/pathfinding-and-movement.md) | A\*, flow fields, movement range, LOS, path smoothing, MoveCostFn design |
 
 API reference (TypeDoc): `docs/index.html` after running `npm run docs`, or live at [loyalj.github.io/hex-world/docs](https://loyalj.github.io/hex-world/docs).
 

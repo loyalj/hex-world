@@ -6,6 +6,10 @@ import { generateChunkTerrainSteps } from './ChunkTerrainGenerator.js';
 import type { ChunkTerrainOptions } from './ChunkTerrainGenerator.js';
 import { applyErosionSteps } from './ErosionPass.js';
 import type { ErosionOptions } from './ErosionPass.js';
+import { applyMountainRanges } from './MountainRangePass.js';
+import type { MountainRangeOptions } from './MountainRangePass.js';
+import { applyCoastShaping } from './CoastShapingPass.js';
+import type { CoastShapingOptions } from './CoastShapingPass.js';
 import { simulateClimateSteps } from './ClimateSimulator.js';
 import type { ClimateSimulatorOptions } from './ClimateSimulator.js';
 import { computeTemperature } from './TemperatureModel.js';
@@ -23,7 +27,7 @@ import type { ClimateData } from '../season/ClimateData.js';
  * All sub-configs are optional — each phase falls back to its own defaults.
  */
 export interface MapGeneratorConfig
-  extends RegionLayoutOptions, ChunkTerrainOptions, ErosionOptions {
+  extends RegionLayoutOptions, ChunkTerrainOptions, CoastShapingOptions, MountainRangeOptions, ErosionOptions {
   climate?:     ClimateSimulatorOptions;
   temperature?: TemperatureModelOptions;
   biomes?:      BiomeAssignerOptions;
@@ -61,7 +65,9 @@ export interface GenerationProgress {
 // Pass names + overall-progress weights (must sum to 1). Weights approximate
 // relative wall-clock cost so the loading bar moves smoothly.
 const PASSES: ReadonlyArray<readonly [string, number]> = [
-  ['landmass',      0.25],
+  ['landmass',      0.21],
+  ['coast',         0.02],
+  ['ranges',        0.02],
   ['erosion',       0.10],
   ['moisture',      0.40],
   ['temperature',   0.05],
@@ -118,6 +124,14 @@ export function* generateMapSteps(
   // landmass (region layout is O(1) — folded into this pass)
   const regions = createRegions(map.width, map.height, config, rand);
   for (const p of generateChunkTerrainSteps(map, regions, config, rand)) yield event(p);
+  yield event(1); finishPass();
+
+  // coast (no-op unless coastShaping is set; rand-free either way)
+  applyCoastShaping(map, { ...config, elevationMax: elevMax });
+  yield event(1); finishPass();
+
+  // ranges (no-op, consuming no randomness, unless mountainRanges is set)
+  applyMountainRanges(map, { ...config, elevationMax: elevMax }, rand);
   yield event(1); finishPass();
 
   // erosion

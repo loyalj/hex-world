@@ -341,6 +341,9 @@ export class TerritoryLayer {
       style:     'fill',
       opacity:   this.fillOpacity,
       yOffset:   this.fillYOffset,
+      // Tint the cliff faces between cells of different heights too — without
+      // them, hilly territory shows bare terrain bands through the fill.
+      walls:     true,
       // Pass the Color itself — a hex round-trip would re-encode to sRGB and back.
       cellColor: (_cell, i) => tints[i],
     });

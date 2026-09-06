@@ -1,6 +1,6 @@
 # Pathfinding and Movement
 
-The library provides A*, flood-fill movement range, BFS visibility, line-of-sight, and Catmull-Rom path smoothing. All algorithms accept a `MoveCostFn` that your game supplies — the library never reads terrain or unit data directly, so your rules stay in your code.
+The library provides A*, flow fields, flood-fill movement range, BFS visibility, line-of-sight, and Catmull-Rom path smoothing. All algorithms accept a `MoveCostFn` that your game supplies — the library never reads terrain or unit data directly, so your rules stay in your code.
 
 ---
 
@@ -99,6 +99,125 @@ const riverCrossingCost: MoveCostFn = (from, to) => {
   return 1;
 };
 ```
+
+---
+
+## Flow fields (many units, one destination)
+
+`findPath` is one search per unit. When a whole army converges on a rally point — or a horde chases one target — that is the wrong shape: every search re-derives the same information about the same terrain. A **flow field** inverts it. One Dijkstra sweep runs *outward from the destination* and records, for every cell on the map, the cost to reach the goal and which neighbour to step to next. After that, each unit's next move is an array lookup.
+
+```ts
+import { computeFlowField, offsetToHex } from '@loyalj/hex-world';
+
+const field = computeFlowField(offsetToHex(rallyCol, rallyRow), cost, map);
+
+for (const unit of army) {
+  const path = field.path(offsetToHex(unit.col, unit.row));
+  if (path && path.length > 1) unit.travel(path);
+}
+```
+
+`field.path()` returns exactly what `findPath` returns — start first, goal last, both inclusive, `null` if unreachable — so it drops into `HexUnit.travel()` unchanged.
+
+### When to use which
+
+| | `findPath` | `FlowField` |
+|---|---|---|
+| Cost | One A* per unit | One Dijkstra per **destination** |
+| Best for | One unit, one goal; path previews | Many units → one goal; chase/rally/retreat AI |
+| Per-unit read | The whole search | O(1) array lookup |
+| Covers | Just the route | Every cell on the map |
+
+A single unit clicking a destination should still use `findPath` — A* stops as soon as it reaches the goal, while the field explores everything. The crossover is roughly "more than a handful of units heading to the same place".
+
+### Re-targeting without reallocating
+
+`computeFlowField` allocates its buffers. If the destination changes every turn or every frame, build the field once and call `compute` on it — the storage is reused, so re-targeting allocates nothing.
+
+```ts
+import { FlowField } from '@loyalj/hex-world';
+
+const field = new FlowField(map);        // 13 bytes per map cell, allocated once
+
+function onOrderIssued(col: number, row: number): void {
+  field.compute(offsetToHex(col, row), cost);
+  for (const unit of army) {
+    const path = field.path(offsetToHex(unit.col, unit.row));
+    if (path && path.length > 1) unit.travel(path);
+  }
+}
+```
+
+### The cost function runs in the direction of travel
+
+The search expands outward from the goal, but the move a unit will actually make runs the other way. `costFn` is called accordingly: when the sweep reaches cell `X` from an already-settled cell `Y`, it asks `costFn(X, Y)` — the step the unit will take, not the step the search took.
+
+Symmetric cost functions (the common case) never notice. Asymmetric ones get the right answer for free:
+
+```ts
+// Climbing costs more than descending. No special handling needed.
+const slopeCost: MoveCostFn = (from, to) => {
+  const f = hexToOffset(from), t = hexToOffset(to);
+  const climb = map.getElevation(t.col, t.row) - map.getElevation(f.col, f.row);
+  return climb > 0 ? 1 + climb : 1;
+};
+```
+
+One consequence worth knowing: a cell your cost function refuses to let anyone *enter* still gets a direction if it has a passable way *out*. A unit spawned or shoved onto a wall is handed a route off it rather than being stranded. Nothing routes *through* the cell, because the step into it is still rejected.
+
+### Several goals
+
+Pass an array and every cell flows to whichever goal is cheapest *from that cell*. The watershed between them falls out of the search — one field serves "retreat to the nearest fort".
+
+```ts
+const field = computeFlowField(
+  forts.map(f => offsetToHex(f.col, f.row)),
+  cost,
+  map,
+);
+```
+
+### Bounding the sweep
+
+`maxCost` stops the expansion once the accumulated cost passes a threshold. Cells beyond it report `Infinity` and no direction, exactly as if unreachable — which is what you want when only units within a known distance will ever consult the field, and what makes a field over a continent-sized map affordable.
+
+```ts
+const field = computeFlowField(goal, cost, map, { maxCost: 40 });
+```
+
+### Steering: `flowVector`
+
+`next()` gives the discrete next cell. `flowVector()` gives a normalised world-space `(x, z)` bearing, and it is **not** just `next()` converted to world space: it blends every neighbour the field descends into, weighted by how much cost each one saves.
+
+That blend is what makes a crowd read as a crowd. Units crossing open ground aim at the true bearing instead of snapping to one of six axes, and a column meeting an obstacle splits around both sides rather than filing through a single hex. Edges the cost function rejects are excluded, so a cell whose cheap-looking neighbour sits across an impassable cliff never steers into it.
+
+```ts
+const v = field.flowVector(layout, offsetToHex(unit.col, unit.row));
+if (v) {
+  unit.worldX += v.x * speed * dt;
+  unit.worldZ += v.z * speed * dt;
+}
+```
+
+Use `path()` + `travel()` for cell-locked movement, `flowVector()` when units move continuously and you want them to spread.
+
+### Reading the field
+
+```ts
+field.cost(hex);            // cost to the nearest goal, Infinity if unreachable
+field.costAt(col, row);     // same, in offset coordinates
+field.isReachable(hex);     // boolean
+field.direction(hex);       // 0–5 index into HEX_DIRECTIONS, -1 at a goal or unreachable
+field.next(hex);            // the next cell, or null
+field.path(hex);            // full HexCoord[] route, or null
+field.reachedCount;         // cells the last sweep settled
+field.goals;                // the in-bounds goals it ran from
+
+// Debug overlay — scans the whole grid, so keep it out of per-unit code.
+field.forEachReached((col, row, cost, direction) => drawArrow(col, row, direction));
+```
+
+`direction()` returns `-1` both at a goal and on an unreachable cell. Call `cost()` to tell them apart: a goal costs `0`.
 
 ---
 
@@ -280,6 +399,10 @@ const off = hexToOffset(hex);        // { col, row } for map API
 | Task | API |
 |---|---|
 | Find a path | `findPath(from, to, costFn, map)` → `HexCoord[] \| null` |
+| Many units, one goal | `computeFlowField(goals, costFn, map, opts?)` → `FlowField` |
+| Re-target a field | `field.compute(goals, costFn, opts?)` (reuses buffers) |
+| Route out of a field | `field.path(from)` → `HexCoord[] \| null` |
+| Steering direction | `field.flowVector(layout, hex)` → `{x, z} \| null` |
 | Movement range | `getMovementRange(center, budget, costFn, map)` → `HexCoord[]` |
 | Visibility radius | `getVisibleCells(center, range, map)` → `HexCoord[]` |
 | Line of sight | `hasLineOfSight(from, to, map, eyeHeight?)` → `boolean` |

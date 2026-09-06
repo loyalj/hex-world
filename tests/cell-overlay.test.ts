@@ -55,6 +55,62 @@ describe('CellOverlayLayer fills', () => {
   });
 });
 
+describe('CellOverlayLayer fill walls', () => {
+  it('drapes a wall down each edge with a lower neighbor, and only those', () => {
+    const map = new HexMap({ width: 8, height: 8 });
+    map.setElevation(4, 4, 3); // mesa: all 6 neighbors sit at 0
+    const { parent, layer } = makeLayer(map);
+
+    layer.set('t', [{ col: 4, row: 4 }], { walls: true, yOffset: 0 });
+    // 18 cap vertices + 6 walls × 6 vertices.
+    const pos = positions(parent.children[0]);
+    expect(pos.count).toBe(18 + 36);
+    // Wall feet reach the neighbors' surface (elevation 0).
+    let minY = Infinity;
+    for (let i = 0; i < pos.count; i++) minY = Math.min(minY, pos.getY(i));
+    expect(minY).toBeCloseTo(0);
+
+    // A pit cell gets no walls — the higher neighbors own those faces.
+    map.setElevation(4, 4, -3);
+    map.computeWaterSurfaces();
+    layer.set('t', [{ col: 4, row: 4 }], { walls: true, yOffset: 0 });
+    expect(positions(parent.children[0]).count).toBe(18);
+  });
+
+  it('keeps the color buffer in step with wall vertices', () => {
+    const map = new HexMap({ width: 8, height: 8 });
+    map.setElevation(4, 4, 2);
+    const { parent, layer } = makeLayer(map);
+
+    layer.set('t', [{ col: 4, row: 4 }, { col: 4, row: 6 }], {
+      walls: true,
+      cellColor: (_c, i) => (i === 0 ? 0xff0000 : 0x0000ff),
+    });
+    const mesh   = parent.children[0] as THREE.Mesh;
+    const pos    = mesh.geometry.getAttribute('position') as THREE.BufferAttribute;
+    const colors = mesh.geometry.getAttribute('color') as THREE.BufferAttribute;
+    expect(colors.count).toBe(pos.count);
+    // The raised cell's walls (verts 18..53) wear its red tint.
+    expect(colors.getX(20)).toBeGreaterThan(0.5);
+    expect(colors.getZ(20)).toBeLessThan(0.01);
+  });
+
+  it('depthTest is opt-in and reverts with the option', () => {
+    const map = new HexMap({ width: 8, height: 8 });
+    const { parent, layer } = makeLayer(map);
+
+    layer.set('t', [{ col: 1, row: 1 }]);
+    const mat = (parent.children[0] as THREE.Mesh).material as THREE.MeshBasicMaterial;
+    expect(mat.depthTest).toBe(false);
+
+    layer.set('t', [{ col: 1, row: 1 }], { depthTest: true });
+    expect(mat.depthTest).toBe(true);
+
+    layer.set('t', [{ col: 1, row: 1 }]);
+    expect(mat.depthTest).toBe(false);
+  });
+});
+
 describe('CellOverlayLayer per-cell colors', () => {
   it('tints each cell independently and switches the material to vertex colors', () => {
     const map = new HexMap({ width: 8, height: 8 });
@@ -121,6 +177,38 @@ describe('CellOverlayLayer outlines', () => {
     const { parent, layer } = makeLayer(map);
     layer.set('sel', [{ col: 0, row: 0 }], { style: 'outline' });
     expect(positions(parent.children[0]).count).toBe(12); // all 6 edges drawn
+  });
+
+  it('lineWidth > 0 builds ribbon quads instead of GL lines', () => {
+    const map = new HexMap({ width: 16, height: 16 });
+    const { parent, layer } = makeLayer(map);
+
+    layer.set('sel', [{ col: 8, row: 8 }], { style: 'outline', lineWidth: 0.2 });
+    const obj = parent.children[0];
+    expect(obj).toBeInstanceOf(THREE.Mesh);
+    expect(positions(obj).count).toBe(6 * 6); // 6 boundary edges × 2 triangles
+
+    // The quad spans the requested width perpendicular to its edge.
+    const pos = positions(obj);
+    const dx = pos.getX(0) - pos.getX(5); // first vert to last vert of the edge's two triangles
+    const dz = pos.getZ(0) - pos.getZ(5);
+    expect(Math.hypot(dx, dz)).toBeCloseTo(0.2);
+  });
+
+  it('switching an outline between widths across zero swaps the object type', () => {
+    const map = new HexMap({ width: 16, height: 16 });
+    const { parent, layer } = makeLayer(map);
+
+    layer.set('sel', [{ col: 8, row: 8 }], { style: 'outline' });
+    expect(parent.children[0]).toBeInstanceOf(THREE.LineSegments);
+
+    layer.set('sel', [{ col: 8, row: 8 }], { style: 'outline', lineWidth: 0.15 });
+    expect(parent.children).toHaveLength(1);
+    expect(parent.children[0]).toBeInstanceOf(THREE.Mesh);
+
+    layer.set('sel', [{ col: 8, row: 8 }], { style: 'outline' });
+    expect(parent.children).toHaveLength(1);
+    expect(parent.children[0]).toBeInstanceOf(THREE.LineSegments);
   });
 });
 
