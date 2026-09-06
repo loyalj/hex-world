@@ -925,6 +925,20 @@ features from actual need.
   with descriptors but no asset descriptors keeps the current set, since
   there is nothing to build its shapes from). New maps carry six feature
   layers so there is room to add types without a re-layout.
+- [x] **Demo control panel** *(2026-09-06)* — the demo had grown thirty-odd
+  key commands and the HUD was their only index, a wall of `[X] toggle` lines
+  no one could read. `src/demo/ControlPanel.ts` is a rounded glass card pinned
+  to the left edge, sectioned by subsystem (Map, Terrain, Sky & light, Weather
+  & wind, Seasons, Fog of war, Layers, Units), with a switch, a button, or a
+  ‹ value › scrubber per command and the key printed beside it. One registry
+  drives both the panel and the keyboard: each row *is* its binding, so a
+  click and a key take the same path and nothing can be reachable one way but
+  not the other. Rows read their state back through getters every frame, so
+  the panel is a view, never a second copy. The whole card collapses to a
+  pill and each section folds, both remembered in `localStorage`. The two
+  commands that act on the hovered cell ([D] dock, [A] flow field) stay
+  keyboard-only and are listed as hints, since the cursor can't be on the
+  map while it's on the panel. The HUD is readouts only now and sits top-right.
 
 ---
 

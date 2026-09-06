@@ -62,6 +62,7 @@ import { ResourceLayer } from '../gameplay/ResourceLayer.js';
 import { generateResources } from '../gameplay/ResourceGenerator.js';
 import { DEFAULT_RESOURCE_DESCRIPTORS } from '../gameplay/ResourceTypes.js';
 import { hexRange, hexDistance } from '../math/HexCoord.js';
+import { ControlPanel } from './ControlPanel.js';
 
 /** Change this one constant to switch terrain rendering mode. */
 const TERRAIN_COLOR_MODE: TerrainColorMode = 'splat';
@@ -211,10 +212,13 @@ const smokeMat     = new THREE.MeshLambertMaterial({ vertexColors: true, transpa
 const scatterMats  = [pineMat, broadleafMat, bushMat, rockMat];
 
 // --- HUD ---
+// Readouts only — every command lives in the control panel on the left, so
+// this sits top-right, clear of it and above the minimap.
 const hud = document.createElement('div');
 hud.style.cssText = `
-  position: fixed; top: 12px; left: 12px;
-  color: #fff; font: 13px/1.6 monospace;
+  position: fixed; top: 12px; right: 12px;
+  max-width: min(560px, calc(100vw - 320px));
+  color: #fff; font: 13px/1.6 monospace; white-space: pre-wrap;
   background: rgba(0,0,0,0.45); padding: 8px 12px;
   border-radius: 6px; pointer-events: none;
 `;
@@ -230,7 +234,13 @@ window.addEventListener('resize', () => {
 // --- Mouse tracking (re-picked every frame so hover updates on camera move) ---
 let lastMouseX = 0;
 let lastMouseY = 0;
-window.addEventListener('pointermove', e => { lastMouseX = e.clientX; lastMouseY = e.clientY; });
+// The panel and minimap float over the canvas; a cursor on them isn't on a cell.
+let mouseOverCanvas = false;
+window.addEventListener('pointermove', e => {
+  lastMouseX = e.clientX;
+  lastMouseY = e.clientY;
+  mouseOverCanvas = e.target === renderer.domElement;
+});
 
 // --- FPS tracking ---
 let fps = 0;
@@ -710,7 +720,7 @@ async function start() {
   // the map's metadata channel and travel inside the map JSON.
   const FOG_KEY  = 'hexworld-fog';
   let saveStatus = localStorage.getItem(SAVE_KEY)
-    ? 'Saved map available  [L] load'
+    ? 'Saved map available'
     : 'No saved map';
 
   function saveMap(): void {
@@ -727,7 +737,7 @@ async function start() {
       localStorage.setItem(SAVE_KEY, json);
       localStorage.setItem(FOG_KEY, fogData.toBase64());
       const t = new Date();
-      saveStatus = `Saved at ${t.toLocaleTimeString()}  [L] load`;
+      saveStatus = `Saved at ${t.toLocaleTimeString()}`;
     } catch (e) {
       console.error('Save failed:', e);
       saveStatus = 'Save failed';
@@ -1136,154 +1146,196 @@ async function start() {
     refreshPortMarkers();
   }
 
-  // --- Keyboard shortcuts ---
-  window.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') {
-      deselectUnit();
-      clearFlowField();
-    } else if (e.key === 'd' || e.key === 'D') {
-      // Dock toggle on the hovered cell — refused off-shore, which is the
-      // only feedback a port on dry inland ground deserves.
-      if (!e.repeat && hoverCell) {
-        const on = isPort(map, hoverCell.col, hoverCell.row);
-        if (setPort(map, hoverCell.col, hoverCell.row, !on, NAVAL_LIQUID)) {
-          refreshPortMarkers();
-          rangeNeedsUpdate = true;
-          lastHoveredForPath = null;
-          saveStatus = on ? 'Port removed' : 'Port designated';
-        } else {
-          saveStatus = 'Ports go on shore cells';
-        }
-      }
-    } else if (e.key === 'a' || e.key === 'A') {
-      // Auto-repeat has to be dropped, not just tolerated: held for a moment
-      // this fires every ~30 ms, and each one re-issued the march and rebuilt
-      // the arrows. It used to toggle on a repeat press, which meant the second
-      // auto-repeat wiped the field a quarter-second after the first drew it —
-      // the units kept walking on the orders they already had, and the arrows
-      // vanished before anyone saw them. [A] now only ever re-targets; [Esc]
-      // clears.
-      if (!e.repeat && hoverCell && !DEMO_WATER_TERRAINS.has(map.getTerrain(hoverCell.col, hoverCell.row))) {
-        setFlowGoal(hoverCell);
-      }
-    } else if (e.key === 'r' || e.key === 'R') {
-      seed = Math.floor(Math.random() * 0xffffffff);
-      runGenerator();
-      resetUnits();
-      resetFog();
-      seedResources();
-      seedTerritory();
-      // New terrain means new latitudes and elevations under the snowline.
-      refreshClimate();
-      chunkManager.dispose();
-      // New elevations mean a new contour along the rim and a new floor depth.
-      skirt.rebuild();
-      updateMinimap();
-    } else if (e.key === 'g' || e.key === 'G') {
-      activeGenIndex = (activeGenIndex + 1) % GENERATORS.length;
-      runGenerator();
-      resetUnits();
-      resetFog();
-      seedResources();
-      seedTerritory();
-      // New terrain means new latitudes and elevations under the snowline.
-      refreshClimate();
-      chunkManager.dispose();
-      // New elevations mean a new contour along the rim and a new floor depth.
-      skirt.rebuild();
-      updateMinimap();
-    } else if (e.key === 'e' || e.key === 'E') {
-      hideUnexplored = !hideUnexplored;
-      chunkManager.setHideUnexplored(hideUnexplored);
-      resources.setHideUnexplored(hideUnexplored);
-    } else if (e.key === 'f' || e.key === 'F') {
-      dimExplored = !dimExplored;
-      chunkManager.setDimExplored(dimExplored);
-      resources.setDimExplored(dimExplored);
-    } else if (e.key === 't' || e.key === 'T') {
-      territoryVisible = !territoryVisible;
-      territory.setVisible(territoryVisible);
-    } else if (e.key === 'u' || e.key === 'U') {
-      resourcesVisible = !resourcesVisible;
-      resources.setVisible(resourcesVisible);
-    } else if (e.key === 'c' || e.key === 'C') {
-      if (selectedUnit) controls.panTo(selectedUnit.worldX, selectedUnit.worldZ);
-    } else if (e.key === 's' || e.key === 'S') {
-      saveMap();
-    } else if (e.key === 'l' || e.key === 'L') {
-      loadMap();
-    } else if (e.key === 'h' || e.key === 'H') {
-      if (terrainMaterial instanceof THREE.ShaderMaterial) {
-        gridVisible = !gridVisible;
-        configureTerrainGrid(terrainMaterial, layout, { enabled: gridVisible });
-      }
-    } else if (e.key === 'b' || e.key === 'B') {
-      if (terrainMaterial instanceof THREE.ShaderMaterial) {
-        strataVisible = !strataVisible;
-        setCliffStrataEnabled(terrainMaterial, strataVisible);
-      }
-    } else if (e.key === 'o' || e.key === 'O') {
-      sunRig.setEnabled(!sunRig.enabled);
-    } else if (e.key === 'k' || e.key === 'K') {
-      skyVisible = !skyVisible;
-      sky.setEnabled(skyVisible);
-    } else if (e.key === 'x' || e.key === 'X') {
-      godRays.setEnabled(!godRays.enabled);
-    } else if (e.key === 'i' || e.key === 'I') {
-      skirtVisible = !skirtVisible;
-      skirt.setEnabled(skirtVisible);
-    } else if (e.key === 'y' || e.key === 'Y') {
-      // Swing to face the sun and drop to the shallowest tilt — the shafts are
-      // a low-sun effect, so without this you have to go looking for the one
-      // heading and hour they happen at.
-      const s = dayNight.evaluate();
-      controls.rotateTo(Math.atan2(-s.sunDir.x, -s.sunDir.z) * 180 / Math.PI);
-      controls.tiltTo(controls.minPitchDeg);
-    } else if (e.key === 'n' || e.key === 'N') {
-      dayNight.paused = !dayNight.paused;
-    } else if (e.key === ',') {
-      dayNight.setTime(dayNight.time - 1 / 48);
-      applyDayNight();
-    } else if (e.key === '.') {
-      dayNight.setTime(dayNight.time + 1 / 48);
-      applyDayNight();
-    } else if (e.key === 'm' || e.key === 'M') {
-      weatherIndex = (weatherIndex + 1) % WEATHER_TYPES.length;
-      weather.setWeather(WEATHER_TYPES[weatherIndex]);
-    } else if (e.key === 'p' || e.key === 'P') {
-      scatterTexture = !scatterTexture;
-      for (const mat of scatterMats) setScatterTextureEnabled(mat, scatterTexture);
-    } else if (e.key === 'w' || e.key === 'W') {
-      windEnabled = !windEnabled;
-    } else if (e.key === 'q' || e.key === 'Q') {
-      // Swing the wind a sixth of a turn — the fastest way to see that the
-      // trees, the rain and the ripples all take the same vector.
-      wind.setPolar(wind.heading + Math.PI / 3, wind.speed);
-    } else if (e.key === 'v' || e.key === 'V') {
-      seasons.paused = !seasons.paused;
-    } else if (e.key === 'j' || e.key === 'J') {
-      // Same year, same moment in it — only the question of whether this map is
-      // a subcontinent or one valley.
-      seasonScope = seasonScope === 'continental' ? 'local' : 'continental';
-      seasons = new SeasonCycle({
-        dayLength: 90, daysPerYear: 6, scope: seasonScope,
-        phase: seasons.phase, paused: seasons.paused,
-      });
-      refreshSeason();
-    } else if (e.key === '[') {
-      seasons.setPhase(seasons.phase - 1 / 24);
-      refreshSeason();
-    } else if (e.key === ']') {
-      seasons.setPhase(seasons.phase + 1 / 24);
-      refreshSeason();
-    } else if (e.key === '1') {
-      minimapDimExplored = !minimapDimExplored;
-      updateMinimap();
-    } else if (e.key === '2') {
-      minimapHideUnexplored = !minimapHideUnexplored;
-      updateMinimap();
-    }
+  /** New terrain under everything: units, fog, layers, climate, chunks, skirt, minimap. */
+  function regenerate(): void {
+    runGenerator();
+    resetUnits();
+    resetFog();
+    seedResources();
+    seedTerritory();
+    // New terrain means new latitudes and elevations under the snowline.
+    refreshClimate();
+    chunkManager.dispose();
+    // New elevations mean a new contour along the rim and a new floor depth.
+    skirt.rebuild();
+    updateMinimap();
+  }
+
+  // --- Control panel + keyboard ---
+  // One registry drives both: every row here is a key binding, and every key
+  // binding is a row. The demo's state is read back through the getters each
+  // frame, so the panel is a view rather than a second copy of the truth.
+  const panel = new ControlPanel({
+    title: 'Controls',
+    storageKey: 'hexworld-demo-panel',
+    sections: [
+      {
+        title: 'Map',
+        controls: [
+          { type: 'action', label: 'Generator', key: 'g', value: () => GENERATORS[activeGenIndex].name,
+            run: () => { activeGenIndex = (activeGenIndex + 1) % GENERATORS.length; regenerate(); } },
+          { type: 'action', label: 'New seed', key: 'r', value: () => String(seed >>> 0),
+            run: () => { seed = Math.floor(Math.random() * 0xffffffff); regenerate(); } },
+          { type: 'action', label: 'Save map', key: 's', run: saveMap },
+          { type: 'action', label: 'Load map', key: 'l', run: loadMap },
+          { type: 'note', text: () => saveStatus },
+        ],
+      },
+      {
+        title: 'Terrain',
+        controls: [
+          { type: 'toggle', label: 'Hex grid', key: 'h', get: () => gridVisible,
+            set: on => {
+              if (!(terrainMaterial instanceof THREE.ShaderMaterial)) return;
+              gridVisible = on;
+              configureTerrainGrid(terrainMaterial, layout, { enabled: gridVisible });
+            } },
+          { type: 'toggle', label: 'Cliff strata', key: 'b', get: () => strataVisible,
+            set: on => {
+              if (!(terrainMaterial instanceof THREE.ShaderMaterial)) return;
+              strataVisible = on;
+              setCliffStrataEnabled(terrainMaterial, strataVisible);
+            } },
+          { type: 'toggle', label: 'Map skirt', key: 'i', get: () => skirtVisible,
+            set: on => { skirtVisible = on; skirt.setEnabled(on); } },
+          { type: 'toggle', label: 'Scatter texture', key: 'p', get: () => scatterTexture,
+            set: on => {
+              scatterTexture = on;
+              for (const mat of scatterMats) setScatterTextureEnabled(mat, on);
+            } },
+        ],
+      },
+      {
+        title: 'Sky & light',
+        controls: [
+          { type: 'toggle', label: 'Shadows', key: 'o', get: () => sunRig.enabled, set: on => sunRig.setEnabled(on) },
+          { type: 'toggle', label: 'Sky', key: 'k', get: () => skyVisible,
+            set: on => { skyVisible = on; sky.setEnabled(on); } },
+          { type: 'toggle', label: 'God rays', key: 'x', get: () => godRays.enabled, set: on => godRays.setEnabled(on) },
+          { type: 'action', label: 'Face the sun', key: 'y', value: () => `strength ${godRays.strength.toFixed(2)}`,
+            run: () => {
+              // Swing to face the sun and drop to the shallowest tilt — the
+              // shafts are a low-sun effect, so without this you have to go
+              // looking for the one heading and hour they happen at.
+              const s = dayNight.evaluate();
+              controls.rotateTo(Math.atan2(-s.sunDir.x, -s.sunDir.z) * 180 / Math.PI);
+              controls.tiltTo(controls.minPitchDeg);
+            } },
+          { type: 'scrub', label: 'Time of day', keys: [',', '.'], value: () => formatTimeOfDay(dayNight.time),
+            dec: () => { dayNight.setTime(dayNight.time - 1 / 48); applyDayNight(); },
+            inc: () => { dayNight.setTime(dayNight.time + 1 / 48); applyDayNight(); } },
+          { type: 'toggle', label: 'Clock running', key: 'n', get: () => !dayNight.paused,
+            set: on => { dayNight.paused = !on; } },
+        ],
+      },
+      {
+        title: 'Weather & wind',
+        controls: [
+          { type: 'action', label: 'Weather', key: 'm',
+            value: () => `${weather.type}, overcast ${weather.overcast.toFixed(2)}`,
+            run: () => {
+              weatherIndex = (weatherIndex + 1) % WEATHER_TYPES.length;
+              weather.setWeather(WEATHER_TYPES[weatherIndex]);
+            } },
+          { type: 'toggle', label: 'Wind', key: 'w', get: () => windEnabled, set: on => { windEnabled = on; } },
+          { type: 'action', label: 'Veer wind', key: 'q',
+            value: () => `${(((wind.heading * 180 / Math.PI) % 360) + 360) % 360 | 0}°  ${wind.speed.toFixed(1)} u/s  gust ×${wind.gust.toFixed(2)}`,
+            // A sixth of a turn — the fastest way to see that the trees, the
+            // rain and the ripples all take the same vector.
+            run: () => wind.setPolar(wind.heading + Math.PI / 3, wind.speed) },
+        ],
+      },
+      {
+        title: 'Seasons',
+        controls: [
+          { type: 'scrub', label: 'Season', keys: ['[', ']'], value: () => formatSeason(seasons.phase),
+            dec: () => { seasons.setPhase(seasons.phase - 1 / 24); refreshSeason(); },
+            inc: () => { seasons.setPhase(seasons.phase + 1 / 24); refreshSeason(); } },
+          { type: 'toggle', label: 'Year running', key: 'v', get: () => !seasons.paused,
+            set: on => { seasons.paused = !on; } },
+          { type: 'action', label: 'Scope', key: 'j', value: () => seasonScope === 'local' ? 'whole map' : 'continental',
+            run: () => {
+              // Same year, same moment in it — only the question of whether
+              // this map is a subcontinent or one valley.
+              seasonScope = seasonScope === 'continental' ? 'local' : 'continental';
+              seasons = new SeasonCycle({
+                dayLength: 90, daysPerYear: 6, scope: seasonScope,
+                phase: seasons.phase, paused: seasons.paused,
+              });
+              refreshSeason();
+            } },
+        ],
+      },
+      {
+        title: 'Fog of war',
+        controls: [
+          { type: 'toggle', label: 'Hide unexplored', key: 'e', get: () => hideUnexplored,
+            set: on => {
+              hideUnexplored = on;
+              chunkManager.setHideUnexplored(on);
+              resources.setHideUnexplored(on);
+            } },
+          { type: 'toggle', label: 'Dim explored', key: 'f', get: () => dimExplored,
+            set: on => {
+              dimExplored = on;
+              chunkManager.setDimExplored(on);
+              resources.setDimExplored(on);
+            } },
+          { type: 'toggle', label: 'Minimap: dim explored', key: '1', get: () => minimapDimExplored,
+            set: on => { minimapDimExplored = on; updateMinimap(); } },
+          { type: 'toggle', label: 'Minimap: hide unexplored', key: '2', get: () => minimapHideUnexplored,
+            set: on => { minimapHideUnexplored = on; updateMinimap(); } },
+        ],
+      },
+      {
+        title: 'Layers',
+        controls: [
+          { type: 'toggle', label: 'Territory', key: 't', get: () => territoryVisible,
+            set: on => { territoryVisible = on; territory.setVisible(on); } },
+          { type: 'toggle', label: 'Resources', key: 'u', get: () => resourcesVisible,
+            set: on => { resourcesVisible = on; resources.setVisible(on); } },
+        ],
+      },
+      {
+        title: 'Units',
+        controls: [
+          { type: 'hint', label: 'Click a unit to select it, then a cell to move' },
+          { type: 'action', label: 'Focus selected unit', key: 'c',
+            run: () => { if (selectedUnit) controls.panTo(selectedUnit.worldX, selectedUnit.worldZ); } },
+          { type: 'action', label: 'Deselect, clear flow field', key: 'Escape',
+            run: () => { deselectUnit(); clearFlowField(); } },
+          // Both of these act on the hovered cell, which the cursor can't be
+          // on while it's clicking this panel — so they're keyboard-only.
+          { type: 'hint', label: 'Toggle a dock on the hovered shore cell', key: 'd', noRepeat: true,
+            run: () => {
+              // Refused off-shore, which is the only feedback a port on dry
+              // inland ground deserves.
+              if (!hoverCell) return;
+              const on = isPort(map, hoverCell.col, hoverCell.row);
+              if (setPort(map, hoverCell.col, hoverCell.row, !on, NAVAL_LIQUID)) {
+                refreshPortMarkers();
+                rangeNeedsUpdate = true;
+                lastHoveredForPath = null;
+                saveStatus = on ? 'Port removed' : 'Port designated';
+              } else {
+                saveStatus = 'Ports go on shore cells';
+              }
+            } },
+          // Auto-repeat has to be dropped, not just tolerated: held for a
+          // moment this fires every ~30 ms, and each one re-issues the march
+          // and rebuilds the arrows. [A] only ever re-targets; [Esc] clears.
+          { type: 'hint', label: 'Send every unit to the hovered cell (flow field)', key: 'a', noRepeat: true,
+            run: () => {
+              if (hoverCell && !DEMO_WATER_TERRAINS.has(map.getTerrain(hoverCell.col, hoverCell.row))) {
+                setFlowGoal(hoverCell);
+              }
+            } },
+        ],
+      },
+    ],
   });
+
+  window.addEventListener('keydown', e => { panel.handleKey(e); });
 
   // Capture-phase handler runs before the camera controller's bubble-phase pan handler,
   // so we can consume the right-click and prevent a pan from starting.
@@ -1362,6 +1414,7 @@ async function start() {
     // No-ops unless a claim or placement changed since the last frame.
     territory.update();
     resources.update();
+    panel.refresh();
 
     frameCount++;
     const elapsed = now - lastFpsTime;
@@ -1386,7 +1439,9 @@ async function start() {
     }
 
     // Cell picking — raycast against actual terrain meshes for accurate results.
-    const picked = pickHexFromMeshes(lastMouseX, lastMouseY, renderer.domElement, camera, layout, map, chunkManager.terrainMeshes);
+    const picked = mouseOverCanvas
+      ? pickHexFromMeshes(lastMouseX, lastMouseY, renderer.domElement, camera, layout, map, chunkManager.terrainMeshes)
+      : null;
     hoverCell = picked;
     if (picked) {
       const wp = hexToWorld(layout, offsetToHex(picked.col, picked.row));
@@ -1397,7 +1452,7 @@ async function start() {
       hoverMesh.visible = false;
     }
 
-    const gen = GENERATORS[activeGenIndex];
+    // Readouts only. Every command, and the state each one sets, is on the panel.
     const losStr = (selectedUnit && hoverCell)
       ? '  LOS: ' + (hasLineOfSight(offsetToHex(selectedUnit.col, selectedUnit.row), offsetToHex(hoverCell.col, hoverCell.row), map) ? 'yes' : 'blocked')
       : '';
@@ -1408,45 +1463,23 @@ async function start() {
       : `Hover:     —`;
     const unitLine = selectedUnit
       ? `Unit:      [${selectedUnit.col}, ${selectedUnit.row}]  ${selectedUnit.domain}${selectedUnit.embarked ? ' (afloat)' : ''}  ` +
-        `${selectedUnit.isMoving ? 'moving' : 'selected — click to move'}  [Esc] deselect  [C] focus`
+        `${selectedUnit.isMoving ? 'moving' : 'selected — click a cell to move'}`
       : `Units:     ${units.length} on map — click one to select (blue is amphibious, the pale one a ship)`;
-    const portLine = `Ports:     ${listPorts(map).length}  [D] toggle a dock on the hovered shore cell`;
+    const portLine = `Ports:     ${listPorts(map).length}`;
     const flowLine = flowGoal
-      ? `Flow field: goal [${flowGoal.col}, ${flowGoal.row}]  ${flowField.reachedCount} cells in one sweep  ` +
-        `— all ${units.length} units marching  [A] re-target  [Esc] clear`
-      : `Flow field: [A] send every unit to the hovered cell from one Dijkstra sweep`;
+      ? `Flow field: goal [${flowGoal.col}, ${flowGoal.row}]  ${flowField.reachedCount} cells in one sweep — all ${units.length} units marching`
+      : `Flow field: —`;
     hud.textContent =
       `FPS:       ${fps}\n` +
-      `Generator: ${gen.name}  [G] cycle\n` +
-      `Seed:      ${seed >>> 0}  [R] new\n` +
       `Map:       ${MAP_WIDTH} × ${MAP_HEIGHT} cells\n` +
-      `Chunks:    ${chunkManager.loadedChunkCount} loaded  (${CHUNK_SIZE}×${CHUNK_SIZE} cells each)\n` +
-      `Total:     ${chunkManager.chunksX * chunkManager.chunksY} chunks in map\n` +
+      `Chunks:    ${chunkManager.loadedChunkCount} / ${chunkManager.chunksX * chunkManager.chunksY} loaded  (${CHUNK_SIZE}×${CHUNK_SIZE} cells each)\n` +
       `Zoom:      ${controls.currentDistance.toFixed(1)}  (min ${controls.minDist} / max ${controls.maxDist})\n` +
       `Tilt:      ${controls.currentPitchDeg.toFixed(1)}°  (min ${controls.minPitchDeg}° / max ${controls.maxPitchDeg}°)  middle-drag up/down\n` +
       `Heading:   ${controls.currentYawDeg.toFixed(0)}°  middle-drag left/right\n` +
-      `Hex grid:  ${gridVisible ? 'ON  [H] toggle' : 'OFF  [H] toggle'}\n` +
-      `Strata:    ${strataVisible ? 'ON  [B] toggle' : 'OFF [B] toggle'}\n` +
-      `Shadows:   ${sunRig.enabled ? 'ON  [O] toggle' : 'OFF [O] toggle'}\n` +
-      `Time:      ${formatTimeOfDay(dayNight.time)}  ${dayNight.paused ? 'paused' : 'running'}  [N] play/pause  [,][.] scrub\n` +
-      `Weather:   ${weather.type}  [M] cycle  (overcast ${weather.overcast.toFixed(2)})\n` +
-      `Scatter tex: ${scatterTexture ? 'ON  [P] toggle' : 'OFF [P] toggle'}\n` +
-      `Wind:      ${windEnabled ? 'ON  [W] toggle' : 'OFF [W] toggle'}  ` +
-        `${(((wind.heading * 180 / Math.PI) % 360) + 360) % 360 | 0}° [Q] veer  ` +
-        `${wind.speed.toFixed(1)} u/s, gust ×${wind.gust.toFixed(2)}\n` +
-      `Season:    ${formatSeason(seasons.phase)}  ${seasons.paused ? 'paused' : 'running'}  [V] play/pause  [ [ ][ ] ] scrub\n` +
-      `Scope:     ${seasonScope === 'local' ? 'whole map' : 'continental'}  [J] toggle\n` +
-      `Sky:       ${skyVisible ? 'ON  [K] toggle' : 'OFF [K] toggle'}\n` +
-      `Map skirt: ${skirtVisible ? 'ON  [I] toggle' : 'OFF [I] toggle'}  (base y ${skirt.baseY.toFixed(1)})\n` +
-      `God rays:  ${godRays.enabled ? 'ON  [X] toggle' : 'OFF [X] toggle'}  (strength ${godRays.strength.toFixed(2)})  [Y] face the sun\n` +
-      `Hide unexplored: ${hideUnexplored ? 'ON  [E] toggle' : 'OFF  [E] toggle'}\n` +
-      `Dim explored:    ${dimExplored    ? 'ON  [F] toggle' : 'OFF  [F] toggle'}\n` +
+      `Time:      ${formatTimeOfDay(dayNight.time)}  ${formatSeason(seasons.phase)}  ${weather.type}\n` +
       `Explored:  ${fogData.exploredCount} / ${MAP_WIDTH * MAP_HEIGHT} cells\n` +
-      `Territory: ${territoryVisible ? 'ON  [T] toggle' : 'OFF [T] toggle'}  ${territorySummary()}\n` +
-      `Resources: ${resourcesVisible ? 'ON  [U] toggle' : 'OFF [U] toggle'}  ${resourceSummary()}\n` +
-      `Save: [S]  Load: [L]  ${saveStatus}\n` +
-      `Minimap fog dim: ${minimapDimExplored    ? 'ON  [1] toggle' : 'OFF  [1] toggle'}\n` +
-      `Minimap unexplored: ${minimapHideUnexplored ? 'ON  [2] toggle' : 'OFF  [2] toggle'}\n` +
+      `Territory: ${territorySummary()}\n` +
+      `Resources: ${resourceSummary()}\n` +
       `\n${unitLine}\n${portLine}\n${flowLine}\n${hoverLine}`;
 
     renderer.render(scene, camera);
