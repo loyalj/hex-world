@@ -37,6 +37,13 @@ export interface UnitManagerEventMap {
    * {@link HexUnit.stop} cut it short. Pair with animation state.
    */
   unitMoveEnd: UnitEvent & { completed: boolean };
+  /**
+   * A unit stepped from land onto a liquid cell. Only units given an
+   * `isLiquid` predicate report this. Fires before `unitCellEnter`.
+   */
+  unitEmbark: UnitEvent;
+  /** A unit stepped from a liquid cell onto land. Fires before `unitCellEnter`. */
+  unitDisembark: UnitEvent;
 }
 
 /** The unit callbacks this manager wraps, kept so `removeUnit` can put them back. */
@@ -44,6 +51,8 @@ interface WrappedCallbacks {
   onCellEnter: HexUnit['onCellEnter'];
   onMoveStart: HexUnit['onMoveStart'];
   onMoveEnd:   HexUnit['onMoveEnd'];
+  onEmbark:    HexUnit['onEmbark'];
+  onDisembark: HexUnit['onDisembark'];
 }
 
 export interface UnitManagerOptions {
@@ -161,6 +170,8 @@ export class UnitManager {
       onCellEnter: unit.onCellEnter,
       onMoveStart: unit.onMoveStart,
       onMoveEnd:   unit.onMoveEnd,
+      onEmbark:    unit.onEmbark,
+      onDisembark: unit.onDisembark,
     });
     const original = this._wrapped.get(unit)!;
 
@@ -181,6 +192,14 @@ export class UnitManager {
       const at = { unit, col: unit.col, row: unit.row };
       if (completed) this.events.emit('unitArrived', at);
       this.events.emit('unitMoveEnd', { ...at, completed });
+    };
+    unit.onEmbark = (col, row) => {
+      original.onEmbark?.(col, row);
+      this.events.emit('unitEmbark', { unit, col, row });
+    };
+    unit.onDisembark = (col, row) => {
+      original.onDisembark?.(col, row);
+      this.events.emit('unitDisembark', { unit, col, row });
     };
 
     // Snap to initial position and apply initial fog reveal.
@@ -211,6 +230,8 @@ export class UnitManager {
       unit.onCellEnter = original.onCellEnter;
       unit.onMoveStart = original.onMoveStart;
       unit.onMoveEnd   = original.onMoveEnd;
+      unit.onEmbark    = original.onEmbark;
+      unit.onDisembark = original.onDisembark;
       this._wrapped.delete(unit);
     }
     this.events.emit('unitRemoved', { unit, object3D: obj });

@@ -25,6 +25,9 @@ const CONFIG_SCHEMA: ConfigFieldDescriptor[] = [
   { key: 'coastShaping',       label: 'Coast Shaping',   type: 'number',  default: 0,    min: 0,    max: 1,    step: 0.05, group: 'Terrain' },
   { key: 'mountainRanges',     label: 'Mountain Ranges', type: 'integer', default: 0,    min: 0,    max: 6,               group: 'Terrain' },
   { key: 'rangeUplift',        label: 'Range Uplift',    type: 'integer', default: 4,    min: 1,    max: 8,               group: 'Terrain' },
+  { key: 'volcanoes',          label: 'Volcanoes',       type: 'integer', default: 0,    min: 0,    max: 4,               group: 'Terrain' },
+  { key: 'volcanoRadius',      label: 'Volcano Radius',  type: 'integer', default: 4,    min: 2,    max: 8,               group: 'Terrain' },
+  { key: 'volcanoHeight',      label: 'Volcano Height',  type: 'integer', default: 5,    min: 2,    max: 10,              group: 'Terrain' },
   { key: 'erosionPercentage',  label: 'Erosion %',       type: 'integer', default: 50,   min: 0,    max: 100,  step: 5,   group: 'Terrain' },
   // Climate
   { key: 'climate.cycles',              label: 'Cycles',         type: 'integer', default: 40,   min: 10,   max: 80,   step: 5,    group: 'Climate' },

@@ -4,3 +4,7 @@ dist-demo/
 docs/
 *.txt
 *.html.bak
+
+# visual snapshot scratch output
+tests/visual/__snapshots__/*.actual.png
+tests/visual/__snapshots__/*.diff.png

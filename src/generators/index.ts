@@ -6,6 +6,7 @@ export * from './MapGenerator.js';
 export * from './AsyncGeneration.js';
 export * from './ChunkTerrainGenerator.js';
 export * from './MountainRangePass.js';
+export * from './VolcanoPass.js';
 export * from './CoastShapingPass.js';
 export * from './RegionLayout.js';
 export * from './ErosionPass.js';

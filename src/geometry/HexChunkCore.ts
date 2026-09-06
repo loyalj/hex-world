@@ -12,6 +12,7 @@ import type { HexMap } from '../map/HexMap.js';
 import { STREAM_BED_ELEVATION_OFFSET, ELEVATION_SCALE } from '../map/HexCell.js';
 import { sampleNoise } from '../math/Noise.js';
 import { RIVER_BASE_HALF_WIDTH, riverWidthScale, riverEdgeFlow } from './RiverWidth.js';
+import { riverBanks } from '../map/Bridges.js';
 
 export type TerrainColorMode = 'flat' | 'splat' | 'debug';
 
@@ -114,6 +115,20 @@ export interface ChunkGeometryOptions {
    */
   riverbedBlend?: number;
   /**
+   * Span a deck across the river in every cell where a road reaches both
+   * banks (see `hasBridge`). Default true; false leaves the two road stubs
+   * facing each other across the channel, which is what every map showed
+   * before decks existed.
+   */
+  bridges?: boolean;
+  /**
+   * Terrain index the bridge slab (its sides and underside) is textured and
+   * coloured as — the deck top is road. ChunkManager auto-resolves this to
+   * the active terrain definition with id 'rock' unless set explicitly;
+   * with neither, the slab takes the cell's own terrain.
+   */
+  bridgeTerrain?: number;
+  /**
    * Bake per-vertex ambient occlusion from the height field into an
    * `occlusion` attribute: `true`/omitted for the tuned defaults, `false` to
    * skip it, or an {@link AmbientOcclusionOptions} object. Terrain and road
@@ -173,6 +188,20 @@ export const CHUNK_GEOMETRY_DEFAULTS = {
 const SOLID_FACTOR  = 0.8;
 const BLEND_FACTOR  = 1 - SOLID_FACTOR;
 const INNER_TO_OUTER = 1 / 0.866025404;
+
+/**
+ * Bridge deck proportions, in world units and edge fractions. Exported so a
+ * unit walking a deck (or a test) can stand on the same numbers the builder
+ * used rather than a copy of them.
+ */
+/** Rise of the deck's arch at mid-span above the bank level. */
+export const BRIDGE_ARCH = 0.08;
+/** Slab thickness below the deck top. */
+export const BRIDGE_THICKNESS = 0.14;
+/** Deck half-width as a fraction of the hex edge length — a shade wider than the road that crosses it. */
+export const BRIDGE_HALF_WIDTH = 0.19;
+/** Segments along the span; enough that the arch reads as a curve, not a ridge. */
+const BRIDGE_SEGMENTS = 6;
 
 const TERRACES_PER_SLOPE = 2;
 /** Steps across one terraced slope — treads and risers together. */
@@ -286,6 +315,13 @@ export function buildChunkArrays(
   // from the shoulder; the fragment shader normalizes by the weight sum so
   // brightness is unchanged.
   const bedBoost   = Math.max(0.01, opts.riverbedBlend ?? 1);
+
+  // Bridge slabs: sides and underside are terrain geometry typed as the
+  // bridge terrain (stone by default), the deck top is road. Debug mode keeps
+  // its flat grey, and a missing definition falls back to the cell's own type
+  // at emit time (bridgeTypeIdx < 0).
+  const bridgesOn     = opts.bridges !== false;
+  const bridgeTypeIdx = opts.bridgeTerrain ?? -1;
   // Bed vertex [r, g, b, typeIndex] for edge strips and wall notches, where
   // the bed occupies slot 2 of the type triple (slots 0/1 hold the two banks).
   const stripBed: readonly [number, number, number, number] | null = bedActive
@@ -496,6 +532,86 @@ export function buildChunkArrays(
       l: map.hasRoadThroughEdge(col, row, (faceIdx + 5) % 6) ? 0.5 : 0.25,
       r: map.hasRoadThroughEdge(col, row, (faceIdx + 1) % 6) ? 0.5 : 0.25,
     };
+  };
+
+  // ---- bridge deck ----
+
+  /**
+   * A quad in the terrain arrays wound to face `n` — the slab's walls and
+   * underside are the only terrain faces here whose orientation cannot be
+   * read off the hex corner order, so it is enforced rather than assumed.
+   * Vertices are the two ends of one edge (0, 1) then the two of the next
+   * (2, 3), like `addQuad`.
+   */
+  const addQuadFacing = (
+    nx: number, ny: number, nz: number,
+    x0: number, y0: number, z0: number,
+    x1: number, y1: number, z1: number,
+    x2: number, y2: number, z2: number,
+    x3: number, y3: number, z3: number,
+    r: number, g: number, b: number,
+    t: number,
+  ) => {
+    // Geometric normal of (0, 2, 1) — the first triangle addQuad would emit.
+    const ax = x2 - x0, ay = y2 - y0, az = z2 - z0;
+    const bx = x1 - x0, by = y1 - y0, bz = z1 - z0;
+    const cx = ay * bz - az * by, cy = az * bx - ax * bz, cz = ax * by - ay * bx;
+    if (cx * nx + cy * ny + cz * nz >= 0) {
+      addQuad(x0,y0,z0,r,g,b, x1,y1,z1,r,g,b, x2,y2,z2,r,g,b, x3,y3,z3,r,g,b, t,t,t);
+    } else {
+      addQuad(x1,y1,z1,r,g,b, x0,y0,z0,r,g,b, x3,y3,z3,r,g,b, x2,y2,z2,r,g,b, t,t,t);
+    }
+  };
+
+  /**
+   * Deck from bank point A to bank point B at bank level `y`: a road-surfaced
+   * top with a shallow arch, and a stone slab hung `BRIDGE_THICKNESS` below
+   * it. The ends sit exactly on the road centres the fans converge to, so the
+   * road runs onto the deck with no step; the slab's ends dip below ground
+   * there and are hidden by the banks, so no end caps are needed.
+   */
+  const emitBridgeDeck = (
+    ax: number, az: number, bx: number, bz: number,
+    y: number, edgeLen: number,
+    ownType: number, ownCi: number,
+    rc: RGB,
+  ) => {
+    const dx = bx - ax, dz = bz - az;
+    const len = Math.hypot(dx, dz);
+    if (len < 1e-4) return;
+    const ux = dx / len, uz = dz / len;
+    const px = -uz,     pz = ux;
+    const hw = BRIDGE_HALF_WIDTH * edgeLen;
+
+    const slabType = bridgeTypeIdx >= 0 && colorMode !== 'debug' ? bridgeTypeIdx : ownType;
+    const sc = terrainColor(slabType);
+    // Plain mode darkens the stone a touch so the slab reads as cut, not
+    // as a lump of the hillside; splat weights cannot be scaled (see the
+    // note at the terrain fans) so the texture carries that there.
+    const sr = colorMode === 'debug' ? 0.55 : isSplat ? 1 : sc.r * 0.8;
+    const sg = colorMode === 'debug' ? 0.55 : isSplat ? 0 : sc.g * 0.8;
+    const sb = colorMode === 'debug' ? 0.55 : isSplat ? 0 : sc.b * 0.8;
+    setCi(ownCi, ownCi, ownCi);
+
+    let lx0 = ax - px * hw, lz0 = az - pz * hw;
+    let rx0 = ax + px * hw, rz0 = az + pz * hw;
+    let y0  = y;
+    for (let s = 1; s <= BRIDGE_SEGMENTS; s++) {
+      const t1  = s / BRIDGE_SEGMENTS;
+      const cx1 = ax + dx * t1, cz1 = az + dz * t1;
+      const lx1 = cx1 - px * hw, lz1 = cz1 - pz * hw;
+      const rx1 = cx1 + px * hw, rz1 = cz1 + pz * hw;
+      const y1  = y + BRIDGE_ARCH * Math.sin(Math.PI * t1);
+      // Top: solid road (u = 1 everywhere — the decal's edge fade is for
+      // road meeting grass, and a deck edge is a parapet, not a verge).
+      addRoadQuad(lx0,y0,lz0,1, rx0,y0,rz0,1, lx1,y1,lz1,1, rx1,y1,rz1,1, rc, rc, ownCi, ownCi);
+      // Walls face outward, the underside faces down.
+      const yb0 = y0 - BRIDGE_THICKNESS, yb1 = y1 - BRIDGE_THICKNESS;
+      addQuadFacing(-px, 0, -pz, lx0,y0,lz0, lx0,yb0,lz0, lx1,y1,lz1, lx1,yb1,lz1, sr,sg,sb, slabType);
+      addQuadFacing( px, 0,  pz, rx0,y0,rz0, rx0,yb0,rz0, rx1,y1,rz1, rx1,yb1,rz1, sr,sg,sb, slabType);
+      addQuadFacing(0, -1, 0,    lx0,yb0,lz0, rx0,yb0,rz0, lx1,yb1,lz1, rx1,yb1,rz1, sr,sg,sb, slabType);
+      lx0 = lx1; lz0 = lz1; rx0 = rx1; rz0 = rz1; y0 = y1;
+    }
   };
 
   // ---- terrace lerp helpers ----
@@ -843,6 +959,15 @@ export function buildChunkArrays(
       const isJunction = riverEdgeCount >= 3 && !map.hasRiverBeginOrEnd(col, row);
       const junctionRing: Array<{ x: number; y: number; z: number }> = [];
 
+      // Bridge bookkeeping: which bank each edge is on, and where the road
+      // fans on each bank converge (recorded as the road path computes them
+      // below, so the deck ends land exactly on the fan apexes). The deck is
+      // emitted after the edge loop, once both banks have reported in.
+      const banks = bridgesOn && hasRiverCell && map.hasRoads(col, row) ? riverBanks(map, col, row) : null;
+      const bankRcX  = [NaN, NaN];
+      const bankRcZ  = [NaN, NaN];
+      const bankRoad = [false, false];
+
       setCi(ownCi, ownCi, ownCi);
 
       for (let i = 0; i < 6; i++) {
@@ -996,6 +1121,12 @@ export function buildChunkArrays(
               rcz += (oz[mid] + oz[mI1]) * 0.5 * SOLID_FACTOR * 0.25;
             }
 
+            if (banks && banks[i] >= 0) {
+              const bank = banks[i];
+              bankRcX[bank] = rcx; bankRcZ[bank] = rcz;
+              if (hasRoadThrough) bankRoad[bank] = true;
+            }
+
             const mLx = rcx + (e1x - rcx) * interp.l, mLz = rcz + (e1z - rcz) * interp.l;
             const mRx = rcx + (e5x - rcx) * interp.r, mRz = rcz + (e5z - rcz) * interp.r;
             const nbI = nbOffset(col, row, edgeDirs[i]);
@@ -1119,6 +1250,14 @@ export function buildChunkArrays(
       // basin gets a FLAT floor at bed depth out to 60% of the ring, with only
       // a narrow rim rising to the ring points — the river water surface cuts
       // the rim in a thin shoreline band, like it does on channel walls.
+      if (banks && bankRoad[0] && bankRoad[1] && !Number.isNaN(bankRcX[0]) && !Number.isNaN(bankRcX[1])) {
+        emitBridgeDeck(
+          bankRcX[0], bankRcZ[0], bankRcX[1], bankRcZ[1],
+          ownY, Math.hypot(ox[1] - ox[0], oz[1] - oz[0]),
+          ownType, ownCi, roadColor(ownTerrain),
+        );
+      }
+
       if (isJunction && junctionRing.length >= 3) {
         setCi(ownCi, ownCi, ownCi);
         const RIM = 0.6;

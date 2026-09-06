@@ -1,4 +1,5 @@
 import { HexMap } from './HexMap.js';
+import type { ScatterAssetDescriptor } from '../geometry/ScatterAssets.js';
 import type { ScatterDescriptor } from '../geometry/ScatterTypes.js';
 import type { TerrainDescriptor } from '../geometry/TerrainTypes.js';
 import type { LiquidTypeDescriptor } from '../geometry/LiquidTypes.js';
@@ -173,6 +174,8 @@ export interface MapMetadata {
  */
 export interface MapDescriptorSets {
   scatterDescriptors?:  ScatterDescriptor[];
+  /** Shape recipes and material behaviour the scatter descriptors' `assetId`s refer to. */
+  scatterAssets?:       ScatterAssetDescriptor[];
   terrainDescriptors?:  TerrainDescriptor[];
   liquidDescriptors?:   LiquidTypeDescriptor[];
   /** Resource types the map's `cellData` resource entries refer to. */
@@ -186,6 +189,7 @@ export interface DeserializedMap {
   map:                  HexMap;
   metadata:             MapMetadata;
   scatterDescriptors:   ScatterDescriptor[];
+  scatterAssets:        ScatterAssetDescriptor[];
   terrainDescriptors:   TerrainDescriptor[];
   liquidDescriptors:    LiquidTypeDescriptor[];
   resourceDescriptors:  ResourceDescriptor[];
@@ -339,6 +343,7 @@ interface MapJSON {
   playerCount?:      number;
   tags?:             string[];
   scatterDescriptors?:   ScatterDescriptor[];
+  scatterAssets?:        ScatterAssetDescriptor[];
   terrainDescriptors?:   TerrainDescriptor[];
   liquidDescriptors?:    LiquidTypeDescriptor[];
   resourceDescriptors?:  ResourceDescriptor[];
@@ -401,7 +406,7 @@ export function serializeMapJSON(
         liquidDescriptors:  liquidDescriptorsArg,
       }
     : scatterOrSets;
-  const { scatterDescriptors, terrainDescriptors, liquidDescriptors, resourceDescriptors, factions } = sets;
+  const { scatterDescriptors, scatterAssets, terrainDescriptors, liquidDescriptors, resourceDescriptors, factions } = sets;
 
   const payload: MapJSON = {
     version:           VERSION,
@@ -416,6 +421,7 @@ export function serializeMapJSON(
     ...metadata,
     createdAt: metadata.createdAt ?? new Date().toISOString(),
     ...(scatterDescriptors  && scatterDescriptors.length  > 0 ? { scatterDescriptors }  : {}),
+    ...(scatterAssets       && scatterAssets.length       > 0 ? { scatterAssets }       : {}),
     ...(terrainDescriptors  && terrainDescriptors.length  > 0 ? { terrainDescriptors }  : {}),
     ...(liquidDescriptors   && liquidDescriptors.length   > 0 ? { liquidDescriptors }   : {}),
     ...(resourceDescriptors && resourceDescriptors.length > 0 ? { resourceDescriptors } : {}),
@@ -511,6 +517,7 @@ export function deserializeMapJSON(json: string): DeserializedMap {
       tags:        p.tags,
     },
     scatterDescriptors:  p.scatterDescriptors  ?? [],
+    scatterAssets:       p.scatterAssets       ?? [],
     terrainDescriptors:  p.terrainDescriptors  ?? [],
     liquidDescriptors:   p.liquidDescriptors   ?? [],
     resourceDescriptors: p.resourceDescriptors ?? [],

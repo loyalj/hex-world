@@ -601,6 +601,57 @@ features from actual need.
   screen-space cannot beat exact knowledge of a static height field) and the
   unit selection outline pass (deferred with the selection API it would need).
 
+- [x] **Bridges** *(2026-09-06)* — roads and rivers both run from a cell's
+  centre out through its edges, so a road never "crosses" a river on an edge:
+  the crossing is *inside* the cell, where the road has to get from one bank
+  to the other. The builder already kept each road fragment on its own bank by
+  pushing its fan apex sideways, which left two stubs facing each other across
+  the channel. `riverBanks` (map-level, `Bridges.ts`) names the banks —
+  clockwise from the inflow to the outflow is one, the rest is the other; a
+  source, a mouth, a confluence, and a hairpin (adjacent edges leave a bank
+  with no edges) have none — and `hasBridge` is true when a cell has road on
+  *both*. The chunk core records the apex the road path computes for each
+  bank as it goes, and after the edge loop spans them with a **deck**: a
+  road-surfaced top with a shallow arch (`BRIDGE_ARCH`) into the road arrays,
+  u = 1 throughout because the decal's edge fade is for road meeting grass and
+  a deck edge is a parapet; and a stone slab `BRIDGE_THICKNESS` under it into
+  the terrain arrays, typed as the pack's `'rock'` (auto-resolved like the
+  riverbed, `bridgeTerrain` to pin). The deck ends sit exactly on the fan
+  apexes, so the road runs onto it with no step, and the slab's ends dip
+  below ground there and are hidden by the banks — no end caps. Slab faces
+  are the only terrain here whose orientation cannot be read off the hex
+  corner order, so `addQuadFacing` enforces winding against a wanted normal
+  rather than assuming it, the lesson the skirt taught. The pathfinding half
+  is one predicate: the demo's land price makes a river cell a ford (+2)
+  unless `hasBridge`, and `generateRoads` keeps crossing river cells as it
+  always did (`bridges: false` stops at the bank). The bank assignment and the
+  apex displacement have to agree, which is why the query lives beside the
+  map and the builder imports it rather than re-deriving the sides.
+- [x] **Volcanic biome pass** *(2026-09-06)* — `applyVolcanoes` in the Chunk
+  pipeline (`volcanoes`, `volcanoRadius`, `volcanoHeight` in the schema, so
+  the editor's wizard grew the knobs with no wiring): a caldera pool ringed
+  by a rim crest, flanks falling on a convex profile to the ground the cone
+  stands on, and an ash apron feathering out beyond them. It runs **after
+  biomes**, because the biome pass paints every land cell and would repaint
+  the ash, and **before rivers**, which gained `stopTerrains` so a river ends
+  in the pool as an estuary instead of carving a channel across a lava lake.
+  Sites take the highest of a handful of land samples, so cones crown the
+  ranges; elevation only ever *rises* (the cone is laid over the terrain with
+  `max`, a volcano on a ridge keeps the ridge) except the caldera, dug to
+  exactly two steps below the rim so the pool's surface — floor + 1 under the
+  water-surface convention — is contained by a rim one step above it. Nothing
+  grows on fresh ash: every feature layer is zeroed except an optional
+  `volcanoSmokeLayer`, which the rim ring gets at density 2 — about half its
+  slots at the middle and small tiers, fumaroles rather than a wall of cloud,
+  which is what density 3 on every rim cell produced first. `createSmokeGeometry`
+  is the matching scatter shape (a leaning column of puffs, vertex-lit base to
+  crown), and `VOLCANIC_ASH_TERRAIN_DESCRIPTOR` (index 10) the ash terrain;
+  with no `volcanoLavaTerrain` the pass leaves a dry rock crater, so a
+  consumer with only the seven built-in terrains still gets a mountain. Demo:
+  the Chunk generator raises two per seed. Editor: ash in the default palette,
+  and the wizard hands the pass whatever the palette's `lava` and `ash` are by
+  id, so a re-indexed palette still lines up.
+
 ### Gameplay layers
 
 - [x] **Fog-of-war memory tiers** *(2026-08-05)* — the two tiers are now split at
@@ -693,9 +744,36 @@ features from actual need.
   Demo: hover a cell and press `[A]` — all four units march from one sweep, and
   the field is drawn as arrows (built from `flowVector`, so the curve around
   water is visible rather than hexagonal).
-- [ ] **Naval support** — embark/disembark transitions, ships constrained to
-  liquid cells, port designation on shore cells. Liquids are first-class; units
-  on them aren't yet. Movement costs and pathfinding need liquid-aware modes.
+- [x] **Naval support** *(2026-09-06)* — three pieces, each usable alone.
+  **Movement domains** (`createDomainCost`): a `MoveCostFn` factory that
+  enforces `'land'` / `'naval'` / `'amphibious'` and delegates the prices to
+  `landCost` / `navalCost` hooks, so one unit type's rules are written once and
+  every search — A*, flood-fill range, flow field — takes the same function.
+  Ships stay on liquid except to **dock** at a port cell, from which the only
+  move is back out to sea; amphibious units pay `embarkCost` to cross the
+  shoreline, anywhere by default or only through ports (`embarkAt: 'ports'`,
+  where the *land* side of the crossing has to be the port, so a port works in
+  both directions). Which terrains float is the caller's predicate — a lava
+  shore is not a harbour, and only the game knows that.
+  **Ports** (`Ports.ts`): a `port: true` flag in the metadata channel, so it
+  serializes with the map and rides the editor's undo stack like ownership
+  and resources; `setPort` refuses a cell that is not shore (land with a
+  liquid neighbour), since a dock with no water beside it would only surface
+  later as an unreachable one.
+  **Transitions** on the unit: `HexUnit` gains `domain` and `isLiquid`, an
+  `embarked` flag set silently from the spawn cell on the first update and
+  flipped at each shoreline crossing with `onEmbark` / `onDisembark` fired
+  *before* `onCellEnter` for that cell (so a model swap is in place when the
+  cell-enter handler looks); `UnitManager` wraps and re-emits them as
+  `unitEmbark` / `unitDisembark`, and restores them on `removeUnit` like the
+  other three. `isLiquid` doubles as the surface predicate when none is set,
+  so a ship floats at the water surface instead of standing on the sea bed
+  with nothing further to configure.
+  Demo: the blue unit is amphibious (walks onto the sea and becomes a boat),
+  a fifth unit is a ship spawned on the nearest water, `[D]` toggles a dock on
+  the hovered shore cell, and the movement rules switch with the selection.
+  Editor: a **Port** mode in the Units tool (toggle, refused off shore, one
+  transaction, undoable) and docks drawn as rings in the unit layer.
 
 ### Developer experience
 
@@ -784,6 +862,69 @@ features from actual need.
   copy-pasted onto every unit's `onCellEnter` and `onMoveEnd` is now two
   subscriptions on the manager, with per-unit callbacks kept only for the per-unit
   material swap.
+- [x] **Headless visual snapshots** *(2026-09-06)* — `npm run test:visual`
+  renders fixed scenes (`tests/visual/scenes.ts`) in headless Chromium under
+  SwiftShader — software GL, so the pixels do not depend on the GPU — through
+  a Vite dev server the test starts and stops itself, and compares each frame
+  against a committed golden in `tests/visual/__snapshots__/` with pixelmatch;
+  a mismatch writes `<scene>.actual.png` and `<scene>.diff.png` beside it
+  (git-ignored). `npm run test:visual:update` re-bakes. Playwright is pinned
+  to the release whose bundled Chromium matches what was already on the
+  machine, so no browser download. Determinism is by construction rather than
+  by hoping: seeded or hand-built maps, a paused clock, no weather, wind, or
+  worker, and a settle step that pumps the chunk streamer until a pass loads
+  nothing new before the one captured frame. Five scenes — a hand-built
+  plateau with a straight and a bending river under a road grid (every deck
+  case), a seeded volcano centred by the pool's centroid, the map corner from
+  a low tilt (skirt, strata, horizon), the liquid showcase, and a coast with
+  docks — plus a boot check that loads the demo page and fails on any page
+  error, which is the check that catches a key handler naming a renamed
+  subsystem. The tolerance (0.4 % of pixels past a 0.12 colour threshold) is
+  loose enough for sub-pixel drift between SwiftShader builds and tight enough
+  for a torn seam, a missing deck, or a liquid that stopped drawing — the
+  regressions the skirt work shipped past every unit test. It paid for itself
+  the same day: the first volcano frame showed the cone at the frame's edge,
+  the ash as a void, and the smoke as a solid mass, none of which a test on
+  the arrays could have said. It is also how those frames were *looked at*
+  from here — the goldens are readable images, which makes the harness a
+  viewer as much as a gate.
+- [x] **Scatter as data, and the editor's Scatter Builder** *(2026-09-06)* —
+  the placement engine was already right (hash-per-slot, density tiers,
+  deterministic under streaming); what stayed in code was the *shape* and the
+  *material behaviour*, so "add a plant" meant two source edits and a loaded
+  pack's trees never swayed. Now both are JSON. A **recipe**
+  (`ScatterRecipes.ts`) is a height and a list of primitive parts — cone,
+  sphere, lobe, box, cylinder, a `segment` bent by an angle, a `frond` that
+  droops, a rock — each with proportions, offset, colour, and a `role`; a
+  `repeat` modifier stamps a part around the axis with radius, droop, and
+  deterministic jitter. The six built-ins are recipes now (`PALM_RECIPE` is the
+  one that needed the new primitives: a 25° trunk, eight drooping fronds,
+  three coconuts, and the crown at the arc's endpoint), and `buildShapeGeometry`
+  merges, seats, and fits them exactly as the code shapes did. A **material
+  descriptor** names what the attach calls did by hand — wind, seasonal tint
+  (summer taken from the first `canopy` part), snow opt-out (a `userData`
+  marker `HexWorld` now honours), texture, opacity, sidedness, stone — and
+  `resolveScatterAssets` turns asset descriptors (shape or GLB model) into the
+  registry `resolveScatterDefinition` always read. Descriptors gained a
+  `scale` per tier variant (one asset, three sizes), `placement` rules
+  (elevation band, `shore`, `avoidRivers`) that resolve into `canSpawnAt`,
+  and an optional `thresholds` table, since a fumarole layer and a forest want
+  different curves. `scatterAssets` ride beside `scatterDescriptors` in map
+  JSON and the `.hexpack` manifest, and a pack of shapes loads with no GLTF
+  loader at all. `ChunkManager.setScatterDefinitions` rebuilds only the
+  scatter of every loaded chunk, which is what makes live editing cheap, and
+  `renderScatterThumbnail` draws one instance for a swatch. Visual scene
+  `palm-coast`: palms held to the beach by the shore rule, scrub inland.
+  **Editor:** `scatterRoster.ts` expresses the four defaults as templates
+  (plus palm and smoke), and the **Scatter Builder** dialog — Edit ▸ Scatter
+  types…, beside the terrain, liquid, faction, and resource dialogs — lists types, composes parts with a live thumbnail, sets the
+  three sizes and the density curve, placement chips and bands, and the
+  behaviour toggles, pushing every change to the map after a short debounce.
+  The Scatter tool's type buttons and the resource rules' layer names derive
+  from the roster; the set saves and loads with the map and the pack (a file
+  with descriptors but no asset descriptors keeps the current set, since
+  there is nothing to build its shapes from). New maps carry six feature
+  layers so there is room to add types without a re-layout.
 
 ---
 

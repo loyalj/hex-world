@@ -155,7 +155,7 @@ export class ChunkManager {
   private material: THREE.Material;
   private readonly roadMaterial:    THREE.Material | null;
   private readonly hashGrid:           HexHashGrid | null;
-  private readonly scatterDefinitions: ScatterDefinition[] | null;
+  private scatterDefinitions: ScatterDefinition[] | null;
   private readonly liquidMaterials:    Map<string, LiquidMaterialSet>;
   private readonly liquidDescriptors:  Map<string, LiquidTypeDescriptor>;
   private liquidTerrainSets:  Map<string, Set<number>>;
@@ -190,6 +190,8 @@ export class ChunkManager {
   private _geometryRevision = 0;
   /** True when the caller pinned geometryOptions.riverbedTerrain explicitly. */
   private readonly riverbedPinned: boolean;
+  /** True when the caller pinned geometryOptions.bridgeTerrain explicitly. */
+  private readonly bridgePinned: boolean;
   private readonly flowWidenedRivers: boolean;
   private fogData:                     FogData | null;
   private hideUnexplored            = true;
@@ -246,6 +248,7 @@ export class ChunkManager {
     this.geoOptions      = { ...opts.geometryOptions };
     this.waterGeoOptions = { ...opts.waterGeometryOptions };
     this.riverbedPinned  = opts.geometryOptions?.riverbedTerrain !== undefined;
+    this.bridgePinned    = opts.geometryOptions?.bridgeTerrain !== undefined;
 
     // Definite assignment happens in applyTerrainDefinitions; these initializers
     // keep the compiler satisfied without duplicating the derivation.
@@ -378,6 +381,10 @@ export class ChunkManager {
     // the caller pinned (or disabled) the target via geometryOptions.
     if (!this.riverbedPinned) {
       this.geoOptions.riverbedTerrain = terrainDefs.find(d => d.id === 'riverbed')?.index;
+    }
+    // Bridge slabs are cut stone: the pack's 'rock' terrain, same rule.
+    if (!this.bridgePinned) {
+      this.geoOptions.bridgeTerrain = terrainDefs.find(d => d.id === 'rock')?.index;
     }
     this.riverCellsByLiquid = null;
   }
@@ -1082,6 +1089,30 @@ export class ChunkManager {
    * the underlying feature layers. Streaming and dirty rebuilds keep honoring
    * the flag, so chunks loaded while hidden come in hidden too.
    */
+  /**
+   * Replace the scatter definitions and rebuild every loaded chunk's scatter
+   * in place — terrain, liquids, and roads are untouched. This is what an
+   * editor's scatter builder calls on every change, so it has to be cheap
+   * relative to a full chunk rebuild, and it is: instanced meshes only.
+   */
+  setScatterDefinitions(definitions: ScatterDefinition[]): void {
+    this.scatterDefinitions = definitions;
+    for (const [k, meshes] of this.scatterChunks) {
+      for (const m of meshes) { this.scene.remove(m); m.dispose(); m.geometry.dispose(); }
+      this.scatterChunks.delete(k);
+    }
+    if (!this.hashGrid || definitions.length === 0) return;
+    for (const k of this.chunks.keys()) {
+      const [cx, cy] = k.split(',').map(Number);
+      const b = this.bounds(cx, cy);
+      const meshes = buildScatterMeshes(this.map, this.layout, b, this.hashGrid, definitions, this.allWaterTerrains);
+      if (meshes.length === 0) continue;
+      for (const m of meshes) { m.visible = this.scatterVisible; this.scene.add(m); }
+      this.scatterChunks.set(k, meshes);
+      if (this.fogData) this.applyFogToScatterMeshes(meshes);
+    }
+  }
+
   setScatterVisible(visible: boolean): void {
     this.scatterVisible = visible;
     for (const meshes of this.scatterChunks.values()) {

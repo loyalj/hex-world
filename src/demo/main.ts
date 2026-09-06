@@ -14,7 +14,7 @@ import { HexHashGrid } from '../geometry/HexHashGrid.js';
 import type { ScatterDefinition } from '../geometry/ScatterTypes.js';
 import { createRockMaterial } from '../geometry/RockMaterial.js';
 import {
-  createPineGeometry, createBroadleafGeometry, createBushGeometry,
+  createPineGeometry, createBroadleafGeometry, createBushGeometry, createSmokeGeometry,
   BROADLEAF_CANOPY_COLOR, BUSH_COLOR,
 } from '../geometry/ScatterShapes.js';
 import type { MapGeneratorPlugin } from '../generators/MapGeneratorPlugin.js';
@@ -28,6 +28,10 @@ import { offsetToHex } from '../math/HexCoord.js';
 import { TerrainType } from '../map/HexCell.js';
 import { FogData } from '../geometry/FogData.js';
 import { findPath, getMovementRange, getVisibleCells, hasLineOfSight, type MoveCostFn } from '../pathfinding/Pathfinding.js';
+import { createDomainCost, type MovementDomain } from '../pathfinding/MovementDomains.js';
+import { hasBridge } from '../map/Bridges.js';
+import { setPort, isPort, listPorts } from '../gameplay/Ports.js';
+import { VOLCANIC_ASH_TERRAIN_DESCRIPTOR } from '../generators/VolcanoPass.js';
 import { FlowField } from '../pathfinding/FlowField.js';
 import { smoothPath } from '../pathfinding/PathSmoothing.js';
 import { hexToOffset } from '../math/HexCoord.js';
@@ -73,6 +77,7 @@ const TERRAIN_NAMES: Record<number, string> = {
   7: 'Lava',
   8: 'Acid',
   9: 'Deep Acid',
+  10: 'Volcanic Ash',
 };
 
 // Extended terrain descriptors — default seven (incl. riverbed at 6) plus
@@ -87,6 +92,8 @@ const DEMO_TERRAIN_DESCRIPTORS = [
     liquidType: 'acid', texture: { type: 'procedural' as const } },
   { index: 9, id: 'acid-deep', name: 'Deep Acid', color: 0x2f7a12 as number,
     liquidType: 'acid', texture: { type: 'procedural' as const } },
+  // Volcanic ash (10): the cone and apron the Chunk generator's volcanoes leave.
+  VOLCANIC_ASH_TERRAIN_DESCRIPTOR,
 ];
 const DEMO_TERRAIN_DEFINITIONS = resolveTerrainDefinitions(DEMO_TERRAIN_DESCRIPTORS);
 const DEMO_WATER_TERRAINS      = buildWaterTerrainSet(DEMO_TERRAIN_DEFINITIONS);
@@ -104,14 +111,27 @@ let activeGenIndex = 0;
 let seed = Math.floor(Math.random() * 0xffffffff);
 
 // --- Map ---
-// Four feature layers: conifers, rocks, broadleaf trees, bushes — the four the
-// generators fill (see assignBiomes / generateFbmTerrain).
-const map = new HexMap({ width: MAP_WIDTH, height: MAP_HEIGHT, featureLayerCount: 4 });
+// Five feature layers: conifers, rocks, broadleaf trees, bushes — the four the
+// generators fill (see assignBiomes / generateFbmTerrain) — plus volcanic
+// smoke, which only the volcano pass writes.
+const SMOKE_LAYER = 4;
+const map = new HexMap({ width: MAP_WIDTH, height: MAP_HEIGHT, featureLayerCount: 5 });
+
+// Per-generator config overrides. The Chunk pipeline raises two volcanoes
+// here so the caldera, ash apron, and smoke are on every seed; the terrain
+// indices are the demo's own (lava at 7, ash at 10).
+const GENERATOR_CONFIGS: Record<string, unknown> = {
+  [ChunkPlugin.id]: {
+    ...ChunkPlugin.defaultConfig,
+    volcanoes: 2, volcanoRadius: 5, volcanoHeight: 6,
+    volcanoLavaTerrain: 7, volcanoAshTerrain: VOLCANIC_ASH_TERRAIN_DESCRIPTOR.index, volcanoSmokeLayer: SMOKE_LAYER,
+  },
+};
 
 function runGenerator(): void {
   const gen = GENERATORS[activeGenIndex];
   map.clear();
-  gen.generate(map, gen.defaultConfig, seed);
+  gen.generate(map, GENERATOR_CONFIGS[gen.id] ?? gen.defaultConfig, seed);
 }
 
 runGenerator();
@@ -186,6 +206,8 @@ const pineMat      = new THREE.MeshLambertMaterial({ color: 0x3f6b2c });
 const broadleafMat = new THREE.MeshLambertMaterial({ vertexColors: true });
 const bushMat      = new THREE.MeshLambertMaterial({ vertexColors: true });
 const rockMat      = createRockMaterial();
+// Not in scatterMats: smoke takes the haze (attached below) but not snow.
+const smokeMat     = new THREE.MeshLambertMaterial({ vertexColors: true, transparent: true, opacity: 0.6, depthWrite: false });
 const scatterMats  = [pineMat, broadleafMat, bushMat, rockMat];
 
 // --- HUD ---
@@ -252,6 +274,7 @@ async function start() {
   // scene.fog is the wrong tool (it mixes before tone mapping and encoding, so
   // the same color lands far brighter on a tree than on the hill behind it).
   for (const mat of scatterMats) attachAtmosphere(mat);
+  attachAtmosphere(smokeMat);
 
   // Every material that carries the atmosphere uniforms, so the map edge and
   // everything standing on it dissolve into the same horizon color.
@@ -465,6 +488,20 @@ async function start() {
     ],
   };
 
+  // Fumaroles on a volcano's rim: the pass writes density only there, and the
+  // terrain filter keeps a hand-painted level from smoking a meadow.
+  const smokeDefinition: ScatterDefinition = {
+    id:              'smoke',
+    name:            'Smoke',
+    layerIndex:      SMOKE_LAYER,
+    allowedTerrains: [VOLCANIC_ASH_TERRAIN_DESCRIPTOR.index, TerrainType.Rock],
+    tiers: [
+      [{ geometry: createSmokeGeometry(3.0), material: smokeMat, yOffset: 0 }],
+      [{ geometry: createSmokeGeometry(2.2), material: smokeMat, yOffset: 0 }],
+      [{ geometry: createSmokeGeometry(1.5), material: smokeMat, yOffset: 0 }],
+    ],
+  };
+
   const rockDefinition: ScatterDefinition = {
     id:             'rock',
     name:           'Rock',
@@ -481,14 +518,37 @@ async function start() {
   // --- Pathfinding overlay ---
   const MOVE_BUDGET = 4;
 
-  const moveCost: MoveCostFn = (_from, to) => {
-    const { col, row } = hexToOffset(to);
-    if (!map.inBounds(col, row)) return Infinity;
-    // When unexplored cells are hidden, treat them as impassable.
-    if (hideUnexplored && fogData.rawData[(row * MAP_WIDTH + col) * 4 + 1] === 0) return Infinity;
-    if (DEMO_WATER_TERRAINS.has(map.getTerrain(col, row))) return Infinity;
-    return 1;
-  };
+  // Ships float on water — not on lava or acid, which stay impassable to
+  // everything. The same predicate names the shore a port can sit on.
+  const NAVAL_LIQUID = (t: number): boolean => t === TerrainType.Water;
+  /** Wading a river costs this much extra — unless a road bridges it. */
+  const RIVER_FORD_COST = 2;
+
+  const unexplored = (col: number, row: number): boolean =>
+    hideUnexplored && fogData.rawData[(row * MAP_WIDTH + col) * 4 + 1] === 0;
+
+  /**
+   * One rule set per movement domain, from the unit that is selected. The
+   * land price is where the bridge work pays off: a river cell is a ford
+   * unless a road crosses it, in which case the deck makes it an ordinary
+   * step. Reassigned on every selection change; the fog toggle is read live.
+   */
+  function costFor(unit: HexUnit | null): MoveCostFn {
+    return createDomainCost({
+      map,
+      isLiquid: NAVAL_LIQUID,
+      domain:   unit?.domain ?? 'land',
+      landCost: (col, row) => {
+        // When unexplored cells are hidden, treat them as impassable.
+        if (unexplored(col, row)) return Infinity;
+        if (DEMO_WATER_TERRAINS.has(map.getTerrain(col, row))) return Infinity;
+        return map.hasRiver(col, row) && !hasBridge(map, col, row) ? 1 + RIVER_FORD_COST : 1;
+      },
+      navalCost:  (col, row) => unexplored(col, row) ? Infinity : 1,
+      embarkCost: 1,
+    });
+  }
+  let moveCost: MoveCostFn = costFor(null);
 
   let lastHoveredForPath: { col: number; row: number } | null = null;
 
@@ -707,6 +767,7 @@ async function start() {
       }
       territory.refresh();
       resources.refresh();
+      refreshPortMarkers();
       pathOverlay.geometry.dispose();
       pathOverlay.geometry = new THREE.BufferGeometry();
       pathOverlay.visible = false;
@@ -739,7 +800,7 @@ async function start() {
     waterGeometryOptions: waterGeoOptions,
     roadMaterial,
     hashGrid,
-    scatterDefinitions:  [pineDefinition, rockDefinition, broadleafDefinition, bushDefinition],
+    scatterDefinitions:  [pineDefinition, rockDefinition, broadleafDefinition, bushDefinition, smokeDefinition],
     terrainDefinitions:  DEMO_TERRAIN_DEFINITIONS,
     fogData,
   });
@@ -747,45 +808,105 @@ async function start() {
   // --- Units ---
   // Demo uses simple capsules. Real consumers attach loaded GLTF Object3Ds instead.
 
-  /** BFS outward from (col, row) to find the nearest non-water cell. */
-  function findSpawnCell(col: number, row: number): { col: number; row: number } {
-    if (map.inBounds(col, row) && !DEMO_WATER_TERRAINS.has(map.getTerrain(col, row))) return { col, row };
+  /** BFS outward from (col, row) to find the nearest cell a unit of that domain can stand on. */
+  function findSpawnCell(col: number, row: number, domain: MovementDomain = 'land'): { col: number; row: number } {
+    const ok = (c: number, r: number): boolean => {
+      const t = map.getTerrain(c, r);
+      return domain === 'naval' ? NAVAL_LIQUID(t) : !DEMO_WATER_TERRAINS.has(t);
+    };
+    if (map.inBounds(col, row) && ok(col, row)) return { col, row };
     const candidates = getVisibleCells(offsetToHex(col, row), Math.max(MAP_WIDTH, MAP_HEIGHT), map);
     for (const c of candidates) {
       const oc = hexToOffset(c);
-      if (map.inBounds(oc.col, oc.row) && !DEMO_WATER_TERRAINS.has(map.getTerrain(oc.col, oc.row))) return oc;
+      if (map.inBounds(oc.col, oc.row) && ok(oc.col, oc.row)) return oc;
     }
     return { col, row };
   }
 
-  // Each entry: preferred spawn (quadrant centre) + idle color.
-  const UNIT_DEFS = [
-    { col: Math.floor(MAP_WIDTH * 0.50), row: Math.floor(MAP_HEIGHT * 0.50), color: 0x4488ff },
-    { col: Math.floor(MAP_WIDTH * 0.25), row: Math.floor(MAP_HEIGHT * 0.25), color: 0xff6622 },
-    { col: Math.floor(MAP_WIDTH * 0.75), row: Math.floor(MAP_HEIGHT * 0.25), color: 0xaa44ff },
-    { col: Math.floor(MAP_WIDTH * 0.25), row: Math.floor(MAP_HEIGHT * 0.75), color: 0x22ddaa },
+  // Each entry: preferred spawn (quadrant centre), idle color, and domain.
+  // The blue unit is amphibious — it walks onto water and turns into a boat —
+  // and the pale one is a ship, spawned on the nearest sea and confined to it
+  // except for port cells ([D] marks those).
+  const UNIT_DEFS: { col: number; row: number; color: number; domain: MovementDomain }[] = [
+    { col: Math.floor(MAP_WIDTH * 0.50), row: Math.floor(MAP_HEIGHT * 0.50), color: 0x4488ff, domain: 'amphibious' },
+    { col: Math.floor(MAP_WIDTH * 0.25), row: Math.floor(MAP_HEIGHT * 0.25), color: 0xff6622, domain: 'land' },
+    { col: Math.floor(MAP_WIDTH * 0.75), row: Math.floor(MAP_HEIGHT * 0.25), color: 0xaa44ff, domain: 'land' },
+    { col: Math.floor(MAP_WIDTH * 0.25), row: Math.floor(MAP_HEIGHT * 0.75), color: 0x22ddaa, domain: 'land' },
+    { col: Math.floor(MAP_WIDTH * 0.50), row: Math.floor(MAP_HEIGHT * 0.90), color: 0xf0dfa0, domain: 'naval' },
   ];
 
+  /**
+   * A unit's model: a capsule for walking, a hull for floating, one material
+   * for both so the move-flash below recolours whichever is showing. Land
+   * units get only the capsule; ships only the hull.
+   */
+  function makeUnitObject(color: number, domain: MovementDomain): { object: THREE.Group; mat: THREE.MeshLambertMaterial; walker: THREE.Mesh; hull: THREE.Group } {
+    const mat    = new THREE.MeshLambertMaterial({ color });
+    const object = new THREE.Group();
+    const walker = new THREE.Mesh(new THREE.CapsuleGeometry(0.25, 0.7, 4, 8), mat);
+    walker.castShadow = true;
+    const hull = new THREE.Group();
+    const body = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.22, 1.0), mat);
+    body.position.y = -0.45;
+    const mast = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 0.9, 5), mat);
+    mast.position.y = 0.1;
+    const sail = new THREE.Mesh(new THREE.PlaneGeometry(0.45, 0.5), new THREE.MeshLambertMaterial({ color: 0xf4f0e6, side: THREE.DoubleSide }));
+    sail.position.set(0, 0.15, 0.03);
+    body.castShadow = mast.castShadow = sail.castShadow = true;
+    hull.add(body, mast, sail);
+    object.add(walker, hull);
+    walker.visible = domain !== 'naval';
+    hull.visible   = domain === 'naval';
+    return { object, mat, walker, hull };
+  }
+
   const units: HexUnit[] = [];
-  const unitMeshes: THREE.Mesh[] = [];
+  const unitMeshes: THREE.Object3D[] = [];
   const unitManager = new UnitManager({ scene, map, layout, fogData });
 
   for (const def of UNIT_DEFS) {
-    const mat   = new THREE.MeshLambertMaterial({ color: def.color });
-    const mesh  = new THREE.Mesh(new THREE.CapsuleGeometry(0.25, 0.7, 4, 8), mat);
-    mesh.castShadow = true;
-    const spawn = findSpawnCell(def.col, def.row);
-    const u = new HexUnit({ col: spawn.col, row: spawn.row, travelSpeed: 4, heightOffset: 0.6, fogRevealRange: FOG_REVEAL_RANGE });
+    const { object, mat, walker, hull } = makeUnitObject(def.color, def.domain);
+    const spawn = findSpawnCell(def.col, def.row, def.domain);
+    const u = new HexUnit({
+      col: spawn.col, row: spawn.row, travelSpeed: 4, heightOffset: 0.6, fogRevealRange: FOG_REVEAL_RANGE,
+      domain: def.domain,
+      // Only units that can be afloat need to know what floats.
+      isLiquid: def.domain === 'land' ? undefined : NAVAL_LIQUID,
+    });
 
     // Per-unit callbacks are for per-unit state — this one closes over the
     // unit's own material. Real consumers toggle GLTF AnimationMixer clips here.
     const idleColor = def.color;
     u.onMoveStart = () => mat.color.setHex(0xffffff);
     u.onMoveEnd   = () => mat.color.setHex(idleColor);
+    // The amphibious unit swaps models at the shoreline. A ship never fires
+    // these (it never leaves the water), a walker never can.
+    u.onEmbark    = () => { walker.visible = false; hull.visible = true; };
+    u.onDisembark = () => { walker.visible = true;  hull.visible = false; };
 
     units.push(u);
-    unitMeshes.push(mesh);
-    unitManager.addUnit(u, mesh);
+    unitMeshes.push(object);
+    unitManager.addUnit(u, object);
+    // addUnit ran the first update, so the spawn cell's domain is known.
+    if (def.domain === 'amphibious' && u.embarked) u.onEmbark(u.col, u.row);
+  }
+
+  // --- Ports ---
+  // Docks are shore cells flagged in the map's metadata channel, so they save
+  // and load with the map. Drawn as rings at the cell surface.
+  const portMarkers = new THREE.Group();
+  scene.add(portMarkers);
+  const portRingGeo = new THREE.TorusGeometry(0.55, 0.06, 6, 24);
+  const portRingMat = new THREE.MeshBasicMaterial({ color: 0xffd166 });
+  function refreshPortMarkers(): void {
+    for (const child of [...portMarkers.children]) portMarkers.remove(child);
+    for (const { col, row } of listPorts(map)) {
+      const wp   = hexToWorld(layout, offsetToHex(col, row));
+      const ring = new THREE.Mesh(portRingGeo, portRingMat);
+      ring.rotation.x = Math.PI / 2;
+      ring.position.set(wp.x, map.getElevation(col, row) * 0.5 + 0.06, wp.z);
+      portMarkers.add(ring);
+    }
   }
 
   // Everything that reacts the same way whichever unit moved subscribes once
@@ -976,11 +1097,13 @@ async function start() {
 
   function selectUnit(u: HexUnit): void {
     selectedUnit = u;
+    moveCost = costFor(u);
     rangeNeedsUpdate = true;
   }
 
   function deselectUnit(): void {
     selectedUnit = null;
+    moveCost = costFor(null);
     rangeMesh.geometry.dispose();
     rangeMesh.geometry = new THREE.BufferGeometry();
     rangeMesh.visible  = false;
@@ -1000,14 +1123,17 @@ async function start() {
     for (let i = 0; i < units.length; i++) {
       const u = units[i];
       u.stop();
-      const spawn = findSpawnCell(UNIT_DEFS[i].col, UNIT_DEFS[i].row);
+      const spawn = findSpawnCell(UNIT_DEFS[i].col, UNIT_DEFS[i].row, UNIT_DEFS[i].domain);
       u.col = spawn.col;
       u.row = spawn.row;
+      // A teleport is a crossing too: the sync fires embark/disembark if the
+      // new spawn is on the other side of a shoreline from the old one.
       u.update(0, map, layout);
       unitMeshes[i].position.set(u.worldX, u.worldY, u.worldZ);
     }
     deselectUnit();
     clearFlowField();
+    refreshPortMarkers();
   }
 
   // --- Keyboard shortcuts ---
@@ -1015,6 +1141,20 @@ async function start() {
     if (e.key === 'Escape') {
       deselectUnit();
       clearFlowField();
+    } else if (e.key === 'd' || e.key === 'D') {
+      // Dock toggle on the hovered cell — refused off-shore, which is the
+      // only feedback a port on dry inland ground deserves.
+      if (!e.repeat && hoverCell) {
+        const on = isPort(map, hoverCell.col, hoverCell.row);
+        if (setPort(map, hoverCell.col, hoverCell.row, !on, NAVAL_LIQUID)) {
+          refreshPortMarkers();
+          rangeNeedsUpdate = true;
+          lastHoveredForPath = null;
+          saveStatus = on ? 'Port removed' : 'Port designated';
+        } else {
+          saveStatus = 'Ports go on shore cells';
+        }
+      }
     } else if (e.key === 'a' || e.key === 'A') {
       // Auto-repeat has to be dropped, not just tolerated: held for a moment
       // this fires every ~30 ms, and each one re-issued the march and rebuilt
@@ -1157,7 +1297,6 @@ async function start() {
 
   renderer.domElement.addEventListener('pointerdown', (e) => {
     if (e.button !== 0 || !hoverCell) return;
-    if (DEMO_WATER_TERRAINS.has(map.getTerrain(hoverCell.col, hoverCell.row))) return;
 
     const cell = hoverCell;
     const clickedUnit = units.find(u => u.col === cell.col && u.row === cell.row);
@@ -1167,6 +1306,10 @@ async function start() {
     }
 
     if (!selectedUnit) return;
+    // Liquid is a destination only for units that can float; the cost
+    // function refuses lava and acid for everyone, so this is just the
+    // early-out that keeps a walker's click on the sea from searching the map.
+    if (DEMO_WATER_TERRAINS.has(map.getTerrain(cell.col, cell.row)) && selectedUnit.domain === 'land') return;
 
     const path = findPath(
       offsetToHex(selectedUnit.col, selectedUnit.row),
@@ -1264,8 +1407,10 @@ async function start() {
         `elev ${map.getElevation(hoverCell.col, hoverCell.row)}${losStr}`
       : `Hover:     —`;
     const unitLine = selectedUnit
-      ? `Unit:      [${selectedUnit.col}, ${selectedUnit.row}]  ${selectedUnit.isMoving ? 'moving' : 'selected — click to move'}  [Esc] deselect  [C] focus`
-      : `Units:     ${units.length} on map — click one to select`;
+      ? `Unit:      [${selectedUnit.col}, ${selectedUnit.row}]  ${selectedUnit.domain}${selectedUnit.embarked ? ' (afloat)' : ''}  ` +
+        `${selectedUnit.isMoving ? 'moving' : 'selected — click to move'}  [Esc] deselect  [C] focus`
+      : `Units:     ${units.length} on map — click one to select (blue is amphibious, the pale one a ship)`;
+    const portLine = `Ports:     ${listPorts(map).length}  [D] toggle a dock on the hovered shore cell`;
     const flowLine = flowGoal
       ? `Flow field: goal [${flowGoal.col}, ${flowGoal.row}]  ${flowField.reachedCount} cells in one sweep  ` +
         `— all ${units.length} units marching  [A] re-target  [Esc] clear`
@@ -1302,7 +1447,7 @@ async function start() {
       `Save: [S]  Load: [L]  ${saveStatus}\n` +
       `Minimap fog dim: ${minimapDimExplored    ? 'ON  [1] toggle' : 'OFF  [1] toggle'}\n` +
       `Minimap unexplored: ${minimapHideUnexplored ? 'ON  [2] toggle' : 'OFF  [2] toggle'}\n` +
-      `\n${unitLine}\n${flowLine}\n${hoverLine}`;
+      `\n${unitLine}\n${portLine}\n${flowLine}\n${hoverLine}`;
 
     renderer.render(scene, camera);
     // After the frame, never through it — the canvas keeps its MSAA.

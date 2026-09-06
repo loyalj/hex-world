@@ -277,6 +277,73 @@ renderer.domElement.addEventListener('click', e => {
 
 ---
 
+## Movement domains, ports, and bridges
+
+Liquids are terrain like any other to the pathfinder — the cost function decides who may enter them. `createDomainCost` writes that decision once per unit type:
+
+```ts
+import { createDomainCost, setPort, hasBridge } from '@loyalj/hex-world';
+
+// Which terrains float a ship. A lava shore is not a harbour, so this is
+// yours to say — world.isWater covers every liquid; pick water alone here.
+const isLiquid = (t: number) => t === TerrainType.Water;
+
+const shipCost = createDomainCost({ map, isLiquid, domain: 'naval' });
+const armyCost = createDomainCost({
+  map, isLiquid, domain: 'land',
+  // Wading a river is slow — unless a road bridges it, in which case the
+  // chunk builder has spanned the cell with a deck and it is an ordinary step.
+  landCost: (col, row) => map.hasRiver(col, row) && !hasBridge(map, col, row) ? 3 : 1,
+});
+const raidersCost = createDomainCost({
+  map, isLiquid, domain: 'amphibious',
+  embarkCost: 1,          // added to every step that crosses the shoreline
+  embarkAt:   'shore',    // or 'ports': only through a port cell
+});
+```
+
+The three domains:
+
+| Domain | Land | Liquid | Shoreline |
+| --- | --- | --- | --- |
+| `land` | `landCost` | impassable | — |
+| `naval` | impassable, except **port** cells to dock in | `navalCost` | a docked ship may only put back out to sea |
+| `amphibious` | `landCost` | `navalCost` | `+ embarkCost`, anywhere or only at ports |
+
+The returned function is a plain `MoveCostFn`, so it drops into `findPath`, `getMovementRange`, and `computeFlowField` unchanged.
+
+### Ports
+
+A port is a shore cell — land with a liquid neighbour — flagged in the map's metadata channel, so it serializes with the map:
+
+```ts
+setPort(map, col, row, true, isLiquid);   // false: not shore, refused
+isPort(map, col, row);
+listPorts(map);
+```
+
+An editor should write the flag through its transaction (`tx.setCellData(col, row, PORT_KEY, true)`) so it is undoable with everything else.
+
+### Embark and disembark on the unit
+
+Give a unit its domain and the liquid predicate and it reports its own crossings:
+
+```ts
+const raiders = new HexUnit({ col, row, domain: 'amphibious', isLiquid });
+raiders.onEmbark    = () => { walker.visible = false; boat.visible = true; };
+raiders.onDisembark = () => { walker.visible = true;  boat.visible = false; };
+// or, on the manager, for every unit at once:
+unitManager.events.on('unitEmbark', ({ unit, col, row }) => splash(col, row));
+```
+
+`unit.embarked` is set from the spawn cell on the first update (silently — spawning is not a crossing) and flipped at each shoreline, with the callback fired **before** `onCellEnter` for that cell. `isLiquid` also serves as the unit's surface predicate when none is given, so a ship floats at the water surface rather than standing on the sea bed.
+
+### Bridges
+
+Roads and rivers both run from a cell's centre out through its edges, so a road crosses a river *inside* a cell, bank to bank. `riverBanks(map, col, row)` names the banks (`-1` on the two river edges, `0` and `1` elsewhere; `null` at a source, mouth, confluence, or hairpin) and `hasBridge` is true when both banks carry road — the cell the chunk builder spans with a deck, and the cell your land price should treat as dry. `generateRoads` crosses river cells by default; `bridges: false` stops at the bank.
+
+---
+
 ## BFS visibility radius
 
 `getVisibleCells` is a simple hop count — it doesn't use a cost function. Every step from the center counts as 1, regardless of terrain. Use it to decide which cells a unit can "see" for fog of war, detection range, or ability targeting.

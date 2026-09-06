@@ -47,13 +47,19 @@
     "build": "vite build && tsc --emitDeclarationOnly --project tsconfig.build.json",
     "build:demo": "vite build --config vite.demo.config.ts",
     "docs": "typedoc",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:visual": "vitest run --config vitest.visual.config.ts",
+    "test:visual:update": "node tests/visual/update.mjs"
   },
   "peerDependencies": {
     "three": ">=0.150.0"
   },
   "devDependencies": {
+    "@types/pngjs": "^6.0.5",
     "@types/three": "^0.184.1",
+    "pixelmatch": "^6.0.0",
+    "playwright": "^1.63.0",
+    "pngjs": "^7.0.0",
     "three": "^0.184.0",
     "typedoc": "^0.28.19",
     "typescript": "^6.0.3",

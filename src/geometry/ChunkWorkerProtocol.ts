@@ -37,6 +37,8 @@ export interface ChunkWorkerGeometryOptions {
   riverbedTerrain?:     number;
   riverBankFlare?:      number;
   riverbedBlend?:       number;
+  bridges?:             boolean;
+  bridgeTerrain?:       number;
   ambientOcclusion?:    boolean | AmbientOcclusionOptions;
 }
 

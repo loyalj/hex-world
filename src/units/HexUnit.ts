@@ -4,6 +4,7 @@ import { hexToWorld } from '../math/HexLayout.js';
 import type { HexCoord } from '../math/HexCoord.js';
 import { hexToOffset, offsetToHex } from '../math/HexCoord.js';
 import { cellSurfaceY, type CellSurfaceOptions } from '../map/CellSurface.js';
+import type { MovementDomain } from '../pathfinding/MovementDomains.js';
 
 export interface HexUnitOptions {
   col: number;
@@ -29,6 +30,20 @@ export interface HexUnitOptions {
    * water surface instead of the seabed. Defaults match the default terrain.
    */
   surfaceOptions?: CellSurfaceOptions;
+  /**
+   * Where this unit can go — see {@link MovementDomain}. Informational on the
+   * unit itself (the cost function you hand `findPath` is what enforces it —
+   * build one with `createDomainCost`), but it is what a game reads to pick
+   * that cost function, and what the editor and save files carry. Default 'land'.
+   */
+  domain?: MovementDomain;
+  /**
+   * Which terrains are liquid, for embark/disembark detection and for riding
+   * the water surface: when set and `surfaceOptions.isWater` is not, it is
+   * used as that predicate too, so a ship floats at the surface instead of
+   * standing on the sea bed. `HexWorld.isWater` is the usual value.
+   */
+  isLiquid?: (terrain: number) => boolean;
 }
 
 export class HexUnit {
@@ -41,6 +56,17 @@ export class HexUnit {
   readonly heightOffset:  number;
   readonly fogRevealRange: number;
   readonly surfaceOptions: CellSurfaceOptions;
+  readonly domain: MovementDomain;
+  readonly isLiquid: ((terrain: number) => boolean) | null;
+
+  /**
+   * True while the unit stands on a liquid cell — afloat. Set from the start
+   * cell on the first {@link update} and flipped as the unit crosses a
+   * shoreline, with {@link onEmbark} / {@link onDisembark} fired at the
+   * crossing. Always false for a unit with no `isLiquid` predicate.
+   */
+  embarked = false;
+  private _embarkedKnown = false;
 
   /** Smoothly interpolated world-space X. Read by UnitManager each frame. */
   worldX = 0;
@@ -70,6 +96,13 @@ export class HexUnit {
    * flag when "arrived" has to mean *arrived* (turn resolution, triggers).
    */
   onMoveEnd?: (completed: boolean) => void;
+  /**
+   * Called when the unit steps from land onto a liquid cell — swap the
+   * walker for the boat here. Fires before `onCellEnter` for that cell.
+   */
+  onEmbark?: (col: number, row: number) => void;
+  /** Called when the unit steps from a liquid cell onto land. Fires before `onCellEnter`. */
+  onDisembark?: (col: number, row: number) => void;
 
   private _path: HexCoord[] = [];
   private _segIdx  = 0;    // current segment: path[_segIdx] → path[_segIdx+1]
@@ -85,7 +118,29 @@ export class HexUnit {
     this.travelSpeed   = opts.travelSpeed   ?? 4;
     this.heightOffset  = opts.heightOffset  ?? 0;
     this.fogRevealRange = opts.fogRevealRange ?? 0;
-    this.surfaceOptions = opts.surfaceOptions ?? {};
+    this.domain         = opts.domain ?? 'land';
+    this.isLiquid       = opts.isLiquid ?? null;
+    const surface = opts.surfaceOptions ?? {};
+    // A unit that knows what floats rides the surface of it by default.
+    this.surfaceOptions = opts.isLiquid && !surface.isWater ? { ...surface, isWater: opts.isLiquid } : surface;
+  }
+
+  /**
+   * Bring `embarked` in line with the cell the unit is on. The first call
+   * (spawn) sets it silently; later ones fire the transition callbacks.
+   */
+  private _syncEmbarked(map: HexMap): void {
+    if (!this.isLiquid) return;
+    const afloat = this.isLiquid(map.getTerrain(this.col, this.row));
+    if (!this._embarkedKnown) {
+      this._embarkedKnown = true;
+      this.embarked = afloat;
+      return;
+    }
+    if (afloat === this.embarked) return;
+    this.embarked = afloat;
+    if (afloat) this.onEmbark?.(this.col, this.row);
+    else        this.onDisembark?.(this.col, this.row);
   }
 
   /**
@@ -118,6 +173,7 @@ export class HexUnit {
   /** Call once per frame. Updates worldX/Y/Z and facing. deltaTime in seconds. */
   update(dt: number, map: HexMap, layout: HexLayout): void {
     if (!this.isMoving) {
+      this._syncEmbarked(map);
       this._snapToCell(map, layout);
       return;
     }
@@ -137,6 +193,7 @@ export class HexUnit {
       const oc = hexToOffset(arrived);
       this.col = oc.col;
       this.row = oc.row;
+      this._syncEmbarked(map);
       this.onCellEnter?.(this.col, this.row);
 
       this._segIdx++;

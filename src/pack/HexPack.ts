@@ -21,6 +21,7 @@ import {
   type ScatterAsset,
   type ScatterAssetRegistry,
 } from '../geometry/ScatterTypes.js';
+import { resolveScatterAssets, type ScatterAssetDescriptor } from '../geometry/ScatterAssets.js';
 import {
   deserializeMap,
   deserializeMapJSON,
@@ -55,6 +56,8 @@ export interface HexPackManifest {
   terrainDescriptors: TerrainDescriptor[];
   liquidDescriptors?: LiquidTypeDescriptor[];
   scatterDescriptors?: ScatterDescriptor[];
+  /** Shape recipes and material behaviour for the scatter `assetId`s. Models still ship as files under `models/`. */
+  scatterAssets?: ScatterAssetDescriptor[];
   /** Resource types the packed maps' `cellData` resource entries refer to. */
   resourceDescriptors?: ResourceDescriptor[];
   /** Faction roster the packed maps' `cellData` ownership entries refer to. */
@@ -97,7 +100,12 @@ export interface HexPackage {
   liquidDescriptors:   LiquidTypeDescriptor[];
   liquidMaterials:     Map<string, LiquidMaterialSet>;
   scatterDescriptors:  ScatterDescriptor[];
-  /** Populated only when a gltfLoader is supplied and the pack contains model assets. */
+  scatterAssets:       ScatterAssetDescriptor[];
+  /**
+   * Resolved from `scatterAssets` (shapes need nothing; models need a
+   * `gltfLoader`) — or, for packs without asset descriptors, from the GLB
+   * files alone when a loader is supplied. Empty when neither applies.
+   */
   scatterDefinitions:  ScatterDefinition[];
   /** Resource types carried by the pack — hand to a `ResourceLayer`. Empty when the pack defines none. */
   resourceDescriptors: ResourceDescriptor[];
@@ -141,6 +149,7 @@ export async function loadHexPack(
   const terrainDescriptors  = manifest.terrainDescriptors;
   const liquidDescriptors   = manifest.liquidDescriptors   ?? DEFAULT_LIQUID_DESCRIPTORS;
   const scatterDescriptors  = manifest.scatterDescriptors  ?? [];
+  const scatterAssets       = manifest.scatterAssets       ?? [];
   const resourceDescriptors = manifest.resourceDescriptors ?? [];
   const factions            = manifest.factions            ?? [];
   const assetPaths          = manifest.assets ?? {};
@@ -167,9 +176,43 @@ export async function loadHexPack(
   // 6. Build liquid materials (fully derived from descriptor colors)
   const liquidMaterials = new Map(liquidDescriptors.map(d => [d.id, resolveLiquidMaterials(d)]));
 
-  // 7. Load scatter GLB models and resolve definitions
+  // Liquid predicate: for water surfaces on the maps below, and for the
+  // scatter `shore` rule, which needs the same answer.
+  const liquidIndices = new Set(
+    terrainDescriptors.filter(d => d.liquidType != null || d.isWater).map(d => d.index),
+  );
+  const isWater = (t: number) => liquidIndices.has(t);
+
+  // 7. Resolve scatter assets and definitions. Asset descriptors carry
+  // shapes inline and name their models; a pack from before descriptors
+  // existed names GLBs directly from the tiers, and still loads that way.
   const scatterDefinitions: ScatterDefinition[] = [];
-  if (scatterDescriptors.length > 0 && opts.gltfLoader) {
+  if (scatterDescriptors.length > 0 && scatterAssets.length > 0) {
+    const modelIds = scatterAssets.filter(a => a.type === 'model').map(a => a.id);
+    if (modelIds.length > 0 && !opts.gltfLoader) {
+      throw new Error(`loadHexPack: pack has model assets (${modelIds.join(', ')}) but no gltfLoader was supplied`);
+    }
+    const models = new Map<string, THREE.BufferGeometry>();
+    await Promise.all(modelIds.map(async assetId => {
+      const path = assetPaths[assetId];
+      if (!path) throw new Error(`loadHexPack: no asset path for scatter model "${assetId}"`);
+      const data = files[path];
+      if (!data) throw new Error(`loadHexPack: missing file "${path}" for asset "${assetId}"`);
+      const url = URL.createObjectURL(new Blob([toArrayBuffer(data)], { type: 'model/gltf-binary' }));
+      try {
+        const gltf = await opts.gltfLoader!.loadAsync(url);
+        const mesh = extractFirstMesh(gltf.scene);
+        if (!mesh) throw new Error(`loadHexPack: no mesh found in GLTF asset "${assetId}"`);
+        models.set(assetId, mesh.geometry);
+      } finally {
+        URL.revokeObjectURL(url);
+      }
+    }));
+    const scatterRegistry = resolveScatterAssets(scatterAssets, models);
+    for (const desc of scatterDescriptors) {
+      scatterDefinitions.push(resolveScatterDefinition(desc, scatterRegistry, { isLiquid: isWater }));
+    }
+  } else if (scatterDescriptors.length > 0 && opts.gltfLoader) {
     const scatterRegistry: ScatterAssetRegistry = new Map();
 
     const modelIds = new Set(scatterDescriptors.flatMap(d => d.tiers.flat().map(v => v.assetId)));
@@ -191,16 +234,12 @@ export async function loadHexPack(
     }));
 
     for (const desc of scatterDescriptors) {
-      scatterDefinitions.push(resolveScatterDefinition(desc, scatterRegistry));
+      scatterDefinitions.push(resolveScatterDefinition(desc, scatterRegistry, { isLiquid: isWater }));
     }
   }
 
   // 8. Deserialize maps
   const maps = new Map<string, HexMap>();
-  const liquidIndices = new Set(
-    terrainDescriptors.filter(d => d.liquidType != null || d.isWater).map(d => d.index),
-  );
-  const isWater = (t: number) => liquidIndices.has(t);
 
   const entriesToLoad = (manifest.maps ?? []).filter(
     e => !opts.mapIds || opts.mapIds.includes(e.id),
@@ -218,7 +257,7 @@ export async function loadHexPack(
   return {
     terrainDescriptors, terrainDefinitions, terrainTexture, terrainMaterial,
     liquidDescriptors, liquidMaterials,
-    scatterDescriptors, scatterDefinitions,
+    scatterDescriptors, scatterAssets, scatterDefinitions,
     resourceDescriptors, factions,
     maps,
   };
@@ -247,6 +286,8 @@ export interface ExportHexPackOptions {
   terrainDescriptors: TerrainDescriptor[];
   liquidDescriptors?: LiquidTypeDescriptor[];
   scatterDescriptors?: ScatterDescriptor[];
+  /** Shape recipes and material behaviour for the scatter `assetId`s. Travels in the manifest and in each JSON map. */
+  scatterAssets?: ScatterAssetDescriptor[];
   /** Resource types the packed maps use. Travels in the manifest and in each JSON map. */
   resourceDescriptors?: ResourceDescriptor[];
   /** Faction roster the packed maps' ownership refers to. Travels in the manifest and in each JSON map. */
@@ -300,6 +341,7 @@ export async function exportHexPack(opts: ExportHexPackOptions): Promise<Blob> {
     if (format === 'json') {
       const json = serializeMapJSON(map, metadata ?? {}, {
         scatterDescriptors:  opts.scatterDescriptors,
+        scatterAssets:       opts.scatterAssets,
         terrainDescriptors:  opts.terrainDescriptors,
         liquidDescriptors:   opts.liquidDescriptors,
         resourceDescriptors: opts.resourceDescriptors,
@@ -322,6 +364,7 @@ export async function exportHexPack(opts: ExportHexPackOptions): Promise<Blob> {
     terrainDescriptors: opts.terrainDescriptors,
     ...(opts.liquidDescriptors?.length ? { liquidDescriptors:  opts.liquidDescriptors  } : {}),
     ...(opts.scatterDescriptors?.length? { scatterDescriptors: opts.scatterDescriptors } : {}),
+    ...(opts.scatterAssets?.length     ? { scatterAssets:      opts.scatterAssets      } : {}),
     ...(opts.resourceDescriptors?.length?{ resourceDescriptors: opts.resourceDescriptors } : {}),
     ...(opts.factions?.length          ? { factions:           opts.factions            } : {}),
     ...(Object.keys(assetPaths).length ? { assets:             assetPaths              } : {}),

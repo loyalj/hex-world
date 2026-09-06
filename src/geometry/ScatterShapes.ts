@@ -49,7 +49,7 @@ export const BUSH_COLOR = 0x5f8438;
  * free of a `three/examples` dependency, and because this only ever has to
  * handle the three attributes a scatter mesh uses.
  */
-function mergeColored(parts: { geometry: THREE.BufferGeometry; color: THREE.Color }[]): THREE.BufferGeometry {
+export function mergeColored(parts: { geometry: THREE.BufferGeometry; color: THREE.Color }[]): THREE.BufferGeometry {
   // Flattening the index is what lets three separate primitives share one
   // buffer without their triangles referring into each other's vertices.
   // PolyhedronGeometry arrives non-indexed already, so only real conversions
@@ -88,7 +88,7 @@ function mergeColored(parts: { geometry: THREE.BufferGeometry; color: THREE.Colo
 }
 
 /** Lift a geometry so its lowest vertex sits at y = 0. */
-function seatOnGround(geometry: THREE.BufferGeometry): THREE.BufferGeometry {
+export function seatOnGround(geometry: THREE.BufferGeometry): THREE.BufferGeometry {
   geometry.computeBoundingBox();
   geometry.translate(0, -geometry.boundingBox!.min.y, 0);
   geometry.computeBoundingSphere();
@@ -103,7 +103,7 @@ function seatOnGround(geometry: THREE.BufferGeometry): THREE.BufferGeometry {
  * radius, not at the radius, so a crown composed by hand always comes out short
  * of its arithmetic by some figure nobody should have to know.
  */
-function fitHeight(geometry: THREE.BufferGeometry, height: number): THREE.BufferGeometry {
+export function fitHeight(geometry: THREE.BufferGeometry, height: number): THREE.BufferGeometry {
   geometry.computeBoundingBox();
   const bb   = geometry.boundingBox!;
   const span = bb.max.y - bb.min.y;
@@ -201,4 +201,41 @@ export function createBushGeometry(size = 0.7, opts: ScatterShapeOptions = {}): 
  */
 export function createPineGeometry(height = 2.0, radialSegments = 7): THREE.BufferGeometry {
   return fitHeight(new THREE.ConeGeometry(height * 0.21, height, radialSegments), height);
+}
+
+/** Default smoke colour: a warm ash grey that reads dark against the sky. */
+export const SMOKE_COLOR = 0x8a8683;
+
+/**
+ * A smoke plume: a column of puffs that swell and drift as they rise, for the
+ * rim of a volcano (see `applyVolcanoes` and its `volcanoSmokeLayer`).
+ *
+ * Vertex-coloured from a darker base to a paler crown so a single flat
+ * material shades it, and merged into one geometry so it instances like any
+ * other scatter. It is a static shape — the drift is baked into the offsets,
+ * and `WindSway` bends the top of it with the trees.
+ *
+ * @param height Overall height in world units, ground to the top puff.
+ */
+export function createSmokeGeometry(height = 2.4, color: THREE.ColorRepresentation = SMOKE_COLOR): THREE.BufferGeometry {
+  const base = new THREE.Color(color);
+  const r0   = height * 0.085;
+  // Each puff: relative size, height along the column, and a sideways drift
+  // that grows with height so the plume leans instead of standing rigid.
+  const puffs = [
+    { s: 0.55, y: 0.06, x:  0.00, z:  0.00, l: 0.55 },
+    { s: 0.75, y: 0.24, x:  0.04, z: -0.02, l: 0.68 },
+    { s: 0.95, y: 0.46, x:  0.11, z:  0.03, l: 0.82 },
+    { s: 1.15, y: 0.70, x:  0.20, z: -0.04, l: 0.94 },
+    { s: 1.30, y: 0.92, x:  0.31, z:  0.05, l: 1.00 },
+  ].map(p => {
+    const g = new THREE.IcosahedronGeometry(r0 * p.s, 1);
+    g.scale(1, 0.8, 1);
+    g.translate(p.x * height, p.y * height, p.z * height);
+    return { geometry: g, color: base.clone().multiplyScalar(p.l) };
+  });
+
+  const geometry = mergeColored(puffs);
+  for (const p of puffs) p.geometry.dispose();
+  return fitHeight(geometry, height);
 }

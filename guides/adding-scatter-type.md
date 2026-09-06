@@ -197,6 +197,58 @@ The binary format (`serializeMap` / `deserializeMap`) stores only cell data; des
 
 ---
 
+## 8. Scatter as data: recipes and asset descriptors
+
+Everything above builds geometry in code. The data path does the same job from JSON, so a plant composed in an editor survives a save and a `.hexpack` with its shape **and** its behaviour:
+
+```ts
+import { resolveScatterAssets, resolveScatterDefinition, PALM_RECIPE } from '@loyalj/hex-world';
+import type { ScatterAssetDescriptor, ScatterDescriptor } from '@loyalj/hex-world';
+
+const assets: ScatterAssetDescriptor[] = [{
+  id: 'palm', type: 'shape',
+  recipe: PALM_RECIPE,                                        // or your own parts, below
+  material: { doubleSide: true, windSway: true, scatterTexture: 0.6 },
+}];
+const descriptors: ScatterDescriptor[] = [{
+  id: 'palms', name: 'Palms', layerIndex: 0, tiltStrength: 0.12,
+  placement: { shore: true, maxElevation: 2 },                 // beaches only
+  tiers: [[{ assetId: 'palm', yOffset: 0 }],                   // dense cells
+          [{ assetId: 'palm', yOffset: 0, scale: 0.8 }],       // medium
+          [{ assetId: 'palm', yOffset: 0, scale: 0.6 }]],      // sparse
+}];
+
+const registry    = resolveScatterAssets(assets);
+const definitions = descriptors.map(d => resolveScatterDefinition(d, registry, { isLiquid: world.isWater }));
+world.setScatterDefinitions(definitions);   // rebuilds every loaded chunk's scatter in place
+```
+
+### Recipes
+
+A `ScatterRecipe` is an overall `height` and a list of parts. Each part is a primitive (`cone`, `sphere`, `lobe`, `box`, `cylinder`, `segment`, `frond`, `rock`) with a `size` (proportions — the whole shape is fitted to `height`), an offset, an optional rotation, a colour, and a `role`. Roles matter: `attachSeasonalTint` finds foliage by colour, and a recipe's first `canopy` part is the summer reference it is given, which is how a recipe broadleaf turns gold while its trunk does not.
+
+Two primitives and one modifier cover most plants that are not blobs:
+
+- `segment` is a cylinder bent by `bend` degrees — a leaning trunk.
+- `frond` is a tapered blade drooping by `bend` — pair it with a `doubleSide` material.
+- `repeat` stamps a part around the Y axis: `{ count, radius, droop, jitter }`. Fronds around a crown, branches around a dead tree, leaves around an agave. Jitter is deterministic per recipe.
+
+`PINE_RECIPE`, `BROADLEAF_RECIPE`, `BUSH_RECIPE`, `ROCK_RECIPE`, `SMOKE_RECIPE`, and `PALM_RECIPE` are the built-ins as data; `buildShapeGeometry(recipe, scale)` is what the resolver calls.
+
+### Material descriptors
+
+`ScatterMaterialDescriptor` names the behaviour the attach calls in this guide add by hand: `windSway` (`true` or `WindSwayOptions`), `seasonalTint` (`true` or tuning), `scatterTexture` strength, `snow: false` to keep a plume bare, `opacity`, `doubleSide`, and `rock` for the strata-banded stone material. Haze and snow are still attached by `HexWorld`, which now skips snow where a descriptor said no.
+
+### Placement and density
+
+`placement` adds `minElevation` / `maxElevation`, `shore` (a liquid neighbour), and `avoidRivers` to `allowedTerrains`; `thresholds` gives a definition its own density curve in place of the shared 40 / 60 / 80 % table. A `scale` on a tier variant sizes one asset three ways.
+
+### Where it goes
+
+`serializeMapJSON` and `exportHexPack` take `scatterAssets` beside `scatterDescriptors`, and `loadHexPack` resolves shape assets with no model loader at all. `renderScatterThumbnail(asset)` draws one instance into a canvas for a palette swatch. The editor's **Scatter Builder** is a UI over exactly these types: templates, a parts composer with a live preview, sizes per density, placement rules, and behaviour toggles, pushed to the map as you edit.
+
+---
+
 ## Quick reference
 
 | Task | API |

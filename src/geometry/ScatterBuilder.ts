@@ -4,14 +4,15 @@ import type { HexLayout } from '../math/HexLayout.js';
 import { hexToWorld, hexCorners } from '../math/HexLayout.js';
 import { sampleNoise } from '../math/Noise.js';
 import type { HexHashGrid } from './HexHashGrid.js';
-import type { ScatterDefinition, ScatterLayerConfig, FeatureCollection } from './ScatterTypes.js';
+import type { ScatterThresholds, ScatterDefinition, ScatterLayerConfig, FeatureCollection } from './ScatterTypes.js';
 import type { ChunkBounds } from './HexChunk.js';
 import { DEFAULT_WATER_TERRAIN_INDEX } from './TerrainTypes.js';
 import { ELEVATION_SCALE } from '../map/HexCell.js';
 
 // Tutorial threshold table: index = level-1, values = per-tier hash cutoffs.
 // Tier 0 = highest density variant, tier 2 = lowest density variant.
-const FEATURE_THRESHOLDS = [
+/** The shared density curve — see `ScatterThresholds` for the reading. */
+export const FEATURE_THRESHOLDS: ScatterThresholds = [
   [0.0, 0.0, 0.4],  // level 1: only tier-2 variant, 40% chance
   [0.0, 0.4, 0.6],  // level 2: tier-1 at 0–0.4, tier-2 at 0.4–0.6
   [0.4, 0.6, 0.8],  // level 3: tier-0 at 0–0.4, tier-1 at 0.4–0.6, tier-2 at 0.6–0.8
@@ -64,9 +65,11 @@ function pickFromLayer(
   level: number,
   spawnHash: number,
   choiceHash: number,
+  table: ScatterThresholds = FEATURE_THRESHOLDS,
 ): { tierIdx: number; variantIdx: number } | null {
   if (level <= 0) return null;
-  const thresholds = FEATURE_THRESHOLDS[level - 1];
+  const thresholds = table[Math.min(level, table.length) - 1];
+  if (!thresholds) return null;
   for (let i = 0; i < thresholds.length; i++) {
     if (spawnHash < thresholds[i]) {
       const tier = tiers[i];
@@ -111,7 +114,7 @@ function addSlot(
   for (const def of eligibleDefs) {
     const level = map.getFeatureLevel(col, row, def.layerIndex);
     const sh    = spawnHashForDef(hash, def.layerIndex, hashGrid, rawX, rawZ);
-    const pick  = pickFromLayer(def.tiers, level, sh, hash.d);
+    const pick  = pickFromLayer(def.tiers, level, sh, hash.d, def.thresholds);
     if (pick && sh < winnerHash) {
       winnerHash    = sh;
       winnerDef     = def;

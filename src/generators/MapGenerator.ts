@@ -8,6 +8,8 @@ import { applyErosionSteps } from './ErosionPass.js';
 import type { ErosionOptions } from './ErosionPass.js';
 import { applyMountainRanges } from './MountainRangePass.js';
 import type { MountainRangeOptions } from './MountainRangePass.js';
+import { applyVolcanoes } from './VolcanoPass.js';
+import type { VolcanoOptions } from './VolcanoPass.js';
 import { applyCoastShaping } from './CoastShapingPass.js';
 import type { CoastShapingOptions } from './CoastShapingPass.js';
 import { simulateClimateSteps } from './ClimateSimulator.js';
@@ -27,7 +29,7 @@ import type { ClimateData } from '../season/ClimateData.js';
  * All sub-configs are optional — each phase falls back to its own defaults.
  */
 export interface MapGeneratorConfig
-  extends RegionLayoutOptions, ChunkTerrainOptions, CoastShapingOptions, MountainRangeOptions, ErosionOptions {
+  extends RegionLayoutOptions, ChunkTerrainOptions, CoastShapingOptions, MountainRangeOptions, VolcanoOptions, ErosionOptions {
   climate?:     ClimateSimulatorOptions;
   temperature?: TemperatureModelOptions;
   biomes?:      BiomeAssignerOptions;
@@ -69,9 +71,10 @@ const PASSES: ReadonlyArray<readonly [string, number]> = [
   ['coast',         0.02],
   ['ranges',        0.02],
   ['erosion',       0.10],
-  ['moisture',      0.40],
+  ['moisture',      0.38],
   ['temperature',   0.05],
   ['biomes',        0.05],
+  ['volcanoes',     0.02],
   ['rivers',        0.08],
   ['roads',         0.02],
   ['waterSurfaces', 0.05],
@@ -80,7 +83,7 @@ const PASSES: ReadonlyArray<readonly [string, number]> = [
 /**
  * Runs the full procedural generation pipeline in order:
  *   RegionLayout → ChunkTerrain → Erosion →
- *   ClimateSimulator → TemperatureModel → BiomeAssigner →
+ *   ClimateSimulator → TemperatureModel → BiomeAssigner → Volcanoes →
  *   ClimateRivers → Roads
  *
  * The caller provides an already-constructed (and cleared) HexMap.
@@ -166,8 +169,16 @@ export function* generateMapSteps(
   assignBiomes(map, temperature, moisture, { ...config.biomes, elevationMax: elevMax });
   yield event(1); finishPass();
 
-  // rivers
-  generateClimateRivers(map, moisture, { ...config.rivers, elevationMax: elevMax }, rand);
+  // volcanoes (no-op, consuming no randomness, unless volcanoes is set).
+  // After biomes so the ash survives the repaint; before rivers so they can
+  // be told where the pools are.
+  applyVolcanoes(map, { ...config, elevationMax: elevMax }, rand);
+  yield event(1); finishPass();
+
+  // rivers — a caldera pool is a river's end, never its bed.
+  const stopTerrains = [...(config.rivers?.stopTerrains ?? [])];
+  if (config.volcanoLavaTerrain !== undefined && (config.volcanoes ?? 0) > 0) stopTerrains.push(config.volcanoLavaTerrain);
+  generateClimateRivers(map, moisture, { ...config.rivers, stopTerrains, elevationMax: elevMax }, rand);
   yield event(1); finishPass();
 
   // roads

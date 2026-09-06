@@ -33,6 +33,7 @@ import { Wind, setMaterialWind, type WindOptions } from '../weather/Wind.js';
 import { SkyDome, averageTerrainColor, type SkyDomeOptions } from '../sky/SkyDome.js';
 import { GodRays, type GodRaysOptions } from '../sky/GodRays.js';
 import { MapSkirt, type MapSkirtMeshOptions } from '../geometry/MapSkirt.js';
+import { NO_SNOW_KEY } from '../geometry/ScatterAssets.js';
 import { attachAtmosphere } from '../sky/Atmosphere.js';
 import { ClimateData } from '../season/ClimateData.js';
 import { SeasonCycle, type SeasonOptions } from '../season/SeasonCycle.js';
@@ -445,7 +446,7 @@ export class HexWorld {
    */
   private readonly roadMaterial: THREE.ShaderMaterial;
   /** Scatter definitions this world streams, so their materials can be hazed too. */
-  private readonly scatterDefinitions: ScatterDefinition[];
+  private scatterDefinitions: ScatterDefinition[];
   /** Kept so a skirt built later matches the terrain's perturbation exactly. */
   private readonly geometryOptions: ChunkGeometryOptions | undefined;
   /** The default lights, kept so the day/night cycle can drive them. */
@@ -1037,6 +1038,23 @@ export class HexWorld {
     for (const mat of this.scatterMaterials()) yield mat;
   }
 
+  /**
+   * Replace the scatter definitions at runtime and rebuild the scatter of
+   * every loaded chunk. New materials get the haze, snow, season, and wind
+   * bindings the originals were given at construction, so a definition
+   * added from an editor's scatter builder looks like one from the start.
+   */
+  setScatterDefinitions(definitions: ScatterDefinition[]): void {
+    this.scatterDefinitions = definitions;
+    this.chunks.setScatterDefinitions(definitions);
+    for (const mat of this.scatterMaterials()) {
+      if (this._sky) attachAtmosphere(mat);
+      if (this._seasons && !mat.userData[NO_SNOW_KEY]) attachSnow(mat);
+    }
+    if (this._seasons) this.applySeasonMaterials();
+    if (this.windEnabled) this.applyWind();
+  }
+
   /** Distinct materials across every scatter definition's tiers. */
   private *scatterMaterials(): Generator<THREE.Material> {
     const seen = new Set<THREE.Material>();
@@ -1273,7 +1291,7 @@ export class HexWorld {
     });
 
     // Stock three materials have no snow path of their own, so inject one.
-    for (const mat of this.scatterMaterials()) attachSnow(mat);
+    for (const mat of this.scatterMaterials()) if (!mat.userData[NO_SNOW_KEY]) attachSnow(mat);
     this.applySeasonMaterials();
     this.refreshPrecipitationMask();
 

@@ -11,6 +11,13 @@ export interface RoadGeneratorOptions {
   /** Terrain index(es) treated as impassable water. Default [5] (built-in Water). */
   waterTerrainIndex?: number | number[];
   /**
+   * Let roads cross river cells. A road never shares an edge with a river,
+   * but it may pass through a river cell from bank to bank, and the chunk
+   * builder spans that crossing with a deck (see `hasBridge`). Default true;
+   * false stops a road at the bank instead.
+   */
+  bridges?: boolean;
+  /**
    * Hex orientation providing the edge-index → direction mapping. Must match
    * the layout used for rendering or road edges point at the wrong neighbors.
    * Default POINTY_TOP. Note: the offset-grid traversal (odd-r rows) assumes a
@@ -28,6 +35,7 @@ function traceRoad(
   maxElevDiff: number,
   waterTerrains: Set<number>,
   edgeDirs: readonly number[],
+  bridges: boolean,
 ): void {
   let c = col, r = row;
   for (let s = 0; s < steps; s++) {
@@ -38,6 +46,7 @@ function traceRoad(
     if (waterTerrains.has(map.getTerrain(nb.col, nb.row))) break;
     if (Math.abs(map.getElevation(c, r) - map.getElevation(nb.col, nb.row)) > maxElevDiff) break;
     if (map.hasRiverThroughEdge(c, r, faceIdx)) break;
+    if (!bridges && map.hasRiver(nb.col, nb.row)) break;
     const oppFace = (faceIdx + 3) % 6;
     map.setRoad(c, r, faceIdx, true);
     map.setRoad(nb.col, nb.row, oppFace, true);
@@ -48,7 +57,8 @@ function traceRoad(
 
 /**
  * Lays a grid of horizontal and vertical roads across the map.
- * Roads break at water, steep elevation changes, and river crossings.
+ * Roads break at water, steep elevation changes, and any edge a river runs
+ * through; they cross river cells bank to bank unless `bridges` is off.
  */
 export function generateRoads(map: HexMap, opts: RoadGeneratorOptions = {}): void {
   const gridSpacing = opts.gridSpacing     ?? 24;
@@ -56,6 +66,7 @@ export function generateRoads(map: HexMap, opts: RoadGeneratorOptions = {}): voi
   const raw         = opts.waterTerrainIndex ?? DEFAULT_WATER_TERRAIN_INDEX;
   const waterTerrains = new Set(Array.isArray(raw) ? raw : [raw]);
   const edgeDirs    = (opts.orientation ?? POINTY_TOP).edgeDirections;
+  const bridges     = opts.bridges ?? true;
 
   // Derive face indices from the orientation's edge mapping instead of
   // hardcoding them, so a different edgeDirections ordering still traces
@@ -73,11 +84,11 @@ export function generateRoads(map: HexMap, opts: RoadGeneratorOptions = {}): voi
 
   // Horizontal roads — eastward along the row
   for (let row = gridSpacing / 2; row < map.height; row += gridSpacing) {
-    traceRoad(map, 0, row, () => eastFace, map.width, maxElevDiff, waterTerrains, edgeDirs);
+    traceRoad(map, 0, row, () => eastFace, map.width, maxElevDiff, waterTerrains, edgeDirs, bridges);
   }
 
   // Vertical roads: alternating SE/SW keeps the path on the same column (odd-r offset).
   for (let col = gridSpacing / 2; col < map.width; col += gridSpacing) {
-    traceRoad(map, col, 0, r => r % 2 === 0 ? southEastFace : southWestFace, map.height, maxElevDiff, waterTerrains, edgeDirs);
+    traceRoad(map, col, 0, r => r % 2 === 0 ? southEastFace : southWestFace, map.height, maxElevDiff, waterTerrains, edgeDirs, bridges);
   }
 }

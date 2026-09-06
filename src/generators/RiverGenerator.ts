@@ -32,6 +32,13 @@ export interface ClimateRiverOptions {
   /** Terrain index assigned to lake cells. Default 5 (built-in Water). */
   waterTerrainIndex?: number;
   /**
+   * Further terrain indices a river ends at on reaching them — other liquids
+   * (a lava caldera, an acid pool) that should take a river as an estuary
+   * rather than have a channel carved across them. The lake terrain is
+   * always a stop. Origins are also kept one cell clear of them.
+   */
+  stopTerrains?: Iterable<number>;
+  /**
    * Hex orientation providing the edge-index → direction mapping. Must match
    * the layout used for rendering or river edges point at the wrong neighbors.
    * Default POINTY_TOP.
@@ -48,6 +55,7 @@ function traceClimateRiver(
   lakeProbability: number,
   rand: () => number,
   waterIdx: number,
+  stops: ReadonlySet<number>,
   EDGE_DIRS: readonly number[],
 ): number {
   let c = startCol, r = startRow;
@@ -59,7 +67,7 @@ function traceClimateRiver(
   for (let step = 0; step < maxSteps; step++) {
     // Reached open water or a lake formed by an earlier trace (elevated lakes
     // have floor >= 0, so the terrain check is required too).
-    if (map.getElevation(c, r) < 0 || map.getTerrain(c, r) === waterIdx) break;
+    if (map.getElevation(c, r) < 0 || stops.has(map.getTerrain(c, r))) break;
 
     const curElev = map.getElevation(c, r);
 
@@ -167,6 +175,7 @@ export function generateClimateRivers(
   const elevMax   = opts.elevationMax         ?? 12;
   const waterIdx  = opts.waterTerrainIndex    ?? DEFAULT_WATER_TERRAIN_INDEX;
   const edgeDirs  = (opts.orientation ?? POINTY_TOP).edgeDirections;
+  const stops     = new Set<number>([waterIdx, ...(opts.stopTerrains ?? [])]);
 
   // Build weighted origin list using additive ifs (matching tutorial exactly)
   const origins: [number, number][] = [];
@@ -199,13 +208,14 @@ export function generateClimateRivers(
     for (let d = 0; d < 6; d++) {
       const nb = offsetNeighbor(col, row, d);
       if (!map.inBounds(nb.col, nb.row)) continue;
-      if (map.getElevation(nb.col, nb.row) < 0 || map.hasRiver(nb.col, nb.row)) {
+      if (map.getElevation(nb.col, nb.row) < 0 || map.hasRiver(nb.col, nb.row) ||
+          stops.has(map.getTerrain(nb.col, nb.row))) {
         tooClose = true; break;
       }
     }
     if (tooClose) continue;
 
-    budget -= traceClimateRiver(map, col, row, maxSteps, lakePct, rand, waterIdx, edgeDirs);
+    budget -= traceClimateRiver(map, col, row, maxSteps, lakePct, rand, waterIdx, stops, edgeDirs);
   }
 }
 
